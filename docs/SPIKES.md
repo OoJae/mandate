@@ -159,3 +159,45 @@ temporarily unavailable`, leaving the asset sealed in Working Memory but not
 shared. A plain `dkg ka share <name> -c <cg>` afterwards succeeded. Any
 automation must treat share as retryable rather than assuming create-with-share
 is atomic.
+
+---
+
+## S6 — authorship (GREEN)
+
+`POST /api/knowledge-assets/{name}/wm/finalize` returns a real EIP-712
+AuthorAttestation:
+
+```json
+{
+  "assertionUri": "did:dkg:context-graph:0xeD1e…/mandate-grants/assertion/0xeD1e…/grant-s6-ed1eeb",
+  "merkleRoot":   "0xf8530182778518fb6fd883918af6cb29b5b290f777e1abf9dd734c4c148bc7ac",
+  "authorAddress":"0xeD1eeB64CaC09874257F05Fd6B51A55695ad0B69",
+  "schemeVersion": 1,
+  "chainId": "84532",
+  "kav10Address": "0x835F921A0fC8D6365C34A0bB9b37D10C98C1B8c3",
+  "eip712Digest": "0x4ea28ae497e5f7a63760b5a4de1781dfe5672b9683cb2ba8c592626c3fa21709"
+}
+```
+
+`authorAddress` is the grantor's, and is not the producer's.
+
+### S6b — the producer cannot forge it
+
+A seal naming the right author only means something if the other party cannot
+produce one saying the same thing. Attempting exactly that from the producer's
+node, passing Ana's address as `authorAgentAddress`:
+
+```
+500 assertionFinalize: authorAgentAddress 0xeD1eeB64…0B69
+    is not a registered local agent on this node
+```
+
+The node will not sign for an agent whose key it does not hold. Two consequences
+worth stating plainly in the README:
+
+1. The "written by the depicted person, not the renderer" claim is enforced by
+   the node, not merely asserted by the schema.
+2. It only holds because the grantor runs a **separate daemon**. The red-team
+   warning about custodial mode is real — a single node with two registered
+   agents would hold both keys, and the claim would collapse. Mandate uses two
+   `DKG_HOME`s precisely so the producer never has Ana's key.
