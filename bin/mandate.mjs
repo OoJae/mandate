@@ -12,6 +12,7 @@ import * as LP from '../src/livepeer.mjs'
 import { grantToTurtle, stateToTurtle } from '../src/rdf.mjs'
 import { captureConsent } from '../src/consent.mjs'
 import { recordDerivation } from '../src/derivation.mjs'
+import { verifyMedia, CLEAR, TAINTED } from '../src/verify.mjs'
 import { writeFileSync, mkdirSync } from 'node:fs'
 
 const GRANTS_CG = process.env.MANDATE_GRANTS_CG
@@ -287,8 +288,33 @@ async function cmdConsent() {
   if (r.scope) console.log(`  ${r.scope.note}\n`)
 }
 
+/**
+ * The third-party check. Takes a URL and nothing else, and asks neither party.
+ */
+async function cmdVerify() {
+  const url = arg('url')
+  if (!url) { console.log(c.red('\n  --url is required\n')); process.exitCode = 1; return }
+
+  // Whichever node the verifier runs. It has no relationship to the producer.
+  const node = arg('resolver', 'producer') === 'grantor' ? GRANTOR() : PRODUCER()
+  console.log(c.bold('\nThird-party verification\n'))
+  console.log(`  file      ${url.slice(0, 92)}`)
+  console.log(c.dim(`  verifier  ${node.name} — no relationship to the producer\n`))
+
+  const r = await verifyMedia(node, GRANTS_CG, url)
+  console.log(`  sha256    ${r.sha256}`)
+  if (r.ignoredForgeries?.length) {
+    console.log(c.yellow(`  ignored ${r.ignoredForgeries.length} state assertion(s) not authored by the grantor`))
+  }
+  const paint = r.verdict === CLEAR ? c.green : r.verdict === TAINTED ? c.red : c.yellow
+  console.log(paint(`\n  ${r.verdict}`))
+  console.log(`  ${r.reason}\n`)
+  process.exitCode = r.verdict === CLEAR ? 0 : 2
+}
+
 const cmd = process.argv[2]
 const table = {
+  verify: cmdVerify,
   render: cmdRender, status: cmdStatus, 'blast-radius': cmdBlastRadius,
   grant: cmdGrant, revoke: cmdRevoke, consent: cmdConsent,
 }
@@ -301,6 +327,7 @@ ${c.bold('mandate')} — a consent rail for generative media
   consent                   capture a consent clip via a phone link
   render [--execute]        resolve the grant, decide, and only then spend
   revoke --id <grant>       revoke, as the grantor
+  verify --url <media>      check a delivered file from its bytes alone
   blast-radius              everything produced under a grant
 
   render  : --subject --capability --use-class --territory --seconds --at --resolver
