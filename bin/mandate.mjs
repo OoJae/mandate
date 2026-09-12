@@ -11,6 +11,7 @@ import { decide } from '../src/gate.mjs'
 import * as LP from '../src/livepeer.mjs'
 import { grantToTurtle, stateToTurtle } from '../src/rdf.mjs'
 import { captureConsent } from '../src/consent.mjs'
+import { recordDerivation } from '../src/derivation.mjs'
 import { writeFileSync, mkdirSync } from 'node:fs'
 
 const GRANTS_CG = process.env.MANDATE_GRANTS_CG
@@ -106,16 +107,50 @@ async function cmdRender() {
 
   console.log(c.dim('\n  dispatching via run_capability on /api/mcp/raw (no model substitution)…'))
   const client = await LP.connect(LP.RAW)
+  let out
   try {
     const grant = k.grants.find(g => g.id === d.grantId)
-    if (grant?.maxSpendUsd != null) await LP.setSpendCap(client, grant.maxSpendUsd)
-    const out = await LP.runCapability(client, capability, {
-      prompt: arg('prompt', 'A friendly spokesperson speaking to camera.'),
+    // The platform's spend_cap is a second belt only: its pre-flight is
+    // documented against create_media, and we dispatch through run_capability.
+    // The ceiling that actually bound this render was checked in the gate.
+    if (grant?.maxSpendUsd != null) {
+      try { await LP.setSpendCap(client, grant.maxSpendUsd) } catch { /* advisory */ }
+    }
+    out = await LP.runCapability(client, capability, {
       source_url: arg('source-url', undefined),
-    })
-    console.log('\n' + out)
+      inputs: arg('audio-url') ? { image_url: arg('source-url'), audio_url: arg('audio-url') } : undefined,
+      prompt: arg('prompt', undefined),
+      idempotency_key: arg('idempotency-key', undefined),
+    }, { timeout: 700 })
+    console.log('\n' + out.slice(0, 900))
   } finally {
     await client.close()
+  }
+
+  // Eager, transactional derivation. If this fails the render is reported as
+  // FAILED even though the media exists and was billed — we would rather lose a
+  // render than hold an asset the revocation path cannot account for.
+  const mediaUrl = (out.match(/https?:\/\/\S+?\.(?:mp4|webm|mov|png|jpg|jpeg)/i) || [])[0]
+  if (!mediaUrl) {
+    console.log(c.yellow('\n  no media URL in the result — nothing to record.\n'))
+    return
+  }
+  try {
+    const rec = await recordDerivation(GRANTOR(), GRANTS_CG, {
+      outputUrl: mediaUrl,
+      servedCapability: capability,
+      authorizedUnder: d.grantId,
+      billedUsd: estimatedUsd,
+      jobId: (out.match(/mjob_[a-f0-9]+/) || [])[0] ?? null,
+    })
+    console.log(c.green(`\n  derivation recorded  ${rec.id}`))
+    console.log(c.dim(`  sha256 ${rec.outputSha256}`))
+  } catch (e) {
+    console.log(c.red(`\n  DERIVATION FAILED TO COMMIT — treating this render as failed.`))
+    console.log(c.red(`  ${e.message}`))
+    console.log(c.dim('  The media exists and was billed, but it is not accounted for,'))
+    console.log(c.dim('  so a future revocation could not enumerate it.\n'))
+    process.exitCode = 4
   }
 }
 
