@@ -119,3 +119,43 @@ dkg connect /ip4/127.0.0.1/tcp/<grantor-listen-port>/p2p/<grantor-peer-id>
 ```
 
 The grantor's listen port is random (`listenPort: 0`) and is printed in its `daemon.log`.
+
+---
+
+## M1 proven against live DKG data
+
+Five scenarios, run end to end against two real DKG v10 testnet daemons. No
+mocks anywhere in this path.
+
+| # | Scenario | Result |
+|---|----------|--------|
+| A | Producer's own view, grant not synced | `REFUSED — grant-exists`, $1.0080 avoided |
+| B | Grant visible, every clause satisfied | `PERMITTED under urn:mandate:grant:ana-001` |
+| C | `face-swap-video` requested, grant permits `face-swap-image` | `REFUSED — capability-permitted` (exact match, never by family) |
+| D | Ana revokes on her own node | `REFUSED — not-revoked`, citing her DID and the timestamp |
+| E | **Producer forges a newer "active" state** | **`REFUSED` — forgery reported and ignored** |
+
+Scenario E is the one that matters. The forged assertion is a real sealed
+Knowledge Asset with its own Merkle root (`0x02b3bfb7…`), a timestamp deliberately
+newer than Ana's revocation, sitting in the same append-only graph. A resolver
+that took the newest assertion would permit the render. Mandate refuses, and
+says which assertion it discarded and who wrote it:
+
+```
+⚠ ignored 1 state assertion(s) not authored by the grantor:
+    "active" claimed by did:dkg:agent:0x8EaA4857B22dddbfb5ebC476087FEc39336e0CB5
+
+REFUSED — clause: not-revoked
+grant urn:mandate:grant:ana-001 was revoked at 2026-09-12T09:14:29.146Z
+  by did:dkg:agent:0xeD1eeB64CaC09874257F05Fd6B51A55695ad0B69
+
+spend avoided: $1.0080 (exact — the capability was never invoked)
+```
+
+### Operational note: SWM share can fail transiently
+
+`ka create --share` returned `phase=swm-share A promote prerequisite is
+temporarily unavailable`, leaving the asset sealed in Working Memory but not
+shared. A plain `dkg ka share <name> -c <cg>` afterwards succeeded. Any
+automation must treat share as retryable rather than assuming create-with-share
+is atomic.
