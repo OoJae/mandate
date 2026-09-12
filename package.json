@@ -1,0 +1,24 @@
+{
+  "name": "mandate",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "A consent rail for generative media: no likeness or voice renders until the depicted person's own agent has published a live, signed grant.",
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "scripts": {
+    "spike:caps": "node spikes/s1-capabilities.mjs",
+    "spike:upload": "node spikes/s2-request-upload.mjs",
+    "test": "node --test test/*.test.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "@noble/hashes": "^2.4.0",
+    "@origintrail-official/dkg": "^10.0.16",
+    "hono": "^4.13.7",
+    "n3": "^2.7.12",
+    "zod": "^4.6.2"
+  }
+}
