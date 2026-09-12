@@ -70,3 +70,52 @@ public faucet into the operational wallets.
   it an invalid header name that is silently ignored. The working header is
   `X-Storyboard-Tool-Profile: lean`. Applying it to `/full` trims 206 tools to
   26, hiding the LoRA verbs — so send it only to `/raw`.
+
+---
+
+## What works without gas, and what does not (measured)
+
+Established by running each step on two live DKG v10 testnet nodes.
+
+**Works with zero gas:**
+
+- `context-graph create` — the CLI states plainly it is "free, P2P — no chain transaction".
+- `ka create` → `write` → `finalize` → `share` (Working Memory → Shared Working Memory).
+  A real grant sealed with Merkle root `0x6733f000f2be5a51bf4ea29ed5366fb47f4e0fca588b750f433069a59961ae0f`,
+  status `swm-shared`.
+- SPARQL over the result, **provided you pass `--include-shared-memory`** — without it a
+  freshly shared KA returns "No results", which looks like data loss and is not.
+- Reading Base Sepolia. The daemon polls chain events and resolves contracts fine;
+  only *writes* need funding.
+
+**Blocked without gas:**
+
+- `context-graph register` (on-chain registration). Measured requirement:
+  `have 0 want 510752000000` — about **0.0000005 ETH** for the transaction.
+- `vm/publish`, and therefore UAL minting.
+- **Cross-node sync of a user-created context graph.** This is the consequential one.
+  Both nodes connect and sync the system graphs (`agents`, `ontology`) happily, but
+  the producer's catch-up on `mandate-grants` fails and `query-remote` returns
+  `ACCESS_DENIED — Context graph is not queryable`. The grantor's log gives the reason:
+
+  ```
+  RFC-64 catalog replay incomplete for ".../mandate-grants" after VVzrndHL connected [WARN]
+  ```
+
+  An unregistered context graph has no on-chain catalog entry, so a peer cannot
+  validate it and refuses to serve it. Registration needs gas.
+
+So gas sits on the critical path for the **two-party** demo, not merely for anchoring —
+which is more than the plan assumed. The amount required is trivially small; the faucet
+simply has none to give.
+
+### Direct peer connection is still required regardless
+
+Two nodes on one machine do not find each other through the public relays. The producer
+must dial the grantor explicitly:
+
+```
+dkg connect /ip4/127.0.0.1/tcp/<grantor-listen-port>/p2p/<grantor-peer-id>
+```
+
+The grantor's listen port is random (`listenPort: 0`) and is printed in its `daemon.log`.
