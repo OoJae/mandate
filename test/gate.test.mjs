@@ -147,3 +147,22 @@ test('the newest AUTHENTIC assertion wins, regardless of insertion order', () =>
   ])
   assert.equal(st.state, STATE_REVOKED)
 })
+
+// ---------------------------------------------------------------------------
+// Failure direction.
+// ---------------------------------------------------------------------------
+
+test('the gate fails CLOSED: an empty or partial read refuses, never permits', () => {
+  // A SPARQL read concurrent with a share can transiently return nothing. For a
+  // consent gate the only acceptable behaviour is to refuse.
+  const d = decide(req(), { grants: [], assertions: [] })
+  assert.equal(d.permit, false)
+  assert.equal(d.clause, 'grant-exists')
+})
+
+test('an unpriced capability reports unknown spend, never a false $0.00', () => {
+  const d = decide(req({ estimatedUsd: null }), { grants: [grant()] })
+  assert.equal(d.permit, true)          // pricing is not a permission question
+  const r = decide(req({ subject: 'nobody', estimatedUsd: null }), { grants: [grant()] })
+  assert.equal(r.spendAvoidedUsd, null) // not 0 — that would understate the refusal
+})

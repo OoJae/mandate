@@ -27,12 +27,23 @@ const PRICE_PER_SEC = {
   'talking-head': 0.168,
   'face-swap-video': 0.024,
   'lipsync': 0.14,
+  'sync-lipsync-v3': 0.13997,
   'heygen-twin': 0.105,
 }
 const PRICE_FLAT = { 'face-swap-image': 0.009, 'flux-lora-training': 2.10 }
 
-const estimate = (capability, seconds = 6) =>
-  PRICE_FLAT[capability] ?? (PRICE_PER_SEC[capability] ?? 0) * seconds
+function estimate(capability, seconds = 6) {
+  if (capability in PRICE_FLAT) return PRICE_FLAT[capability]
+  const perSec = PRICE_PER_SEC[capability]
+  if (perSec == null) {
+    // An unpriced capability must not silently report $0.00 avoided — that
+    // understates the refusal and is the kind of number a judge should catch.
+    console.log(c.yellow(`  note: no local list price for "${capability}"; ` +
+      'spend avoided is reported as unknown rather than zero'))
+    return null
+  }
+  return perSec * seconds
+}
 
 const arg = (name, def) => {
   const i = process.argv.indexOf(`--${name}`)
@@ -62,7 +73,8 @@ async function cmdRender() {
   console.log(`  capability  ${capability}`)
   console.log(`  use class   ${useClass}`)
   console.log(`  territory   ${territory}`)
-  console.log(`  estimate    $${estimatedUsd.toFixed(4)} ${c.dim('(list price, not an invoice)')}`)
+  console.log(`  estimate    ${estimatedUsd == null ? c.yellow('unknown') : '$' + estimatedUsd.toFixed(4)}` +
+    ` ${c.dim('(list price, not an invoice)')}`)
 
   // Which node resolves. The producer is the honest default — it is the party
   // that must not be able to vouch for itself. `--resolver grantor` exists only
@@ -91,8 +103,9 @@ async function cmdRender() {
   if (!d.permit) {
     console.log(c.red(`\n  REFUSED — clause: ${d.clause}`))
     console.log(`  ${d.reason}`)
-    console.log(c.green(`\n  spend avoided: $${d.spendAvoidedUsd.toFixed(4)} ` +
-      c.dim('(exact — the capability was never invoked)')))
+    console.log(c.green('\n  spend avoided: ' +
+      (d.spendAvoidedUsd == null ? 'unknown (no local list price)' : `$${d.spendAvoidedUsd.toFixed(4)}`) +
+      ' ' + c.dim('(exact — the capability was never invoked)')))
     console.log(c.dim('\n  No Livepeer call was made.\n'))
     process.exitCode = 2
     return

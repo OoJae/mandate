@@ -270,3 +270,46 @@ The demo is structurally insulated from all of this, by design rather than luck:
 wrong capability, forbidden use class, expired window, revocation, and the
 forgery rejection — is free, instant, and cannot be broken by provider
 flakiness. Only the single success beat depends on a render completing.
+
+---
+
+## End to end, with real media (S7 GREEN)
+
+The async path is unusable, but **the inline path works**. `sync-lipsync-v3`
+(`fal-ai/sync-lipsync/v3/image-to-video`, $0.13997/s) completed inline in **103
+seconds** and returned a real MP4. Full loop, no mocks anywhere:
+
+1. `flux-schnell` generates a **synthetic** reference portrait (~$0.003)
+2. `inworld-tts` generates the speech
+3. `sync-lipsync-v3` renders the video inline — real MP4, ~$0.84
+4. The derivation edge is committed to the DKG, content-addressed
+   `sha256 48a2c16d22920ce5ab051987c435bf5517e80bb7c1f50eb4b1b2e98efdbd9b88`
+5. A third party, given **only the URL**, hashes the bytes and returns
+   **`CLEAR — authorised by did:dkg:agent:0xeD1e…0B69 under urn:mandate:grant:cara-9d2f,
+   served by "sync-lipsync-v3"`**
+6. Cara revokes on her own node
+7. **The same file, the same bytes** now verifies **`TAINTED — the grant
+   authorising this file was revoked at 2026-09-12T10:38:01.137Z`**
+8. A fresh render request is refused: `not-revoked`, $0.8398 avoided
+
+Nothing about the file changed between 5 and 7. The verdict changed because
+somebody else changed their mind, on a graph neither the producer nor the
+verifier controls.
+
+### Two more operational findings
+
+**`ka create --share` poisons its own name on partial failure.** After a failed
+SWM promote the asset is sealed in Working Memory, and re-running `ka create`
+with the same name fails with `private/public partition differs from its
+existing seal`. The KA name is only a local handle, so `recordDerivation` now
+uses a fresh name per attempt while the derivation's identity stays the content
+hash.
+
+**A read concurrent with a share can return a partial view.** One render
+transiently saw zero grants and refused with `grant-exists` instead of
+`not-revoked`. This is the correct direction and is now a test: **the gate fails
+closed.** A partial or failed read produces a refusal, never a permit.
+
+**Unpriced capabilities report unknown, not zero.** `sync-lipsync-v3` was
+initially missing from the local price table and a refusal claimed `$0.0000`
+avoided, which understates the refusal. Unknown is now reported as unknown.

@@ -47,14 +47,26 @@ export async function recordDerivation(node, contextGraphId, {
   const path = `${OUT}/${outputSha256.slice(0, 16)}.ttl`
   writeFileSync(path, ttl)
 
-  const name = `derivation-${outputSha256.slice(0, 16)}`
+  // The KA name is only a local handle; the derivation's identity is the content
+  // hash. A partially-completed `ka create` leaves a sealed-but-unshared asset
+  // under its name, and re-running create against that name fails with
+  // "private/public partition differs from its existing seal" — so never reuse
+  // a name across attempts.
+  const name = `derivation-${outputSha256.slice(0, 16)}-${Date.now().toString(36)}`
   // `ka create --share` is NOT atomic: it can seal into Working Memory and then
   // fail the SWM promote. Retry the share rather than assume it landed.
   const created = await node.createKA(name, contextGraphId, path, { share: true })
-  if (created.status !== 'swm-shared') {
-    await node.cli(['ka', 'share', name, '-c', contextGraphId])
+  let status = created.status
+  if (created.sharePending || status !== 'swm-shared') {
+    const shared = await node.cli(['ka', 'share', name, '-c', contextGraphId], { tolerant: true })
+    status = /shared to SWM/i.test(shared) ? 'swm-shared' : status
+    if (status !== 'swm-shared') {
+      // Refusing to report a half-committed derivation as committed is the
+      // whole point: an edge the graph does not have cannot be quarantined.
+      throw new Error(`derivation ${id} sealed but not shared to SWM:\n${shared.slice(0, 400)}`)
+    }
   }
-  return { id, outputSha256, path, name, ...created }
+  return { id, outputSha256, path, name, ...created, status }
 }
 
 /**

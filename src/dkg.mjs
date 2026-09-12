@@ -53,14 +53,27 @@ export class DkgNode {
   identity() { return this.api('/api/agent/identity') }
   info()     { return this.api('/api/info') }
 
-  /** Shell out to the CLI for lifecycle verbs, with this node's DKG_HOME. */
-  async cli(args, { timeout = 240000 } = {}) {
-    const { stdout, stderr } = await run('node', [CLI, ...args], {
-      env: { ...process.env, DKG_HOME: this.home },
-      timeout,
-      maxBuffer: 32 * 1024 * 1024,
-    })
-    return (stdout || '') + (stderr || '')
+  /**
+   * Shell out to the CLI for lifecycle verbs, with this node's DKG_HOME.
+   *
+   * `tolerant` returns the output of a non-zero exit instead of throwing. The
+   * KA lifecycle needs it: `ka create --share` exits non-zero when the SWM
+   * promote fails but the asset IS sealed in Working Memory, and the correct
+   * response is to retry the share, not to treat the whole thing as lost.
+   */
+  async cli(args, { timeout = 240000, tolerant = false } = {}) {
+    try {
+      const { stdout, stderr } = await run('node', [CLI, ...args], {
+        env: { ...process.env, DKG_HOME: this.home },
+        timeout,
+        maxBuffer: 32 * 1024 * 1024,
+      })
+      return (stdout || '') + (stderr || '')
+    } catch (e) {
+      const out = (e.stdout || '') + (e.stderr || '')
+      if (tolerant && out) return out
+      throw e
+    }
   }
 
   /**
@@ -83,12 +96,15 @@ export class DkgNode {
     if (preSignedAuthorAttestation) {
       args.push('--pre-signed-author-attestation', preSignedAuthorAttestation)
     }
-    const out = await this.cli(args)
+    const out = await this.cli(args, { tolerant: true })
     return {
       raw: out,
       status: (out.match(/Status:\s*(\S+)/) || [])[1] || null,
       assertionUri: (out.match(/Assertion URI:\s*(\S+)/) || [])[1] || null,
       merkleRoot: (out.match(/Merkle root:\s*(\S+)/) || [])[1] || null,
+      // `ka create --share` is not atomic — it can seal into WM and then fail
+      // the SWM promote. Callers must retry the share rather than assume loss.
+      sharePending: /completed partially|promote prerequisite/i.test(out),
     }
   }
 }

@@ -139,7 +139,7 @@ export function decide(request, { grants = [], assertions = [], priorSpendUsd = 
     // relying on the platform's spend_cap: that tool documents its pre-flight
     // against create_media, and we dispatch through run_capability. Platform
     // spend_cap is set too, as a second belt, but this is the check we own.
-    if (g.maxSpendUsd != null && priorSpendUsd + estimatedUsd > g.maxSpendUsd) {
+    if (g.maxSpendUsd != null && estimatedUsd != null && priorSpendUsd + estimatedUsd > g.maxSpendUsd) {
       note({ rank: 7, clause: 'spend-ceiling', grantId: g.id,
         reason: `grant ${g.id} ceiling $${g.maxSpendUsd} would be exceeded (` +
                 `$${priorSpendUsd.toFixed(4)} already spent + $${estimatedUsd.toFixed(4)} requested)` })
