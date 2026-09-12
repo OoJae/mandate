@@ -92,10 +92,16 @@ export async function getUpload(client, token, waitSeconds = 20) {
  * gate's job, and it runs before this is ever called. Keeping the two apart is
  * what makes the policy auditable in one file.
  */
-export async function runCapability(client, capability, args, { timeout = 700 } = {}) {
-  return textOf(await client.callTool({
-    name: 'run_capability', arguments: { capability, timeout, ...args },
-  }))
+export async function runCapability(client, capability, args, { timeout = 700, requestTimeoutMs } = {}) {
+  // Two different clocks, and conflating them wastes money. `timeout` is the
+  // server-side render budget; the MCP SDK imposes its own 60s request timeout,
+  // and when that fires the render keeps going and is still billed. So the
+  // transport timeout is always given room beyond the render budget.
+  return textOf(await client.callTool(
+    { name: 'run_capability', arguments: { capability, timeout, ...args } },
+    undefined,
+    { timeout: requestTimeoutMs ?? (timeout * 1000 + 60000) },
+  ))
 }
 
 /** Second belt beneath our own ceiling check — see the note in gate.mjs. */
