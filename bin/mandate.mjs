@@ -9,6 +9,9 @@ import { PRODUCER, GRANTOR } from '../src/dkg.mjs'
 import { readKnowledge, priorSpendFor, blastRadius } from '../src/resolve.mjs'
 import { decide } from '../src/gate.mjs'
 import * as LP from '../src/livepeer.mjs'
+import { grantToTurtle, stateToTurtle } from '../src/rdf.mjs'
+import { captureConsent } from '../src/consent.mjs'
+import { writeFileSync, mkdirSync } from 'node:fs'
 
 const GRANTS_CG = process.env.MANDATE_GRANTS_CG
   ?? '0xeD1eeB64CaC09874257F05Fd6B51A55695ad0B69/mandate-grants'
@@ -140,17 +143,133 @@ async function cmdBlastRadius() {
   console.log(`  billed under this grant: $${r.totalBilledUsd.toFixed(4)} ${c.dim('(estimated at list price)')}\n`)
 }
 
+/**
+ * Author a grant ON THE GRANTOR'S NODE.
+ *
+ * This runs against the grantor daemon on purpose. The producer cannot seal a
+ * grant naming Ana as author — its node refuses, because it holds no key for
+ * her — and that refusal is what makes the whole scheme worth anything.
+ */
+async function cmdGrant() {
+  const grantor = GRANTOR()
+  const id = await grantor.identity()
+  const subject = arg('subject', 'ana-7f3c')
+  const name = arg('name', `grant-${subject}`)
+  const grantId = arg('id', `urn:mandate:grant:${subject}`)
+
+  const requested = {
+    useClass: arg('use-class', 'advertising').split(','),
+    territory: arg('territory', 'GB').split(','),
+  }
+
+  let consent = null
+  if (has('with-consent')) {
+    console.log(c.bold('\nCapturing consent in the conversation\n'))
+    consent = await captureConsent({
+      requested,
+      onLink: url => {
+        console.log('  Open this on the phone of the person being depicted:')
+        console.log(c.bold(`    ${url}`))
+        console.log(c.dim('  Record ~6 seconds saying what you agree to. Waiting…\n'))
+      },
+    })
+    if (!consent.captured) {
+      console.log(c.red('  No clip arrived before the link expired. Not granting.\n'))
+      process.exitCode = 2
+      return
+    }
+    console.log(c.green(`  clip received  sha256 ${consent.sha256.slice(0, 32)}…`))
+    if (consent.scope) {
+      console.log(`  spoken scope   ${consent.scope.covered}/${consent.scope.total} terms mentioned`)
+      console.log(c.dim(`  ${consent.scope.note}`))
+      if (consent.scope.missing.length && !has('force')) {
+        console.log(c.yellow('\n  Spoken consent does not cover everything requested.'))
+        console.log(c.yellow('  Re-record, narrow the grant, or pass --force to proceed anyway.\n'))
+        process.exitCode = 3
+        return
+      }
+    }
+  }
+
+  const grant = {
+    id: grantId,
+    grantor: id.agentDid,
+    subject,
+    consentClipSha256: consent?.sha256 ?? undefined,
+    permitsCapability: arg('capability', 'talking-head,face-swap-image').split(','),
+    permitsUseClass: requested.useClass,
+    forbidsUseClass: arg('forbid', 'political,adult').split(','),
+    territory: requested.territory,
+    validFrom: arg('valid-from', new Date().toISOString()),
+    validUntil: arg('valid-until', new Date(Date.now() + 90 * 864e5).toISOString()),
+    maxSpendUsd: Number(arg('max-spend', '5')),
+  }
+
+  mkdirSync('spikes/out', { recursive: true })
+  const path = `spikes/out/${name}.ttl`
+  writeFileSync(path, grantToTurtle(grant))
+
+  console.log(c.dim(`\n  sealing on ${grantor.name} …`))
+  const r = await grantor.createKA(name, GRANTS_CG, path, { share: true })
+  if (r.status !== 'swm-shared') {
+    console.log(c.dim('  share did not complete on create; retrying (it is not atomic)…'))
+    await grantor.cli(['ka', 'share', name, '-c', GRANTS_CG])
+  }
+  console.log(c.green(`\n  GRANTED  ${grantId}`))
+  console.log(`  author      ${id.agentDid}`)
+  console.log(`  merkle root ${r.merkleRoot ?? c.dim('n/a')}`)
+  console.log(`  capabilities ${grant.permitsCapability.join(', ')}`)
+  console.log(`  ceiling     $${grant.maxSpendUsd}\n`)
+}
+
+/** Revoke. Authored by the grantor, or it counts for nothing. */
+async function cmdRevoke() {
+  const grantor = GRANTOR()
+  const id = await grantor.identity()
+  const grantId = arg('id', 'urn:mandate:grant:ana-7f3c')
+  const at = new Date().toISOString()
+  const name = `state-${grantId.split(':').pop()}-revoked-${Date.now().toString(36)}`
+  const path = `spikes/out/${name}.ttl`
+  mkdirSync('spikes/out', { recursive: true })
+  writeFileSync(path, stateToTurtle({
+    id: `urn:mandate:state:${name}`, stateOf: grantId,
+    state: 'revoked', stateAuthor: id.agentDid, stateAt: at,
+  }))
+  const r = await grantor.createKA(name, GRANTS_CG, path, { share: true })
+  if (r.status !== 'swm-shared') await grantor.cli(['ka', 'share', name, '-c', GRANTS_CG])
+  console.log(c.red(`\n  REVOKED ${grantId}`))
+  console.log(`  by ${id.agentDid} at ${at}`)
+  console.log(c.dim('  shared to SWM; the gate refuses on the next resolve.\n'))
+}
+
+async function cmdConsent() {
+  const r = await captureConsent({
+    requested: { useClass: arg('use-class', 'advertising').split(','), territory: arg('territory', 'GB').split(',') },
+    onLink: url => console.log(`\n  Open on a phone: ${c.bold(url)}\n  ${c.dim('waiting…')}`),
+  })
+  console.log(r.captured ? c.green(`\n  captured  sha256 ${r.sha256}`) : c.red('\n  nothing uploaded'))
+  if (r.transcript) console.log(`\n  transcript: ${String(r.transcript).slice(0, 400)}`)
+  if (r.scope) console.log(`  ${r.scope.note}\n`)
+}
+
 const cmd = process.argv[2]
-const table = { render: cmdRender, status: cmdStatus, 'blast-radius': cmdBlastRadius }
+const table = {
+  render: cmdRender, status: cmdStatus, 'blast-radius': cmdBlastRadius,
+  grant: cmdGrant, revoke: cmdRevoke, consent: cmdConsent,
+}
 if (!table[cmd]) {
   console.log(`
 ${c.bold('mandate')} — a consent rail for generative media
 
-  status                 show both DKG nodes and their agent DIDs
-  render [--execute]     resolve the grant, decide, and only then spend
-  blast-radius           everything produced under a grant
+  status                    show both DKG nodes and their agent DIDs
+  grant [--with-consent]    author a grant ON THE GRANTOR'S node
+  consent                   capture a consent clip via a phone link
+  render [--execute]        resolve the grant, decide, and only then spend
+  revoke --id <grant>       revoke, as the grantor
+  blast-radius              everything produced under a grant
 
-  render options: --subject --capability --use-class --territory --seconds --at
+  render  : --subject --capability --use-class --territory --seconds --at --resolver
+  grant   : --subject --capability --use-class --territory --forbid --max-spend --with-consent
 `)
   process.exit(1)
 }

@@ -11,7 +11,9 @@
   "scripts": {
     "spike:caps": "node spikes/s1-capabilities.mjs",
     "spike:upload": "node spikes/s2-request-upload.mjs",
-    "test": "node --test test/*.test.mjs"
+    "test": "node --test test/*.test.mjs",
+    "nodes:init": "python3 spikes/drive-init.py ~/.dkg-mandate-grantor mandate-grantor 9201 && python3 spikes/drive-init.py ~/.dkg-mandate-producer mandate-producer 9202",
+    "nodes:start": "DKG_HOME=~/.dkg-mandate-grantor node node_modules/@origintrail-official/dkg/dist/cli.js start && DKG_HOME=~/.dkg-mandate-producer node node_modules/@origintrail-official/dkg/dist/cli.js start"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",
