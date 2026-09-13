@@ -42,3 +42,19 @@ test('the published namespace documents are current', () => {
       `docs/ns/v1/${f} is stale`)
   }
 })
+
+test('every predicate and class the serialisers actually emit is defined in the ontology', async () => {
+  const { grantToQuads, stateToQuads, derivationToQuads } = await import('../src/rdf.mjs')
+  const A = '0xed1eeb64cac09874257f05fd6b51a55695ad0b69'
+  const quads = [
+    ...grantToQuads({ id: `urn:mandate:grant:${A}:ana:0000000000000001`, grantor: `did:dkg:agent:${A}`, subject: `${A}:ana`,
+      consentClipSha256: 'a'.repeat(64), consentTranscript: 'I agree', permitsCapability: ['talking-head'], permitsUseClass: ['advertising'],
+      forbidsUseClass: ['political'], territory: ['GB'], validFrom: '2026-09-01T00:00:00Z', validUntil: '2026-12-01T00:00:00Z', maxSpendUsd: 5 }, { allowTranscript: true }),
+    ...stateToQuads({ id: 'urn:mandate:state:0000000000000001', stateOf: `urn:mandate:grant:${A}:ana:0000000000000001`, state: 'revoked', stateAuthor: `did:dkg:agent:${A}`, stateAt: '2026-09-02T00:00:00Z' }),
+    ...derivationToQuads({ id: 'urn:mandate:derivation:aaaaaaaaaaaaaaaa:0000000000000001', outputSha256: 'a'.repeat(64), servedCapability: 'talking-head',
+      servedModelId: 'm', loraId: 'l', jobId: 'mjob_x', authorizedUnder: `urn:mandate:grant:${A}:ana:0000000000000001`, billedUsd: 1, derivedAt: '2026-09-02T00:00:00Z' }),
+  ]
+  const emitted = new Set(quads.flatMap(q => [q.predicate, q.predicate === RDF_TYPE ? q.object : null]).filter(i => i && i.startsWith(V.NS)))
+  const undefinedTerms = [...emitted].filter(i => !inOntology.has(i))
+  assert.deepEqual(undefinedTerms, [])
+})

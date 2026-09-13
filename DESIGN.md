@@ -9,7 +9,7 @@ time, cannot be revoked, and cannot be verified by anyone downstream.
 
 The design follows from one fact: **the party who grants consent is never the
 party who runs the render.** Any record controlled by the renderer is worthless
-as evidence of the grantor's intent. The permission has to be authored by the
+as evidence of the grantor's intent. The permission has to be published by the
 grantor, readable by the renderer, and checkable by a third party who trusts
 neither.
 
@@ -17,92 +17,111 @@ neither.
 
 | Party | Owns | Does |
 |---|---|---|
-| **Grantor** — the depicted person's agent | a grants context graph | authors grants and revocations |
+| **Grantor** — the depicted person's agent | a grants context graph | publishes grants and revocations |
 | **Producer** — the rendering agent | a derivations context graph | resolves grants before spending; records what it produced |
-| **Verifier** — a distributor, platform or auditor | nothing | hashes a delivered file and follows the graph |
+| **Verifier** — a distributor, platform or auditor | a read-only node | hashes a delivered file and follows the graph |
 
-Each party writes only to a graph it owns. Readers subscribe to both. This is
-least-authority by construction, and it is also what the network permits: we
-measured that a peer holding a synced copy of another party's graph cannot write
-into it.
+Each party writes only to a graph it owns. This is least authority by construction,
+and it is also what the network allows: a peer holding a synced copy of another
+party's graph can seal an asset into it but cannot share or anchor it (S6c).
+
+**Custody.** The grantor node holds a signing key on the depicted person's behalf. In
+practice that is an agency, a union or a hosted consent service; the person only
+opens a phone link and records a clip. Mandate does not prescribe who.
+
+## Trust assumption
+
+A verifier trusts:
+
+1. **The chain**, for which address anchored each Knowledge Asset. The Knowledge
+   Asset id is `(author << 96) | n`, and its Verifiable Memory graph is
+   `…/_verifiable_memory/<author>/<n>`.
+2. **Its own DKG node**, to report that graph and its `_meta` anchor faithfully. The
+   resolver does not trust the node to return everything: it checks each read for
+   completeness and compares the node's copy with the chain head.
+3. **A list of producers**, whose derivation records it is willing to believe.
+
+It trusts nothing written inside the graph about authorship. `mandate:grantor` and
+`mandate:stateAuthor` are descriptive and must agree with the anchoring address.
 
 ## How the DKG v10 memory model is used
 
-- **Context Graphs.** Two user graphs, each registered on-chain by its owner
-  (Base Sepolia, graphs 430 and 431), plus the system `ontology` graph for the
-  vocabulary.
-- **Assertions and Knowledge Assets.** Every grant, state change and derivation is
-  its own Knowledge Asset, written through the public lifecycle: create → write →
-  finalize → share → publish. Nothing is written to SPARQL directly.
-- **Authorship.** `wm/finalize` returns an EIP-712 AuthorAttestation. The
-  producer's node refuses to finalize with the grantor's address as author
-  (`not a registered local agent on this node`). The chain binds each anchored
-  Knowledge Asset to its publisher's address. **The 0.1.0 resolver does not use
-  this:** it reads the `mandate:grantor` and `mandate:stateAuthor` values inside
-  the asset, which anyone can write. 0.2.0 attributes every object to the address
-  that anchored it.
-- **UALs.** Anchored grants, revocations and derivations are addressable by UAL,
-  and a verifier can check any of them on the Base Sepolia explorer.
+- **Context Graphs.** Two user graphs, each registered on-chain by its owner (Base
+  Sepolia, graphs 430 and 431), plus the system `ontology` graph for the vocabulary.
+- **Knowledge Assets.** Every grant, revocation and derivation is its own Knowledge
+  Asset with its own IRI, written through the node's HTTP API: create and seal in
+  Working Memory, share to Shared Working Memory, publish to Verifiable Memory. A
+  write is reported as done only when the chain has confirmed it and it is bound to
+  the graph; a minted but unbound asset is a failure that names its UAL and
+  transaction.
+- **`_meta`.** Each anchored asset's record (`kaUal`, `status "confirmed"`,
+  `assertionGraph`, `publicTripleCount`, `transactionHash`) is what the resolver
+  checks a graph against. `prov:wasAttributedTo` exists only on the publishing node,
+  so authorship comes from the graph path.
+- **Reconcile.** `POST /api/context-graph/reconcile` reports how many assets are bound
+  to a graph on-chain and how many the node holds. The CLI checks it before every
+  decision.
 
 ## Promotion path
 
 | Stage | What | Why it stops or continues |
 |---|---|---|
-| **Working Memory** | Drafts are written and finalized on the authoring node. Only clause data, hashes and identifiers are ever written. Consent video, reference images, prompts and media never enter the DKG; they go to Livepeer Agent and its providers to be transcribed and rendered. | Only clause data proceeds. |
-| **Shared Working Memory** | The finalized asset is shared to the owning graph. | A staging step on the authoring node. Measured: SWM content for these graphs **did not reach the other party**. |
-| **Verifiable Memory** | Grants, revocations and derivations are published and anchored. | Required, not optional. A revocation left in SWM was never seen by the producer, which kept permitting. After anchoring, the producer's own node refused within 4–49 seconds across three runs. |
-
-We expected SWM to carry revocations quickly, with VM as a slower confirmation.
-The measurements reversed that: for cross-party consent, **Verifiable Memory is the
-only layer that works**. The cost is one small Base Sepolia transaction per grant,
-revocation or derivation. Mandate's CLI anchors by default and fails loudly if it
-cannot.
+| **Working Memory** | Clause data, hashes and identifiers are written and sealed on the authoring node. Consent video, reference images, prompts and media never enter the DKG; they go to Livepeer Agent and its providers to be transcribed and rendered. | Only clause data proceeds. |
+| **Shared Working Memory** | The sealed asset is shared to the owning graph. | A staging step. Measured: SWM content for these graphs did not reach the other party, and SWM paths are not authenticated. A revocation seen only in SWM is a warning, never a decision. |
+| **Verifiable Memory** | Grants, revocations and derivations are published and anchored. | Required. Only anchored assets can permit a render or clear a file. |
 
 ## The rules a resolver must follow
 
-1. **State is counted only when written by the grantor.** The graph is
-   append-only, so "active" and "revoked" coexist, and anyone can write either.
-   Only assertions *written by the grant's grantor* count; every other assertion
-   is ignored and reported. "Written by" must mean the address that anchored the
-   assertion. 0.1.0 compares the declared `stateAuthor` value instead, which a
-   forger can set to the grantor's DID.
-2. **Capabilities match exactly**, never by family. A grant for `face-swap-image`
-   does not cover `face-swap-video`.
-3. **A forbid beats a permit.**
-4. **Every derivation edge for a file is judged.** A file is CLEAR only if all of
-   them are. A new grant can authorise new renders; it cannot clear an artifact
-   whose authorisation was withdrawn.
-5. **The gate fails closed on empty or failed reads.** A read that returns nothing,
-   or errors, refuses. In 0.1.0 a read that silently misses a later revocation, or
-   earlier derivations that count toward the ceiling, can still permit.
+1. **Authorship is the anchoring address.** A grant counts only when anchored by the
+   address in its subject (`0x<address>:<name>`); a revocation only when anchored by
+   the address that anchored its grant; a derivation only when anchored by a trusted
+   producer. Anything else is reported as a forgery, with its UAL.
+2. **Knowledge Assets never merge.** Objects are grouped per asset and per subject;
+   a duplicated single-valued property makes the object malformed.
+3. **Revocation is terminal.** Any counted revocation ends a grant. A revocation that
+   appears only in a merged view with no Verifiable Memory copy is honoured, because
+   its publisher cannot be established.
+4. **Capabilities match exactly**, never by family, and **a forbid beats a permit**.
+   Sexual content and deceptive impersonation are refused whatever a grant says.
+5. **Every trusted derivation for a file is judged.** A file is CLEAR only if all are.
+   A new grant can authorise new renders; it cannot clear an artifact whose
+   authorisation was withdrawn.
+6. **The gate fails closed.** A malformed request, an incomplete or truncated read, a
+   node behind the chain, an unreadable date or ceiling, or an unknown cost under a
+   ceiling all refuse. The verifier answers INCONCLUSIVE instead of guessing.
 
-The gate (`src/gate.mjs`) and the verifier (`src/verify-core.mjs`) are pure
-functions with no I/O, so these rules can be read and tested in isolation.
+The provenance reducer (`src/provenance.mjs`), the gate (`src/gate.mjs`) and the
+verifier (`src/verify-core.mjs`) are pure functions, so these rules can be read and
+tested in isolation. `test/adversarial.test.mjs` replays every attack from the
+adversarial study against them.
 
 ## Security
 
-- **Network egress:** `agent.livepeer.org` (Livepeer Agent MCP), which receives
-  the consent clip, reference media and prompts and returns media URLs from its
-  providers; the local DKG nodes; and media URLs the operator supplies for hashing.
-- **Scope of enforcement:** the gate runs in the producer's own pipeline and binds
-  producers that choose to run it. Files from anyone else verify `UNKNOWN`.
-- **Credentials:** each DKG node's API token, read from its `DKG_HOME`, and an
-  optional `LIVEPEER_AGENT_KEY`. Mandate never reads wallet keystores.
-- **Write authority:** the Knowledge Asset lifecycle routes on the operator's own
-  nodes, and `vm/publish` (Curator authority) for grants, revocations and
-  derivations. Setup also uses `context-graph/create`, `register` and `subscribe`.
-- **Package:** no install scripts, zero runtime dependencies in the core, and
-  `npm audit --omit=dev` is clean.
+- **Network egress:** `agent.livepeer.org` (Livepeer Agent MCP), which receives the
+  consent clip, reference media URLs and prompts; the local DKG nodes; and media URLs
+  that are hashed — those an operator passes to `verify`, and the output URLs Livepeer
+  returns. Hashing streams with a size cap and a timeout and accepts http(s) only.
+- **Credentials:** each DKG node's API token, read from its home, and an optional
+  `LIVEPEER_AGENT_KEY`. Mandate never reads wallet keystores. Only `MANDATE_*` keys
+  and `LIVEPEER_AGENT_KEY` are read from `.env`.
+- **Write authority:** the Knowledge Asset routes on the operator's own nodes, and
+  Verifiable Memory publishing for grants, revocations and derivations. Setup uses
+  `context-graph create`, `register` and `subscribe`; `scripts/nodes.mjs` also calls
+  `reconcile` and `fetch-assets`, which need a node-admin token.
+- **Local state:** `~/.mandate` (mode 0700) holds the anchors and revocations already
+  seen and the renders in flight (files mode 0600).
+- **Package:** no install scripts and no runtime dependencies in the core. CI's
+  `npm audit --omit=dev` therefore covers nothing beyond the package itself; the
+  optional peers (`@modelcontextprotocol/sdk`) are audited by whoever installs them.
 
 ## Known limits and next steps
 
-- **Producer binding.** A CLEAR verdict proves every edge for the bytes points to a
-  live grant, but not that a producer the grantor chose wrote the edge. Next step:
-  a `mandate:permitsProducer` allowlist, checked against the derivation's seal
-  author.
-- **Revocation latency.** The cross-party window is seconds to about a minute.
-  Every decision should carry an explicit trust tier (anchored, shared-only, stale).
-- **DKG literal handling.** v10.0.16 cannot publish a double quote or a line break
-  in a literal. Mandate refuses such values rather than rewriting them.
-- **Independent verifier.** The demo verifies from the grantor's node. A third,
-  read-only node needs no gas and is the natural next demonstration.
+- **Producer binding.** A grant does not name the producers allowed to render under it.
+  Next: a `mandate:permitsProducer` list, checked against the derivation's anchoring
+  address.
+- **Discovery.** A verifier is configured with the graphs and producers it reads. Next:
+  a directory graph where producers announce their derivations graphs, and the
+  derivation UAL carried in C2PA or XMP metadata as a pointer.
+- **Exact bytes.** Verification is by SHA-256 of the delivered file, for the intake hop.
+- **DKG literal handling.** v10.0.16 cannot publish a double quote or a line break in a
+  literal. Mandate refuses such values rather than rewriting them.

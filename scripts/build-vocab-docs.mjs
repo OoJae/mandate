@@ -35,6 +35,7 @@ const ontology = NS.slice(0, -1)
 const title = one(ontology, 'http://purl.org/dc/terms/title')
 const description = one(ontology, 'http://purl.org/dc/terms/description')
 const version = one(ontology, 'http://www.w3.org/2002/07/owl#versionInfo')
+const versionIri = one(ontology, 'http://www.w3.org/2002/07/owl#versionIRI')
 
 const termBlock = s => {
   const name = s.slice(NS.length)
@@ -94,16 +95,19 @@ const html = `<!doctype html>
 <p>${esc(description)}</p>
 
 <div class="rule">
-  <p><strong>The authorship rule.</strong> A <code>mandate:GrantState</code> assertion counts only when its
-  <code>mandate:stateAuthor</code> is the <code>mandate:grantor</code> of the grant it refers to. The graph is
-  append-only, so “active” and “revoked” assertions coexist and anyone can write either; a resolver that skips
-  this check lets the party that profits from rendering defeat any revocation.</p>
+  <p><strong>The authorship rule.</strong> Authorship is the address that anchored a Knowledge Asset, never a
+  value written inside it. A <code>mandate:LikenessGrant</code> counts only when anchored by the address in its
+  <code>mandate:subject</code>; a <code>mandate:GrantState</code> counts only when anchored by the address that
+  anchored its grant. The graph is append-only and anyone can write <code>mandate:grantor</code> or
+  <code>mandate:stateAuthor</code> naming anyone, so a resolver that trusts those values lets the party that
+  profits from rendering invent a grant or defeat a revocation. Version 1.0.0 made that mistake.</p>
 </div>
 
 <h2>Downloads</h2>
 <ul class="downloads">
   <li><a href="mandate.ttl">mandate.ttl</a> — the ontology, Turtle</li>
   <li><a href="context.jsonld">context.jsonld</a> — JSON-LD context</li>
+  <li><a href="${esc(version)}/mandate.ttl">${esc(version)}/mandate.ttl</a> — this version, fixed at <code>${esc(versionIri)}</code></li>
   <li><a href="https://github.com/OoJae/mandate">github.com/OoJae/mandate</a> — reference resolver and gate</li>
 </ul>
 
@@ -119,5 +123,9 @@ mkdirSync(OUT, { recursive: true })
 writeFileSync(`${OUT}/index.html`, html)
 copyFileSync('vocab/mandate.ttl', `${OUT}/mandate.ttl`)
 copyFileSync('vocab/context.jsonld', `${OUT}/context.jsonld`)
+// The versionIRI resolves to a copy that later versions never overwrite.
+mkdirSync(`${OUT}/${version}`, { recursive: true })
+copyFileSync('vocab/mandate.ttl', `${OUT}/${version}/mandate.ttl`)
+writeFileSync(`${OUT}/${version}/index.html`, `<!doctype html><meta charset="utf-8"><title>Mandate vocabulary ${esc(version)}</title><p>Mandate vocabulary version ${esc(version)}: <a href="mandate.ttl">mandate.ttl</a>. Current version: <a href="../">../</a></p>\n`)
 writeFileSync('docs/.nojekyll', '')
 console.log(`built ${OUT}: ${classes.length} classes, ${props.length} properties`)

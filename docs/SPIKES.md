@@ -1,7 +1,27 @@
-# Day-zero spike results
+# Spike results
 
 Every claim below was produced by running the thing, not by reading documentation.
-Raw fixtures are in `spikes/out/`.
+Sections are in the order they were run. Scratch output from the early spikes went to
+`spikes/out/`, which is not committed; committed evidence is in
+[`docs/evidence/`](evidence/) and the live fixtures the tests use in
+[`test/fixtures/live/`](../test/fixtures/live/).
+
+## Status
+
+| Spike | Result | Where |
+|---|---|---|
+| S1 Livepeer capability registry | GREEN | below |
+| S2 Consent capture link | GREEN (link minted; a real upload and transcription run in `demo/full.mjs --consent`) | below |
+| S3 DKG v10 install | GREEN | below |
+| S4 Two independent parties | GREEN | below |
+| S5 Testnet anchoring | GREEN after manual funding | "S5 revisited" |
+| S6 Author attestation, S6b forging it from the producer's node | GREEN: the producer's node refuses to seal as the grantor | "S6" |
+| S6c Forgery of graph *content* from the producer's node | GREEN against 0.2.0; 0.1.0 accepted it | "S6c" |
+| S7 Live render | GREEN inline (`sync-lipsync-v3`, 103 s); async worker abandons at ~128 s | "S7" |
+| Graph omission in `/api/query` | reproduced on both nodes; handled by merged, checked reads | "DKG v10.0.16 leaves whole named graphs out" |
+| Read-only verifier node | GREEN, no funded wallet | "A third, read-only verifier node" |
+
+The table below is the day-zero snapshot, kept as it was.
 
 | Spike | Result | Evidence |
 |-------|--------|----------|
@@ -394,7 +414,7 @@ IRIs, so the resolver stopped recognising them — `0 grant(s)`, refused
 `grant-exists` — which is the fail-closed behaviour working as designed. Every
 UAL above this section is superseded.
 
-### Producer-node run (`demo/e2e-dana-5i66.json`)
+### Producer-node run (`docs/evidence/v0.1.0/e2e-dana-5i66.json`)
 
 | | |
 |---|---|
@@ -403,7 +423,17 @@ UAL above this section is superseded.
 | revocation | UAL `…/13` |
 | producer, own node | REFUSED — `not-revoked`, **4s** after the revocation anchored |
 
-Across three runs, anchor-to-refusal on the independent node: **49s, 27s, 4s**.
+Anchor-to-refusal on the producer's node, stated precisely (these runs used 0.1.0):
+
+- **4 s** in `e2e-dana-5i66`: the first poll after the revocation anchored was
+  already refused, so the true figure is somewhere under 4 s.
+- **27 s** in `e2e-dana-w0io`, under the old `mandate.build` namespace.
+- **About 49 s** in the earlier SWM-versus-VM run above: the refusal came at +62 s
+  after the revoke command started, of which about 13 s was chain confirmation. That
+  run left no separate log.
+
+So the window ranged from under 4 s to about a minute, and it is unbounded if the
+producer's node stops syncing, which 0.2.0 now detects.
 
 ### A peer cannot write into another party's graph
 
@@ -424,7 +454,7 @@ Resolution, and the better design regardless: **each party writes to a graph it
 owns.** The producer created and registered `mandate-derivations` (on-chain
 **431**); the grantor subscribed to it. Readers query both graphs.
 
-### Real media under the new namespace (`demo/media-verify-eve-e3wr.json`)
+### Real media under the new namespace (`docs/evidence/v0.1.0/media-verify-eve-e3wr.json`)
 
 | | |
 |---|---|
@@ -441,6 +471,18 @@ closed the connection mid-download (`UND_ERR_SOCKET: other side closed`), and
 taken afterwards against the same anchored graphs; the JSON records that
 honestly rather than presenting it as one uninterrupted run.
 
+Two more things this run does not show, noted by the adversarial review:
+
+- **The render was not gated.** The MP4 came from the S7c spike on 12 Sep and had
+  first been verified under another grant (`cara-9d2f`). The script created a new
+  grant (`eve-e3wr`) on 13 Sep and wrote a derivation linking the existing file to it,
+  with `derivedAt` set to the time of writing.
+- **Its `billedUsd` of 0.6999** is the reservation of the failed async job
+  `mjob_1cec6bfe884c`, not the cost of the inline render that produced the file
+  (about $0.84 at list price for 6 s).
+
+`demo/full.mjs` replaces this with a single gated run.
+
 ### Two verifier defects found and fixed
 
 - **`hashUrl` gave up on one dropped connection.** It now retries transient
@@ -450,7 +492,9 @@ honestly rather than presenting it as one uninterrupted run.
   came back first decided the verdict. That also allowed laundering: link the hash
   of a file made under a revoked grant to some unrelated live grant, and it could
   verify CLEAR. Every edge is now judged, sorted deterministically, and a file is
-  CLEAR only if every edge is.
+  CLEAR only if every edge is. (That fix was incomplete in 0.1.0: edges shared an
+  IRI derived from the output hash, so a second `authorizedUnder` merged into the
+  first edge. 0.2.0 gives every derivation its own IRI and never merges assets.)
 
 ### DKG v10.0.16 cannot publish a double quote or a line break
 

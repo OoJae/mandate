@@ -9,8 +9,9 @@
     a owl:Ontology ;
     dcterms:title "Mandate: likeness and voice consent vocabulary"@en ;
     dcterms:description "A vocabulary for publishing consent to render a person's likeness or voice, revoking it, and recording what was produced under it — so that the party who grants permission, the party who renders, and a third party who trusts neither can all reach the same verdict from the same graph."@en ;
-    owl:versionInfo "1.0.0" ;
-    owl:versionIRI <https://oojae.github.io/mandate/ns/v1/1.0.0> ;
+    owl:versionInfo "1.1.0" ;
+    owl:versionIRI <https://oojae.github.io/mandate/ns/v1/1.1.0> ;
+    owl:priorVersion <https://oojae.github.io/mandate/ns/v1/1.0.0> ;
     dcterms:creator "OoJae" ;
     dcterms:license <https://www.apache.org/licenses/LICENSE-2.0> ;
     rdfs:seeAlso <https://github.com/OoJae/mandate> .
@@ -22,22 +23,22 @@
 mandate:LikenessGrant
     a rdfs:Class , owl:Class ;
     rdfs:label "Likeness grant"@en ;
-    rdfs:comment "Permission, authored by the depicted person's own agent, to render their likeness or voice with named capabilities, for named uses, in named territories, within a validity window and a spend ceiling. Identifies its subject by a declared identifier, never by biometric data."@en .
+    rdfs:comment "Permission, published by the depicted person's own agent, to render their likeness or voice with named capabilities, for named uses, in named territories, within a validity window and a spend ceiling. A resolver MUST accept a grant only from the Knowledge Asset anchored by the address its mandate:subject names, and that address must also be the one in mandate:grantor. Identifies its subject by a declared identifier, never by biometric data."@en .
 
 mandate:GrantState
     a rdfs:Class , owl:Class ;
     rdfs:label "Grant state assertion"@en ;
-    rdfs:comment "An append-only assertion that a grant is active or revoked. Because the graph has no delete, assertions accumulate and anyone can write one. A state assertion counts only when its mandate:stateAuthor is the mandate:grantor of the grant it refers to; among those, the newest wins."@en .
+    rdfs:comment "An append-only assertion that a grant is revoked. Because the graph has no delete, assertions accumulate and anyone can write one. A state assertion counts only when the Knowledge Asset holding it was anchored by the same address that anchored the grant it refers to. Revocation is terminal: any counted revocation ends the grant for good, an “active” assertion has no effect, and renewing consent means publishing a new grant."@en .
 
 mandate:Derivation
     a rdfs:Class , owl:Class ;
     rdfs:label "Derivation"@en ;
-    rdfs:comment "A record of one produced artifact, identified by the SHA-256 of its bytes, linking it to the capability that served it and the grant that authorised it. Written before the artifact is released, so that revocation can enumerate everything produced under a grant."@en .
+    rdfs:comment "A record of one produced artifact, identified by the SHA-256 of its bytes, linking it to the capability that served it and the grant that authorised it. Each derivation has its own IRI. Written and anchored before the artifact is released, so that revocation can enumerate everything produced under a grant. A verifier judges a file only by derivations anchored by producers it trusts."@en .
 
 mandate:Refusal
     a rdfs:Class , owl:Class ;
     rdfs:label "Refusal"@en ;
-    rdfs:comment "A record that a render was refused, naming the clause that denied it and the spend avoided. Producing a refusal never invokes the refused capability."@en .
+    rdfs:comment "A record that a render was refused, naming the clause that denied it and the spend it avoided. Producing a refusal never invokes the refused capability. Defined for integrators; the reference implementation does not publish refusals."@en .
 
 # ---------------------------------------------------------------------------
 # LikenessGrant properties
@@ -46,14 +47,14 @@ mandate:Refusal
 mandate:grantor
     a rdf:Property ;
     rdfs:label "grantor"@en ;
-    rdfs:comment "The agent DID that authored the grant. Must be the depicted person's own agent."@en ;
+    rdfs:comment "The agent DID of the grantor, did:dkg:agent:0x<address>. Descriptive: a resolver checks it against the address that anchored the grant and rejects the grant if they differ."@en ;
     rdfs:domain mandate:LikenessGrant ;
     rdfs:range rdfs:Resource .
 
 mandate:subject
     a rdf:Property ;
     rdfs:label "subject"@en ;
-    rdfs:comment "A declared, opaque identifier for the depicted person. Never derived from biometric data."@en ;
+    rdfs:comment "A declared identifier for the depicted person, of the form 0x<grantor address>:<name>, so only that address can grant or revoke for it. Never derived from biometric data. Every grant and derivation linked to a subject is public and permanent, so the name should be meaningless outside the relationship."@en ;
     rdfs:domain mandate:LikenessGrant ;
     rdfs:range xsd:string .
 
@@ -67,7 +68,7 @@ mandate:consentClipSha256
 mandate:consentTranscript
     a rdf:Property ;
     rdfs:label "consent transcript"@en ;
-    rdfs:comment "Optional transcript of the spoken consent, for human review against the granted scope."@en ;
+    rdfs:comment "Transcript of the spoken consent. Publishing it makes a person's own words permanent and public, so the reference implementation refuses to write it unless explicitly asked; publish mandate:consentClipSha256 instead."@en ;
     rdfs:domain mandate:LikenessGrant ;
     rdfs:range xsd:string .
 
@@ -81,7 +82,7 @@ mandate:permitsCapability
 mandate:permitsUseClass
     a rdf:Property ;
     rdfs:label "permits use class"@en ;
-    rdfs:comment "A use class the grant permits, such as advertising. If any are present, unlisted uses are refused."@en ;
+    rdfs:comment "A use class the grant permits, such as advertising. If any are present, unlisted uses are refused. Sexual content and deceptive impersonation are refused whatever a grant says."@en ;
     rdfs:domain mandate:LikenessGrant ;
     rdfs:range xsd:string .
 
@@ -114,7 +115,7 @@ mandate:validUntil
 mandate:maxSpendUsd
     a rdf:Property ;
     rdfs:label "maximum spend (USD)"@en ;
-    rdfs:comment "Ceiling on total estimated spend across all renders authorised by this grant."@en ;
+    rdfs:comment "Ceiling on total estimated spend across renders authorised by this grant, summed from trusted producers' derivations. Enforced by the producer's own gate before dispatch; an unknown cost under a ceiling is refused."@en ;
     rdfs:domain mandate:LikenessGrant ;
     rdfs:range xsd:decimal .
 
@@ -131,14 +132,14 @@ mandate:stateOf
 mandate:state
     a rdf:Property ;
     rdfs:label "state"@en ;
-    rdfs:comment "Either “active” or “revoked”."@en ;
+    rdfs:comment "“revoked”. Any other value is treated as revoked by a fail-closed resolver; “active” has no effect."@en ;
     rdfs:domain mandate:GrantState ;
     rdfs:range xsd:string .
 
 mandate:stateAuthor
     a rdf:Property ;
     rdfs:label "state author"@en ;
-    rdfs:comment "The agent DID that wrote this state assertion. A resolver MUST ignore any state assertion whose author is not the mandate:grantor of the referenced grant. Without this rule, the party that profits from rendering can write its own “active” assertion and defeat any revocation."@en ;
+    rdfs:comment "The agent DID that wrote this state assertion. Descriptive only: anyone can write any DID here. A resolver MUST attribute a state assertion to the address that anchored its Knowledge Asset, count it only when that address anchored the referenced grant, and treat a stateAuthor that disagrees with it as a forgery. Version 1.0.0 of this vocabulary compared this value instead, which let a forger name the grantor."@en ;
     rdfs:domain mandate:GrantState ;
     rdfs:range rdfs:Resource .
 
@@ -181,14 +182,14 @@ mandate:authorizedUnder
 mandate:loraId
     a rdf:Property ;
     rdfs:label "LoRA id"@en ;
-    rdfs:comment "Identifier of a fine-tune trained under the grant, so artifacts rendered through it can be found on revocation."@en ;
+    rdfs:comment "Identifier of a fine-tune trained under the grant, so artifacts rendered through it can be found on revocation. Written if given; not yet read by the reference resolver."@en ;
     rdfs:domain mandate:Derivation ;
     rdfs:range xsd:string .
 
 mandate:sessionId
     a rdf:Property ;
     rdfs:label "session id"@en ;
-    rdfs:comment "The render platform's job or session id, joining its billing records to this graph."@en ;
+    rdfs:comment "The render platform's job id, joining its billing records to this graph."@en ;
     rdfs:domain mandate:Derivation ;
     rdfs:range xsd:string .
 
@@ -224,14 +225,14 @@ mandate:refusedSubject
 mandate:deniedByClause
     a rdf:Property ;
     rdfs:label "denied by clause"@en ;
-    rdfs:comment "One of: grant-exists, capability-permitted, use-class-permitted, territory-permitted, validity-window, not-revoked, spend-ceiling."@en ;
+    rdfs:comment "One of: malformed-request, use-class-prohibited, read-inconsistent, grant-exists, capability-permitted, use-class-permitted, territory-permitted, validity-window, not-revoked, spend-ceiling."@en ;
     rdfs:domain mandate:Refusal ;
     rdfs:range xsd:string .
 
 mandate:spendAvoidedUsd
     a rdf:Property ;
     rdfs:label "spend avoided (USD)"@en ;
-    rdfs:comment "Exact, because a refusal never invokes the capability."@en ;
+    rdfs:comment "What the refused render would have cost, estimated at list price. Nothing was spent: a refusal never invokes the capability."@en ;
     rdfs:domain mandate:Refusal ;
     rdfs:range xsd:decimal .
 

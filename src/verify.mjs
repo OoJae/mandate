@@ -1,10 +1,11 @@
 /**
  * The third-party check.
  *
- * A distributor, ad network, or platform is handed a finished file and nothing
- * else. No relationship with the producer, no relationship with the depicted
- * person, no reason to trust either. It hashes the bytes, finds the derivation
- * edge, follows `authorizedUnder` to the grant, and decides for itself.
+ * A distributor, ad network, or platform is handed a finished file. It has no
+ * relationship with the producer or the depicted person and no reason to trust
+ * either. Given the graph ids to read and the producers whose records it
+ * accepts, it hashes the bytes, finds the derivations, follows each to its grant,
+ * and decides for itself.
  *
  * This is the argument for a public verifiable graph over a vendor database, and
  * it is why the grant clauses are published while the media never is. It

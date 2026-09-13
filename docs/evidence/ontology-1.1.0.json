@@ -1,0 +1,11 @@
+{
+  "version": "1.1.0",
+  "triples": 155,
+  "name": "mandate-ontology-1-1-0-mu012upz",
+  "ual": "did:dkg:base:84532/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/30",
+  "txHash": "0x824da77be0835b10efe070d0322e7250447132b173197f25202dd832ee9bad9b",
+  "explorer": "https://sepolia.basescan.org/tx/0x824da77be0835b10efe070d0322e7250447132b173197f25202dd832ee9bad9b",
+  "merkleRoot": "0x18d4153f47bb4e1d63d9c049c73b3a90fadb095efbc6c1b9536772dc8f5eff73",
+  "publishedAt": "2026-09-13T16:28:44.081Z",
+  "ms": 31147
+}

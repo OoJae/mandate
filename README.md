@@ -1,355 +1,363 @@
 # Mandate
 
 **A consent rail for generative media.** A producer running Mandate does not render
-a likeness or voice until the depicted person's own agent has published a live grant.
-Revoking the grant stops that producer's next render, and lets anyone check whether
-a file already made is still clean.
+a likeness or voice until the depicted person's own agent has published a live grant
+on the OriginTrail DKG. Revoking the grant stops that producer's next render, and lets
+anyone holding a delivered file check whether it is still covered.
 
 Built for the **Livepeer Agent Hackathon 2026**, Track 2: **Livepeer Agent + OriginTrail DKG**.
-
-> **Security notice (13 Sep 2026).** An adversarial review found that the resolver
-> in `mandate-consent@0.1.0` decides authorship from the self-declared
-> `mandate:grantor` and `mandate:stateAuthor` values. Anyone who can publish into a
-> graph it reads can write those values naming the grantor, and so invent a grant
-> or un-revoke one. **Do not rely on 0.1.0 where a producer or third party may act
-> in bad faith.** The fix attributes every grant and revocation to the address that
-> anchored it on-chain, and ships as 0.2.0. Until then, claims below about
-> authorship describe the design, not what 0.1.0 enforces.
 
 ```bash
 npm install mandate-consent
 ```
+
+> **0.1.0 is superseded.** An adversarial review found that its resolver decided
+> authorship from self-declared values inside the graph, so anyone able to publish
+> could invent a grant or un-revoke one. 0.2.0 attributes every grant, revocation
+> and derivation to the address that anchored it on-chain, and the attacks are
+> replayed in [`test/adversarial.test.mjs`](test/adversarial.test.mjs) (all 17 fail
+> against 0.1.0 and pass on 0.2.0) and live on Base Sepolia (below).
 
 ---
 
 ## The problem
 
 Generative media's real legal exposure is the **input**, not the output. An agent
-that fine-tunes on someone's photos, or swaps their face into an ad, bakes that
-person into a durable artifact that can be copied anywhere.
+that swaps someone's face into an ad, or lip-syncs their portrait to a script, bakes
+that person into a durable artifact that can be copied anywhere.
 
 Consent today is a contract in a shared drive. It is not machine-readable, not
 checkable at render time, not revocable, and **it is held by the party doing the
 rendering**. A renderer vouching for its own permission is worth nothing.
 
-That last point drives the whole design. *The party who grants consent is never
-the party who runs the render.* A local database cannot work under that
-condition, which is why Mandate uses a verifiable shared graph instead of a table
-in someone's Postgres.
+That last point drives the design. *The party who grants consent is never the party
+who runs the render,* and a third party who trusts neither must be able to check.
+A database controlled by either side cannot do that, which is why Mandate uses a
+verifiable shared graph.
 
 ## What it does
 
-An agent is asked to render a talking-head spot of a person. Before it spends a
-cent, it looks up a grant on the OriginTrail DKG. The grant must cover:
+An agent is asked to render a lip-synced spot of a person. Before it spends a cent,
+it reads the DKG. A grant must cover:
 
-- **that subject**
-- **that exact Livepeer capability**
-- **that use class**
+- **that subject**, and be published by the address that subject belongs to
+- **that exact Livepeer capability** (never a family: `face-swap-image` is not `face-swap-video`)
+- **that use class**, with a forbid overriding a permit
 - **that territory**
-- **the current date**, and must **not be revoked**
-- **the spend**, within its ceiling
+- **now**, inside the validity window, and **not revoked**
+- **the spend**, within its ceiling, counting what trusted producers already recorded
 
-No grant, no render. The refusal names the missing clause and the spend it avoided
-(an estimate at list price).
+No grant, no render. A refusal names the clause and costs nothing, because the
+capability is never invoked. Sexual content and deceptive impersonation are refused
+whatever a grant says.
 
-The gate runs inside the producer's own pipeline, so it binds producers that choose
-to run it. Nothing stops a producer from calling Livepeer directly. That producer's
-output has no derivation edge, and a verifier sees it as `UNKNOWN`, which is why
-enforcement belongs at distribution: a platform should accept only files that verify
-`CLEAR`.
+After a render, the producer anchors a **derivation**: the output's SHA-256, the
+capability that served it, and the grant it was made under. The media URL is released
+only once that record is on-chain. A platform that receives the file hashes it, finds
+the derivation, follows it to the grant, and gets `CLEAR`, `TAINTED`, `UNKNOWN` or
+`INCONCLUSIVE`.
 
-The verifiable knowledge here produces a **refusal**, not an improvement. Delete the
-DKG and you do not get a worse product. You get a render tool with a consent
-checkbox, which is nothing.
+The gate binds producers that choose to run it. A producer that calls Livepeer
+directly is not stopped; its files verify `UNKNOWN`. That is why the check belongs at
+distribution too: accept a file only if it verifies `CLEAR`.
 
-## Why the graph has to be verifiable
+## How authorship is established
 
-Three properties a vendor database cannot provide:
+Nothing in Mandate believes a value written inside the graph about who wrote it.
 
-1. **The permission is written by a party who will never run the render.**
-   - `wm/finalize` returns an EIP-712 AuthorAttestation proving the grantor's
-     address sealed the grant.
-   - We tested the reverse: the producer's node **refuses** to seal on the
-     grantor's behalf, with `authorAgentAddress … is not a registered local agent
-     on this node`.
-   - The node enforces who sealed an asset. **The 0.1.0 resolver does not yet read
-     that:** it compares the `mandate:grantor` value written inside the asset, which
-     anyone can set. See the security notice above.
-2. **Only the grantor can revoke, even though the graph is append-only.**
-   - The DKG has no delete. A "revoked" and an "active" assertion coexist
-     forever, and anyone can write either.
-   - Mandate is meant to count a state assertion **only when the grantor wrote it**.
-     0.1.0 checks this against the declared `mandate:stateAuthor` value, so a forger
-     who writes the grantor's DID there is not caught. 0.2.0 checks the address that
-     anchored the assertion instead.
-3. **Anyone can check a delivered file** without asking either party. They hash
-   the bytes, follow the graph, and reach the same verdict.
+1. **Publisher, not claims.** Every Knowledge Asset lives in
+   `did:dkg:context-graph:<cg>/_verifiable_memory/<address>/<n>`, and the chain binds
+   that address to the asset's author. The resolver reads that path, checks the
+   asset's `_meta` anchor (confirmed, the declared triple count, the transaction), and
+   attributes the asset to it. `mandate:grantor` and `mandate:stateAuthor` must agree
+   with the publisher or the object is reported as a forgery.
+2. **Self-certifying subjects.** A subject is `0x<grantor address>:<name>`. Only that
+   address can grant or revoke for it, so nobody else can speak for Ana by writing
+   her name.
+3. **Revocation is terminal.** Any revocation anchored by the grant's publisher ends
+   the grant for good; "active" has no effect. Renewal is a new grant.
+4. **Knowledge Assets never merge.** Triples are grouped per asset, so one extra
+   triple elsewhere cannot widen a grant, and a duplicated value makes an object
+   malformed rather than picking one.
+5. **Incomplete reads refuse.** DKG v10.0.16 sometimes leaves whole graphs out of a
+   query result. Reads are merged across attempts and accepted only when complete by
+   the node's own count and every anchor's declared size, and when every anchor seen
+   before is still there. Before deciding, the CLI also asks the node how many assets
+   the chain has bound to each graph; a node that is behind refuses rather than
+   deciding from a stale view.
 
-## Demo
+The rules, data shapes and exit codes are in [`docs/CONTRACTS.md`](docs/CONTRACTS.md).
 
-The first two blocks came from the **live Livepeer Agent API**, **two DKG v10 nodes**,
-and **Base Sepolia**. The third is an earlier, narrower test, labelled as such.
-Raw logs are in [`demo/`](demo/) and the full investigation is in
-[`docs/SPIKES.md`](docs/SPIKES.md).
+## Evidence
 
-### Two parties, two nodes, one chain
+### Forgery from the producer's own node, live
 
-Run end to end from the **producer's own node**, with nothing stubbed
-([`demo/e2e.mjs`](demo/e2e.mjs)):
+[`spikes/s6c-forgery.mjs`](spikes/s6c-forgery.mjs), recorded in
+[`docs/evidence/s6c-forgery.json`](docs/evidence/s6c-forgery.json). The grantor
+granted G1 and G2 for subject `0xed1e…0b69:ana-s6c` and revoked G1, through the CLI.
+The producer then anchored three forgeries straight through the DKG API, each naming
+the grantor or its subject:
 
-```
-[ +71s] grant UAL:  did:dkg:base:84532/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/12
-[ +71s] grant tx:   0x69b9a2ded0a6f604fa4bd94769daf3aae347ea50cc6b9f131cf50f842c49a738
-[ +74s] producer, own node, after grant:  PERMITTED under urn:mandate:grant:dana-5i66
-[+148s] revoke UAL: did:dkg:base:84532/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/13
-[+152s] producer, own node, after revoke: REFUSED — clause: not-revoked
-```
+| | Claim | UAL |
+|---|---|---|
+| a | G1 is "active" again, `stateAuthor` = the grantor | `…0cb5/3` |
+| b | a grant naming the grantor, permitting `face-swap-video`, $1000 ceiling | `…0cb5/4` |
+| c | a grant naming the producer as grantor, permitting `face-swap-video` | `…0cb5/6` |
 
-The producer never contacts the grantor. It learns about the revocation from the graph.
-
-### A real render, before and after revocation
-
-A `sync-lipsync-v3` video that Livepeer actually rendered
-([`demo/media-verify.mjs`](demo/media-verify.mjs)):
+Resolved independently on the grantor's node, the producer's node, and a third
+read-only verifier node:
 
 ```
-grant UAL         did:dkg:base:84532/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/15
-derivation        authored and anchored by the PRODUCER, in its own graph
-derivation UAL    did:dkg:base:84532/0x8eaa4857b22dddbfb5ebc476087fec39336e0cb5/1
-file sha256       48a2c16d22920ce5ab051987c435bf5517e80bb7c1f50eb4b1b2e98efdbd9b88
-
-verify            CLEAR   — authorised by did:dkg:agent:0xeD1e…0B69 under urn:mandate:grant:eve-e3wr
-revoke UAL        did:dkg:base:84532/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/16
-verify            TAINTED — the grant authorising this file was revoked … by did:dkg:agent:0xeD1e…0B69
-file unchanged    yes
+talking-head     PERMITTED under G2 only
+face-swap-video  REFUSED — capability-permitted
+G1 revoked       yes
+forgery misplaced-state  0x8eaa…0cb5  did:dkg:base:84532/0x8eaa…0cb5/3  tx 0xaedeab9c…deebd0
+forgery misplaced-grant  0x8eaa…0cb5  did:dkg:base:84532/0x8eaa…0cb5/4
+forgery misplaced-grant  0x8eaa…0cb5  did:dkg:base:84532/0x8eaa…0cb5/6  tx 0x56411263…a943e0d
 ```
 
-The bytes did not change between the two verdicts. The verdict changed because
-someone else changed their mind, on a graph that neither the producer nor the
-verifier controls.
+The producer's node could not anchor (a) or (c) into the grantor's graph: it sealed
+them, then every share failed, because a peer holds only a stub of another party's
+graph. They went into the producer's own graph, where grants and states are never
+accepted. `test/adversarial.test.mjs` covers the same forgeries inside the grants
+graph.
 
-### The forgery (an earlier, narrower test)
+### End to end
 
-```
-⚠ ignored 1 state assertion(s) not authored by the grantor:
-    "active" claimed by did:dkg:agent:0x8EaA4857B22dddbfb5ebC476087FEc39336e0CB5
+[`demo/full.mjs`](demo/full.mjs) runs the whole product through the CLI: phone consent,
+grant, a refused capability, a gated `render --execute`, its derivation, `verify`
+CLEAR on the independent node, revoke, the producer refusing, `verify` TAINTED, and
+the blast radius. Each run is written to `demo/runs/<timestamp>/`.
 
-REFUSED — clause: not-revoked
-spend avoided: $1.0080 (exact — the capability was never invoked)
-```
+Runs recorded with 0.1.0 are kept in [`docs/evidence/v0.1.0/`](docs/evidence/v0.1.0/).
 
-What this shows, and what it does not:
+### On-chain (Base Sepolia, chain `base:84532`)
 
-- Recorded on 12 Sep, under the old `mandate.build` namespace, before the wallets
-  were funded. The assertion sat in Shared Working Memory on the grantor's node and
-  was never anchored.
-- The forger wrote **its own** DID as `stateAuthor`. The refusal therefore proves
-  only that the resolver compares that value with the grant's grantor.
-- A forger that wrote the **grantor's** DID would not have been caught by 0.1.0.
-  That attack, published to Verifiable Memory from the producer's own node, is
-  being re-run against the 0.2.0 resolver.
+| What | UAL | Transaction |
+|---|---|---|
+| grant G1 (`ana-s6c`) | `did:dkg:base:84532/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/27` | [`0xaedb52c8…6e44fd2`](https://sepolia.basescan.org/tx/0xaedb52c832d7dcf5830cba8464d926f1f23dd1621224b7327156ec7816e44fd2) |
+| grant G2 (`ana-s6c`) | `…0b69/28` | [`0xf1bd5875…fa4b34`](https://sepolia.basescan.org/tx/0xf1bd587515aa5b22ddf5c534b6f58ad52153f104a5f5522a81ab703719fa4b34) |
+| revocation of G1 | `…0b69/29` | [`0x61636412…c74d39`](https://sepolia.basescan.org/tx/0x616364129dd87e6d8dfedbe165832b2f5ed4d04d3d6dd4d0c31e48e492c74d39) |
+| forgery (a) | `did:dkg:base:84532/0x8eaa4857b22dddbfb5ebc476087fec39336e0cb5/3` | [`0xaedeab9c…deebd0`](https://sepolia.basescan.org/tx/0xaedeab9cf4456c117d851c4fa52e7eb6de2af8bd60bab5f8ef7b013720deebd0) |
+| forgery (b) | `…0cb5/4` | [`0xd18895bd…aa3adf`](https://sepolia.basescan.org/tx/0xd18895bdec0f1af1a250db71722a31541f2888f7eb9b97cb118db4f6f6aa3adf) |
+| forgery (c) | `…0cb5/6` | [`0x56411263…a943e0d`](https://sepolia.basescan.org/tx/0x564112634c5fa49e654c379f80ab339d5e0cdb97c3715760d57492c61a943e0d) |
+| ontology 1.1.0 | `…0b69/30` | [`0x824da77b…9bad9b`](https://sepolia.basescan.org/tx/0x824da77be0835b10efe070d0322e7250447132b173197f25202dd832ee9bad9b) |
+| ontology 1.0.0 (superseded) | `…0b69/26` | [`0x94ba6ea1…5f1dbaa`](https://sepolia.basescan.org/tx/0x94ba6ea19e437c7afefbe920052a9069a1810554145c637bcad173a0f5f1dbaa) |
+
+Grants and revocations are in context graph `0xeD1e…0B69/mandate-grants` (on-chain
+430), derivations in `0x8EaA…0CB5/mandate-derivations` (431).
+
+## What works, what is partial, what is planned
+
+| | Status |
+|---|---|
+| Provenance resolver, gate, verifier (pure functions; the test suite replays every reported attack) | working |
+| Grant, revoke and derivation writes, reported only once anchored | working, live |
+| Forgery rejection on three independent nodes | working, live |
+| Read-only verifier node with no funded wallet | working, live |
+| Stale-node refusal (chain head vs local copy) | working, live |
+| `render --execute`: inline or polled, media released only after its derivation anchors, pending-render recovery | built and tested with recorded platform responses; live run in `demo/full.mjs` |
+| Consent capture on a phone, transcription, spoken-scope check | built and tested with recorded responses; live capture in `demo/full.mjs --consent` |
+| Directory of producers' derivation graphs, so a verifier can discover them | planned |
+| A grant naming which producers may render under it | planned |
+| Derivation UAL carried in C2PA or XMP metadata | planned |
 
 ## Use it
 
-### The core: zero dependencies
+### The core: no dependencies
 
-The gate, the vocabulary, Turtle serialisation, verification, blast radius and
-reconciliation all run with **no npm packages installed**. The CI smoke test
-installs the published tarball with `--omit=peer` to prove it. Drop it into any
-render pipeline:
-
-The example below is the 0.1.0 API. It changes in 0.2.0, where `decide` takes the
-knowledge returned by the provenance resolver.
+The gate, resolver, verifier, vocabulary, RDF writers and the DKG HTTP client run with
+**no npm packages installed**. CI installs the packed tarball with `--omit=peer` to
+check it.
 
 ```js
-import { decide, verifyKnowledge } from 'mandate-consent'
+import { readKnowledge, decide, verifyKnowledge, fileStateStore } from 'mandate-consent'
+import { DkgNode } from 'mandate-consent/dkg'
 
-const d = decide(
-  { subject: 'ana-7f3c', capability: 'talking-head', useClass: 'advertising',
-    territory: 'GB', at: new Date().toISOString(), estimatedUsd: 1.008 },
-  { grants, assertions, priorSpendUsd },          // whatever your graph returned
-)
+const node = new DkgNode({ port: 9202, home: '~/.dkg-mandate-producer' })
+const cfg = {
+  grantsCg: '0xeD1eeB64CaC09874257F05Fd6B51A55695ad0B69/mandate-grants',
+  derivationsCgs: ['0x8EaA4857B22dddbfb5ebC476087FEc39336e0CB5/mandate-derivations'],
+  stateStore: fileStateStore(),
+  checkFreshness: true,
+}
+const subject = '0xed1eeb64cac09874257f05fd6b51a55695ad0b69:ana-s6c'
+const k = await readKnowledge(node, cfg, { subject })
+const d = decide({ subject, capability: 'talking-head', useClass: 'advertising',
+  territory: 'GB', at: new Date().toISOString(), estimatedUsd: 0.84 }, k)
 if (!d.permit) throw new Error(`refused: ${d.clause} — ${d.reason}`)
 ```
 
-The adapters that talk to real services are separate subpaths, each with an
-**optional peer**:
-
-| Import | What | Peer |
+| Import | What | Needs |
 |---|---|---|
-| `mandate-consent` | gate, vocabulary, verify, RDF | none |
-| `mandate-consent/dkg` | DKG v10 node client (public CLI and HTTP API only) | `@origintrail-official/dkg` |
-| `mandate-consent/livepeer` | Livepeer Agent MCP client | `@modelcontextprotocol/sdk` |
-| `mandate-consent/consent` | consent capture through a phone link | `@modelcontextprotocol/sdk` |
+| `mandate-consent` | gate, resolver, verifier, vocabulary, RDF | nothing |
+| `mandate-consent/dkg` | DKG v10 node client over its HTTP API | a running node |
+| `mandate-consent/livepeer` | Livepeer Agent MCP client | `@modelcontextprotocol/sdk` (optional peer) |
+| `mandate-consent/consent` | consent capture through a phone link | `@modelcontextprotocol/sdk` (optional peer) |
 
-### The CLI
+### Try it without funding anything
 
-Requires Node ≥ 22.13 and two DKG v10 nodes, one per party. Docker is not needed.
+A read-only node can read the demo's public graphs and run every check. It never
+publishes, so it needs no wallet funds.
 
 ```bash
-npm install mandate-consent @origintrail-official/dkg @modelcontextprotocol/sdk
-cp node_modules/mandate-consent/.env.example .env     # or set the variables yourself
+git clone https://github.com/OoJae/mandate && cd mandate && npm install
+npm test && npm run smoke:pack                  # no network needed
 
-npx mandate status                                    # two nodes, two distinct agent DIDs
-npx mandate grant  --subject ana-7f3c --capability talking-head   # runs on the grantor's node
-npx mandate render --subject ana-7f3c --capability talking-head   # decides; add --execute to spend
-npx mandate revoke --id urn:mandate:grant:ana-7f3c
-npx mandate verify --url https://…/delivered.mp4
+cp .env.example .env    # then set the two graph ids to the read-only ones listed in it
+node scripts/nodes.mjs up verifier              # first boot takes ~2 min; catching up took ~10
+node scripts/nodes.mjs doctor verifier          # subscribed, and current with the chain
+
+# Resolve the forgery subject on your own node: PERMITTED under G2, three forgeries reported.
+MANDATE_PRODUCER_PORT=9203 MANDATE_PRODUCER_HOME=~/.dkg-mandate-verifier \
+  node bin/mandate.mjs render --subject 0xed1eeb64cac09874257f05fd6b51a55695ad0b69:ana-s6c \
+  --capability talking-head --use-class advertising --territory GB --seconds 5
 ```
 
-To work on the repo itself: `npm install`, then `npm test` (36 tests, no network
-needed), then `npm run smoke:pack`.
+`render` without `--execute` never dispatches anything, and reads only.
 
-## The vocabulary
+### Run both parties
 
-Namespace: **<https://oojae.github.io/mandate/ns/v1#>**. The IRI resolves to a
-spec page generated from the ontology.
+Requires Node ≥ 22.13 and Base Sepolia ETH on the grantor's and producer's wallets
+(a publish costs about 0.000005 ETH).
 
-- [`vocab/mandate.ttl`](vocab/mandate.ttl) is the ontology: 4 classes and 28
-  properties, each with a label, comment, domain and range.
-- [`vocab/context.jsonld`](vocab/context.jsonld) is a JSON-LD context.
-- **The ontology is itself published on the DKG, in the system Ontology Registry.**
-  - UAL `did:dkg:base:84532/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/26`
-  - tx `0x94ba6ea19e437c7afefbe920052a9069a1810554145c637bcad173a0f5f1dbaa`
-  - Any DKG node can query it.
+```bash
+cp .env.example .env
+node scripts/nodes.mjs up grantor producer verifier
 
-DKG v10 has no Knowledge Asset revocation primitive, so Mandate defines one.
-The rule: a resolver **must** ignore any state assertion not written by the grant's
-grantor. "Written by" has to mean the address that anchored the assertion, not the
-`mandate:stateAuthor` value inside it, and 0.1.0 gets this wrong (see the security
-notice).
+# One context graph per party, created and registered on-chain from its own node.
+# `create` prefixes the id with that node's agent address; put both ids in .env.
+DKG_HOME=~/.dkg-mandate-grantor  npx dkg context-graph create mandate-grants
+DKG_HOME=~/.dkg-mandate-grantor  npx dkg context-graph register 0x<grantor>/mandate-grants --publish-policy 1
+DKG_HOME=~/.dkg-mandate-producer npx dkg context-graph create mandate-derivations
+DKG_HOME=~/.dkg-mandate-producer npx dkg context-graph register 0x<producer>/mandate-derivations --publish-policy 1
+node scripts/nodes.mjs subscribe && node scripts/nodes.mjs sync
+
+node bin/mandate.mjs status
+node bin/mandate.mjs grant  --subject ana --capability sync-lipsync-v3 --use-class advertising --territory GB --max-spend 5 [--with-consent]
+node bin/mandate.mjs render --subject 0x<grantor>:ana --capability sync-lipsync-v3 --use-class advertising --territory GB --seconds 5 \
+  [--execute --image-url <url> --audio-url <url>]
+node bin/mandate.mjs verify --url <delivered file>
+node bin/mandate.mjs revoke --id <grant id>
+node bin/mandate.mjs blast-radius --grant <grant id>
+node bin/mandate.mjs record                      # renders whose derivation did not commit
+```
+
+Installed from npm, the same commands are `npx mandate …`. `--help` on any command lists
+its flags, and `--json` prints one result object. The resolver does not rely on the graphs'
+publish policy: open graphs are safe to read.
+
+| Exit | Meaning |
+|---|---|
+| 0 | success, permitted, CLEAR |
+| 1 | usage error |
+| 2 | refused by the gate; TAINTED or UNKNOWN |
+| 3 | consent not confirmed (transcription failed, or terms missing) |
+| 4 | rendered, but its derivation failed to commit (run `mandate record`) |
+| 5 | render failed |
+| 6 | DKG write failed before anchoring |
+| 7 | DKG anchor not confirmed (minted but unbound, or unknown after send) |
+| 8 | consent contradicted; never overridable |
+| 9 | node unreachable, stale, or read incomplete (INCONCLUSIVE) |
+| 10 | Livepeer payment or credential problem |
 
 ## How Livepeer Agent is used
 
-Livepeer carries weight here. It is not a swappable image API.
+| Tool | What Mandate does with it |
+|---|---|
+| `run_capability` on `/api/mcp/raw` | Every gated render. The raw surface **never substitutes models**, so a render cannot be routed to a sibling model nobody consented to. Inline (`async:false`, 280 s budget, under Node's 300 s stream limit) unless the capability's measured p95 is over 200 s. |
+| `get_create_media` | Polls background jobs to a result; `mandate record` uses it to finish a render after a crash. |
+| `describe_capability` | Reads the measured p95 that chooses inline or background. |
+| `get_pricing` | The live list price behind every estimate; an unknown price under a ceiling refuses. |
+| `spend_cap` | Read only: a render over the account's remaining 24 h budget is not dispatched. Mandate never changes the cap. |
+| `request_upload`, `get_upload` | A 30-minute link the depicted person opens on their own phone to record consent. No API key needed. |
+| `nemotron-asr` (via `run_capability`) | Transcribes the clip, so the spoken words are checked against the grant's clauses. |
 
-- **`run_capability` on `/api/mcp/raw`.** Every gated render goes through the raw
-  surface *because it never substitutes models*. The creative surface is
-  documented to substitute. A gate the pipeline can route around, to a sibling
-  model nobody cleared, is not a gate.
-- **`request_upload`.** It mints a 30-minute link that opens on a phone, and it
-  needs no API key. Consent becomes a step inside the conversation instead of an
-  email chain.
-- **`nemotron-asr`** transcribes the spoken consent clip. The words spoken are
-  compared with the scope requested; the result is reported for a person to review,
-  not decided automatically.
-- **`describe_capability`, `get_cost_report`, `spend_cap`** supply capability
-  metadata, spend reporting, and a second limit behind our own ceiling check.
-- **Gated capabilities**, all verified live: `talking-head`, `face-swap-image`,
-  `face-swap-video`, `lipsync`, `sync-lipsync-v3`, `heygen-twin`.
+Every call above is keyless on the demo tier. Idempotency keys derived from the grant and
+inputs mean a retried render returns the first result instead of billing again.
 
-## Beyond this repo
+## The vocabulary
 
-- **npm:** [`mandate-consent`](https://www.npmjs.com/package/mandate-consent). The
-  core has zero dependencies; the adapters' packages are optional peers.
-- **OriginTrail DKG integrations registry:** listing submitted as a draft,
-  [OriginTrail/dkg-integrations#31](https://github.com/OriginTrail/dkg-integrations/pull/31).
-  It was validated locally with the registry's own `validate.mjs` and
-  `security-checks.mjs`.
-- **Livepeer community skill:** [`skills/likeness-consent.md`](skills/likeness-consent.md)
-  carries the consent norm for any Livepeer agent: explicit, current, scoped
-  consent; no identifying people from their faces; refuse and say what is missing;
-  honour withdrawal. The skill catalogue permits style and domain guidance only, so
-  **a skill asks an agent to behave, while the gate is what actually stops the
-  spend.** Publishing is pending an API key: `node scripts/publish-skill.mjs --publish`.
-  Daydream `sk_` keys were retired partway through the hackathon, and Livepeer Agent
-  now requires a PymtHouse composite key issued to a registered developer app.
-  Mandate itself runs on the keyless tier.
+Namespace **<https://oojae.github.io/mandate/ns/v1#>**, version **1.1.0**. The
+namespace IRI resolves to a spec page generated from the ontology, and each version
+has a fixed copy at `ns/v1/<version>/`.
+
+- [`vocab/mandate.ttl`](vocab/mandate.ttl): 4 classes, 28 properties, each with a
+  label, comment, domain and range. [`vocab/context.jsonld`](vocab/context.jsonld): a
+  JSON-LD context.
+- Anchored in the DKG's system `ontology` graph (UALs above), so any DKG node can read
+  it without trusting this repository's host.
+- DKG v10 has no revocation primitive, so Mandate defines one. The rule a resolver must
+  follow is stated on `mandate:stateAuthor`: attribute by the anchoring address, never by
+  that value. Version 1.0.0 stated it the other way round.
 
 ## Where the data lives (Track 2 requirement)
 
-Each party writes only to a graph it owns. Verifiers read both.
-
-| Graph | Owner | Holds | Layer |
-|---|---|---|---|
-| grants (on-chain CG 430) | grantor | grant clauses, revocations | published to Verifiable Memory |
-| derivations (on-chain CG 431) | producer | output hash, serving capability, authorising grant | published to Verifiable Memory |
-| system `ontology` | — | the Mandate vocabulary | published to Verifiable Memory |
-
-Data sits in three places:
-
 | Where | What | Who can see it |
 |---|---|---|
-| **Local only** | `.env`, DKG node API tokens, node keys, scratch Turtle files | this machine |
-| **Sent to Livepeer Agent and its providers** | the consent clip (uploaded through `request_upload`, then transcribed by `nemotron-asr`), its transcript, reference images and audio, prompts, and the rendered output | Livepeer and the model provider that serves the call. Uploads and outputs sit at URLs that anyone holding the link can fetch; retention follows Livepeer's policy, not Mandate's. |
-| **Published on the DKG (Verifiable Memory, permanent)** | subject identifier, grantor and producer DIDs, grant clauses, dates, ceiling, consent-clip SHA-256, output SHA-256, serving capability, platform job id, cost estimate | anyone who syncs the graph |
+| **This machine** | `.env`, DKG node API tokens and keys, `~/.mandate` (anchors seen, pending renders) | this machine |
+| **Livepeer Agent and its providers** | the consent clip (uploaded through `request_upload`, transcribed by `nemotron-asr`), its transcript, reference images and audio, prompts, and the rendered output | Livepeer and the provider serving the call. Uploads and outputs sit at URLs anyone holding the link can fetch; retention follows Livepeer's policy. |
+| **DKG Verifiable Memory (permanent, public)** | subject identifier, DIDs, grant clauses, dates, ceiling, consent-clip SHA-256, output SHA-256, serving capability, job id, cost estimate | anyone who syncs the graph |
 
-No faces, biometrics, media bytes or real names are published to the DKG. Media
-does go to Livepeer: that is how it is rendered.
+No faces, biometrics, media bytes, transcripts or real names are published to the DKG.
+Each party writes only to a graph it owns: grants and revocations to the grantor's,
+derivations to the producer's. Shared Working Memory did not reach the other party for
+these graphs, so everything that matters is anchored in Verifiable Memory.
 
-Grants, revocations and derivations **must** be published to Verifiable Memory.
-We measured that Shared Working Memory for these graphs did not reach the other
-party, so a revocation left there would leave the producer still rendering.
+Who runs the grantor node is a deployment choice: an agency, a union or a hosted consent
+service holding the key on the person's behalf. The depicted person only opens a link
+and records a clip.
 
-**Mandate deliberately does not do biometric identification.** There is no
-face-embedding capability on Livepeer. A "salted, non-invertible hash of a face
-embedding that stays stable across photos" also contradicts itself: hashing
-destroys the distances that face matching depends on. The subject identifier is
-**declared**, and the consent clip is evidence bound to it by SHA-256.
+**Mandate does not do biometric identification.** Livepeer has no face-embedding
+capability, and a "stable, non-invertible hash of a face" contradicts itself: hashing
+destroys the distances face matching depends on. The subject is **declared**, and the
+consent clip is evidence bound to the grant by SHA-256.
 
 ## Known limitations
 
-These are stated plainly so a judge can tell what works from what is planned.
+- **The gate is opt-in.** It binds producers that run it. Enforcement has to happen where
+  files are accepted, or inside Livepeer's own dispatch, which Mandate cannot add from
+  outside.
+- **Verification matches exact bytes.** Any re-encode, trim or recompression gives a new
+  hash and verifies `UNKNOWN`. It is meant for the delivery or intake hop, and complements
+  embedded provenance such as C2PA rather than replacing it.
+- **A verifier has to know which graphs to read, and whose derivations to trust.** Both
+  are configuration (`MANDATE_DERIVATIONS_CG`, `MANDATE_TRUSTED_PRODUCERS`). A producer
+  outside that list verifies `UNKNOWN`.
+- **A grant does not yet name its producers.** A trusted producer can record a render
+  under any live grant that permits the capability. The producer also chooses which
+  subject a request is for; nothing checks the reference image is the subject's face.
+- **Everything linked to a subject is public and permanent.** Output hashes, capabilities,
+  dates and costs can be tied to a subject and never erased. Use a subject name that means
+  nothing outside the relationship.
+- **Revocation is not instant.** Other nodes refuse once they have synced the revocation's
+  anchor. A publish took 82–109 s end to end in the S6c run. A node that stops syncing
+  now refuses once the chain shows it is behind, but only when the freshness check can run
+  (it needs the node's admin token).
+- **The spend ceiling is enforced by the producer's gate**, from list-price estimates and
+  trusted producers' records. It is advisory, not a platform limit, and estimates are not
+  invoices; failed renders can still be billed by the provider.
+- **DKG v10.0.16 cannot publish a literal containing a double quote or a line break**,
+  however it is escaped. Mandate refuses such values with an error naming the field.
+- **Livepeer's background worker abandoned jobs at about 128 s** in three attempts
+  (`runner_abandoned`). Renders run inline where they can for that reason.
+- **All three nodes ran on one machine**, with separate homes and keys. The producer never
+  holds the grantor's key, but they are not separate organisations.
 
-- **0.1.0 trusts self-declared authorship.** See the security notice at the top.
-- **The gate is opt-in.** It binds producers that run it. A producer that calls
-  Livepeer directly is not stopped; its files verify `UNKNOWN`. Enforcement has to
-  happen where files are accepted. A consent check inside Livepeer's own dispatch
-  would close this, and is not something Mandate can add from outside.
-- **An incomplete read can permit.** An empty or failed read refuses. A read that
-  misses a later revocation, or earlier derivations that count toward the ceiling,
-  can permit. That is the revocation window below, and 0.1.0 has no check for it.
-- **Verification matches exact bytes.** Any re-encode, trim or recompression gives a
-  new hash, and the file verifies `UNKNOWN`.
-- **A verifier has to know which graphs to read.** There is no discovery; the graph
-  ids are configuration.
-- **The spend ceiling is enforced by the producer's own gate,** from its own
-  estimates and records. It is advisory, not a platform limit.
-- **Consent capture has not run end to end.** The phone-link and transcription path
-  is built, but no real consent clip has gone through it yet.
+## Beyond this repo
 
-- **A CLEAR verdict does not yet bind the producer.**
-  - What it proves: every derivation edge for those bytes links to a live grant
-    that permits the capability that served it.
-  - What it does not prove: that the edge was written by a producer the grantor
-    chose. A grant does not yet name its permitted producers.
-  - Consequence: someone could write an edge linking an unauthorised render to a
-    live grant.
-  - Planned fix: a `mandate:permitsProducer` allowlist, checked against the
-    derivation's seal author.
-  - Intended: laundering a file made under a *revoked* grant is blocked, because
-    every edge is judged and one tainted edge taints the file. In 0.1.0 a second
-    edge that reuses the same derivation IRI merges into the first, so this depends
-    on row order; 0.2.0 gives every edge its own IRI and keeps Knowledge Assets apart.
-- **Revocation is not instant across parties.** After the revocation is anchored,
-  the independent producer node refused within 4, 27 and 49 seconds across three
-  runs. The revoke command itself (seal, share, anchor) takes 13–75 seconds. During
-  that window a producer reading its own node may still permit.
-- **DKG v10.0.16 cannot publish a literal that contains a double quote or a line
-  break**, however it is escaped. The node unescapes its input, re-serialises
-  without re-escaping, and fails to parse its own output. We confirmed this with
-  probe drafts. Mandate refuses such literals with an error naming the field, and
-  never silently rewrites them.
-- **A peer cannot write into another party's context graph.** It holds only a stub
-  of the graph definition, and the grantor's node logs `RFC-64 authority bootstrap
-  incomplete … ERC721NonexistentToken`. This is why derivations live in the
-  producer's own graph.
-- **Livepeer's async worker abandons jobs at about 128 seconds.** Three submissions
-  died this way with `runner_abandoned`. The same render **succeeded inline in 103
-  seconds**, but the 0.1.0 CLI does not yet request inline mode, and `render --execute`
-  has not been run end to end. A refusal never invokes the capability, so no refusal
-  can be broken by a provider failure.
-- **`talking-head` is audio-driven.** It rejects a text-only prompt, so speech has
-  to be synthesised first.
-- **The subject is a declared identifier.** It is not proof of identity and not a
-  legal determination.
-- **Costs are list-price estimates**, not invoices, and failed renders are still
-  billed. The one exact figure is *spend avoided by a refusal*, because nothing was
-  called.
-- **Both nodes run on one machine**, with separate `DKG_HOME`s and separate keys. The
-  producer never holds the grantor's key, but they are not two organisations.
-- **UALs `…/4` to `…/11` in `docs/SPIKES.md` predate the move from the
-  `mandate.build` namespace** and are superseded by the ones above.
+- **npm:** [`mandate-consent`](https://www.npmjs.com/package/mandate-consent).
+- **OriginTrail DKG integrations registry:** listing submitted as a draft,
+  [OriginTrail/dkg-integrations#31](https://github.com/OriginTrail/dkg-integrations/pull/31).
+- **Livepeer community skill:** [`skills/likeness-consent.md`](skills/likeness-consent.md)
+  carries the consent norm for any Livepeer agent: explicit, current, scoped consent; no
+  identifying people from their faces; refuse and say what is missing; honour withdrawal.
+  **A skill asks an agent to behave; the gate is what stops the spend.** Publishing it
+  needs a PymtHouse key (Livepeer Agent retired Daydream `sk_` keys in September 2026):
+  `node scripts/publish-skill.mjs --publish`.
+
+The investigation behind every number here is in [`docs/SPIKES.md`](docs/SPIKES.md), and
+the internal contracts in [`docs/CONTRACTS.md`](docs/CONTRACTS.md).
 
 ## Licence
 

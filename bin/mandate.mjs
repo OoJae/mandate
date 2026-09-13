@@ -99,7 +99,10 @@ function printForgeries(out, forgeries = []) {
 }
 
 function printWarnings(out, warnings = []) {
-  for (const w of warnings.slice(0, 5)) out.line(c.dim(`  note: ${clean(w, 240)}`))
+  const legacy = warnings.filter(w => /not a current-format|non-current grant id/.test(w))
+  const rest = warnings.filter(w => !legacy.includes(w))
+  if (legacy.length) out.line(c.dim(`  note: ignored ${legacy.length} object(s) in the 0.1.0 id format (use --json to list them)`))
+  for (const w of rest.slice(0, 5)) out.line(c.dim(`  note: ${clean(w, 240)}`))
 }
 
 /* ------------------------------------------------------------------------- */
@@ -300,7 +303,7 @@ async function cmdRender(flags, out) {
 
     // The producer resolves from its own node: the party that must not be able to vouch for itself.
     const resolver = PRODUCER()
-    out.line(c.dim(`\n  resolving from ${resolver.name}…`))
+    out.line(c.dim(`\n  resolving from ${resolver.name} (:${resolver.port})…`))
     const k = await readKnowledge(resolver, readConfig(), { subject })
     out.line(c.dim(`  ${k.grants.length} grant(s), ${k.states.length} revocation(s), ${k.derivations.length} trusted derivation(s), read in ${k.consistency.attempts} attempt(s)`))
 
@@ -510,7 +513,7 @@ async function cmdConsent(flags, out) {
   return r.code
 }
 
-/** The third-party check. Takes a file and asks neither party. */
+/** The third-party check: a file, the configured graphs, and neither party's word. */
 async function cmdVerify(flags, out) {
   if (Boolean(flags.url) === Boolean(flags.sha256)) throw new UsageError('verify needs exactly one of --url or --sha256')
   const choice = flags.node ?? 'verifier'
