@@ -1,0 +1,111 @@
+{
+  "@context": {
+    "@version": 1.1,
+    "mandate": "https://oojae.github.io/mandate/ns/v1#",
+    "xsd": "http://www.w3.org/2001/XMLSchema#",
+    "Derivation": "mandate:Derivation",
+    "GrantState": "mandate:GrantState",
+    "LikenessGrant": "mandate:LikenessGrant",
+    "Refusal": "mandate:Refusal",
+    "authorizedUnder": {
+      "@id": "mandate:authorizedUnder",
+      "@type": "@id"
+    },
+    "billedUsd": {
+      "@id": "mandate:billedUsd",
+      "@type": "xsd:decimal"
+    },
+    "consentClipSha256": {
+      "@id": "mandate:consentClipSha256"
+    },
+    "consentTranscript": {
+      "@id": "mandate:consentTranscript"
+    },
+    "deniedByClause": {
+      "@id": "mandate:deniedByClause"
+    },
+    "derivedAt": {
+      "@id": "mandate:derivedAt",
+      "@type": "xsd:dateTime"
+    },
+    "forbidsUseClass": {
+      "@id": "mandate:forbidsUseClass",
+      "@container": "@set"
+    },
+    "grantor": {
+      "@id": "mandate:grantor",
+      "@type": "@id"
+    },
+    "loraId": {
+      "@id": "mandate:loraId"
+    },
+    "maxSpendUsd": {
+      "@id": "mandate:maxSpendUsd",
+      "@type": "xsd:decimal"
+    },
+    "outputSha256": {
+      "@id": "mandate:outputSha256"
+    },
+    "permitsCapability": {
+      "@id": "mandate:permitsCapability",
+      "@container": "@set"
+    },
+    "permitsUseClass": {
+      "@id": "mandate:permitsUseClass",
+      "@container": "@set"
+    },
+    "refusedAt": {
+      "@id": "mandate:refusedAt",
+      "@type": "xsd:dateTime"
+    },
+    "refusedCapability": {
+      "@id": "mandate:refusedCapability"
+    },
+    "refusedSubject": {
+      "@id": "mandate:refusedSubject"
+    },
+    "servedCapability": {
+      "@id": "mandate:servedCapability"
+    },
+    "servedModelId": {
+      "@id": "mandate:servedModelId"
+    },
+    "sessionId": {
+      "@id": "mandate:sessionId"
+    },
+    "spendAvoidedUsd": {
+      "@id": "mandate:spendAvoidedUsd",
+      "@type": "xsd:decimal"
+    },
+    "state": {
+      "@id": "mandate:state"
+    },
+    "stateAt": {
+      "@id": "mandate:stateAt",
+      "@type": "xsd:dateTime"
+    },
+    "stateAuthor": {
+      "@id": "mandate:stateAuthor",
+      "@type": "@id"
+    },
+    "stateOf": {
+      "@id": "mandate:stateOf",
+      "@type": "@id"
+    },
+    "subject": {
+      "@id": "mandate:subject"
+    },
+    "territory": {
+      "@id": "mandate:territory",
+      "@container": "@set"
+    },
+    "validFrom": {
+      "@id": "mandate:validFrom",
+      "@type": "xsd:dateTime"
+    },
+    "validUntil": {
+      "@id": "mandate:validUntil",
+      "@type": "xsd:dateTime"
+    }
+  }
+}

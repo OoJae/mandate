@@ -8,7 +8,12 @@
  * delivered file for themselves.
  */
 
-export const NS = 'https://mandate.build/ns/v1#'
+/**
+ * An IRI we control and that resolves: the spec page and the machine-readable
+ * ontology are served from GitHub Pages at exactly this path. A vocabulary under
+ * a domain someone else could register is a vocabulary someone else can redefine.
+ */
+export const NS = 'https://oojae.github.io/mandate/ns/v1#'
 export const t = name => `${NS}${name}`
 
 /** Classes. */
