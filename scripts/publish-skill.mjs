@@ -64,6 +64,13 @@ if (!process.env.LIVEPEER_AGENT_KEY) {
   console.error('\nLIVEPEER_AGENT_KEY is not set. Add it to .env (gitignored); refusing to publish keyless.')
   process.exit(2)
 }
+if (process.env.LIVEPEER_AGENT_KEY.startsWith('sk_')) {
+  // Measured 2026-09-13: the endpoint rejects the whole connection with 401,
+  // "Daydream sk_ API keys are retired … Use a pymthouse composite key instead".
+  console.error('\nLIVEPEER_AGENT_KEY is a Daydream sk_ key, which Livepeer Agent has retired.\n'
+    + 'It needs a PymtHouse composite key: app_<appId>_pmth_<token>.')
+  process.exit(2)
+}
 
 const { connect, textOf, FULL } = await import('../src/livepeer.mjs')
 const client = await connect(FULL)

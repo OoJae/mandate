@@ -219,6 +219,9 @@ Livepeer carries weight here. It is not a swappable image API.
   honour withdrawal. The skill catalogue permits style and domain guidance only, so
   **a skill asks an agent to behave, while the gate is what actually stops the
   spend.** Publishing is pending an API key: `node scripts/publish-skill.mjs --publish`.
+  Daydream `sk_` keys were retired partway through the hackathon, and Livepeer Agent
+  now requires a PymtHouse composite key issued to a registered developer app.
+  Mandate itself runs on the keyless tier.
 
 ## Where the data lives (Track 2 requirement)
 

@@ -491,3 +491,38 @@ Queried from the **producer's** node on the first attempt:
 ```
 SELECT ?label WHERE { mandate:stateAuthor rdfs:label ?label }   ->   "state author"
 ```
+
+---
+
+## Livepeer Agent retired Daydream `sk_` keys (2026-09-13)
+
+A freshly created Daydream `sk_` key, well-formed (67 characters, no whitespace),
+was rejected before any tool ran. The MCP transport itself returned 401:
+
+```
+Daydream `sk_` API keys are retired and can no longer pay for inference on this network.
+Use a pymthouse composite key instead — Authorization: Bearer app_<appId>_pmth_<token>
+(see docs/pymthouse-oauth.SKILL.md to mint one). Retrying with an sk_ key will fail identically.
+```
+
+What that means in practice:
+
+- **A present-but-retired key is worse than no key.** With it in `.env`, every
+  Livepeer call Mandate makes fails at connection time, including calls that work
+  keyless. Removing it restored `describe_capability` and `request_upload`
+  immediately.
+- **The platform contradicts itself.** The keyless `me` response still says to get a
+  key "at https://app.daydream.live", and the hackathon's get-started page still
+  documents `sk_` keys.
+- **The replacement is not self-serve.** PymtHouse is a billing and identity
+  platform for developer apps. Its quickstart says the `app_…` client id and
+  `pmth_…` credentials come from "your registered developer app … ask your platform
+  admin". The referenced `pymthouse-oauth.SKILL.md` is not published at any
+  `agent.livepeer.org` path we tried, and the public Livepeer Agent source
+  (`eliteprox/storyboard`, `lib/mcp-server/key-validation.ts`) still lists `sk_` as
+  an accepted scheme, so the live deployment is ahead of its public code.
+
+Consequences: Mandate runs entirely on the keyless demo tier, which is unaffected.
+The only thing blocked is publishing the community skill under an owner key.
+`scripts/publish-skill.mjs` now refuses an `sk_` key with that explanation instead
+of failing with an opaque 401.
