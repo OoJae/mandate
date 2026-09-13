@@ -151,35 +151,20 @@ async function cmdGrant(flags, out) {
   const overlap = forbids.filter(u => permitted.includes(u))
   if (overlap.length) throw new UsageError(`--forbid and --use-class both list ${overlap.join(', ')}`)
 
+  const now = Date.now()
+  const validFrom = flags.validFrom ?? new Date(now).toISOString()
+  const validUntil = flags.validUntil ?? new Date(now + 90 * 864e5).toISOString()
   let consent = null
   if (flags.withConsent) {
-    out.line(c.bold('\nCapturing consent in the conversation\n'))
-    const { captureConsent } = await (async () => { await livepeer(); return import('../src/consent.mjs') })()
-    consent = await captureConsent({
-      requested: { useClass: permitted, territory: flags.territory ?? [] },
-      onLink: url => {
-        out.line('  Open this on the phone of the person being depicted:')
-        out.line(c.bold(`    ${clean(url, 300)}`))
-        out.line(c.dim('  Record a short clip saying what you agree to. Waiting…\n'))
-      },
-    })
-    if (!consent.captured) {
-      out.line(c.red('  No clip arrived before the link expired. Not granting.\n'))
-      out.result({ granted: false, reason: 'no consent clip' })
-      return EXIT.CONSENT_UNCONFIRMED
+    const requested = { capability: flags.capability, useClass: permitted, territory: flags.territory ?? [], validUntil, maxSpendUsd: flags.maxSpend ?? null }
+    const r = await captureAndCheck(flags, out, requested, { allowForce: true })
+    if (r.code !== EXIT.OK) {
+      out.result({ granted: false, consent: r.summary })
+      return r.code
     }
-    out.line(c.green(`  clip received  sha256 ${consent.sha256}`))
-    if (consent.scope) {
-      out.line(`  spoken scope   ${consent.scope.covered}/${consent.scope.total} terms mentioned`)
-      if (consent.scope.missing.length && !flags.force) {
-        out.line(c.yellow('\n  Spoken consent does not cover everything requested. Re-record, narrow the grant, or pass --force.\n'))
-        out.result({ granted: false, reason: 'spoken consent incomplete', missing: consent.scope.missing })
-        return EXIT.CONSENT_UNCONFIRMED
-      }
-    }
+    consent = r.consent
   }
 
-  const now = Date.now()
   const nonce = nonce16()
   const grant = {
     id: `urn:mandate:grant:${subject}:${nonce}`,
@@ -190,8 +175,8 @@ async function cmdGrant(flags, out) {
     permitsUseClass: permitted,
     forbidsUseClass: forbids,
     territory: flags.territory ?? [],
-    validFrom: flags.validFrom ?? new Date(now).toISOString(),
-    validUntil: flags.validUntil ?? new Date(now + 90 * 864e5).toISOString(),
+    validFrom,
+    validUntil,
     maxSpendUsd: flags.maxSpend ?? null,
   }
   const quads = grantToQuads(grant)
@@ -462,18 +447,67 @@ async function cmdRecord(flags, out) {
   return commitDerivation(out, pending, pending.load(rec.key))
 }
 
-async function cmdConsent(flags, out) {
+/**
+ * Capture a consent clip and check what was said against what is requested.
+ * Contradictions are never overridable; missing terms and a failed
+ * transcription are, with --force, where the command allows it.
+ */
+async function captureAndCheck(flags, out, requested, { allowForce = false } = {}) {
   await livepeer()
-  const { captureConsent } = await import('../src/consent.mjs')
+  const { captureConsent, consentScript } = await import('../src/consent.mjs')
+  const force = allowForce && flags.force
+  out.line(c.bold('\nConsent capture\n'))
+  out.line('  Ask the person being depicted to record themselves saying, in their own words, something like:')
+  out.line(c.bold(`\n    "${consentScript(requested)}"\n`))
+  const kind = flags.consentKind ?? 'video'
   const r = await captureConsent({
-    requested: { useClass: flags.useClass, territory: flags.territory ?? [] },
-    onLink: url => out.line(`\n  Open on a phone: ${c.bold(clean(url, 300))}\n  ${c.dim('waiting…')}`),
+    requested, kind,
+    onLink: (url, { expiresAt }) => {
+      out.line(`  Open this on their phone (records ${kind}; valid until ${expiresAt}):`)
+      out.line(c.bold(`    ${clean(url, 300)}`))
+      out.line(c.dim('  Waiting for the upload…'))
+    },
+    onPending: ({ polls, remainingMs }) => { if (polls % 6 === 0) out.line(c.dim(`  still waiting (${Math.round(remainingMs / 60000)} min left)`)) },
   })
-  out.line(r.captured ? c.green(`\n  captured  sha256 ${r.sha256}`) : c.red('\n  nothing uploaded'))
-  if (r.transcript) out.line(`\n  transcript: ${clean(r.transcript, 400)}`)
-  if (r.scope) out.line(`  ${clean(r.scope.note, 300)}\n`)
-  out.result({ captured: r.captured, sha256: r.sha256 ?? null, transcript: r.transcript ?? null, scope: r.scope ?? null })
-  return r.captured ? EXIT.OK : EXIT.CONSENT_UNCONFIRMED
+  const summary = { captured: r.captured, sha256: r.sha256 ?? null, bytes: r.bytes ?? null, transcript: r.transcript ?? null, asrError: r.asrError ?? null, scope: r.scope ?? null, raw: r.raw ?? null }
+  if (!r.captured) {
+    out.line(c.red('\n  No clip arrived before the link expired. Nothing was granted.\n'))
+    return { code: EXIT.CONSENT_UNCONFIRMED, summary }
+  }
+  out.line(c.green(`\n  clip received  sha256 ${r.sha256}  (${r.bytes} bytes)`))
+  if (r.asrError) {
+    out.line(c.red(`  transcription failed: ${clean(r.asrError, 300)}`))
+    out.line(c.dim(`  The spoken scope could not be checked.${kind === 'video' ? ' Recording audio only (--consent-kind audio) may transcribe more reliably.' : ''}`))
+    if (!force) return { code: EXIT.CONSENT_UNCONFIRMED, summary }
+    out.line(c.yellow('  --force: continuing without a transcript. A person must review the clip.'))
+    return { code: EXIT.OK, consent: r, summary }
+  }
+  out.line(`\n  transcript  "${clean(r.transcript, 1200)}"\n`)
+  for (const chk of r.scope.checks) {
+    const mark = chk.contradicted ? c.red('✗ contradicted') : chk.matched ? c.green('✓ said') : c.yellow('? not said')
+    out.line(`    ${mark.padEnd(24)} ${chk.kind.padEnd(10)} ${chk.term}${chk.heard.length ? c.dim(`  (heard: ${chk.heard.join(', ')})`) : ''}`)
+  }
+  if (r.scope.contradicted.length) {
+    out.line(c.red(`\n  CONTRADICTED — the clip says no to: ${r.scope.contradicted.join(', ')}. This cannot be overridden.\n`))
+    return { code: EXIT.CONSENT_CONTRADICTED, summary }
+  }
+  if (r.scope.missing.length) {
+    out.line(c.yellow(`\n  Not said: ${r.scope.missing.join(', ')}.`))
+    if (!force) {
+      out.line(c.yellow(`  Re-record, narrow the request${allowForce ? ', or pass --force after reviewing the clip' : ''}.\n`))
+      return { code: EXIT.CONSENT_UNCONFIRMED, summary }
+    }
+    out.line(c.yellow('  --force: continuing. The transcript above is what was actually said.'))
+  }
+  return { code: EXIT.OK, consent: r, summary }
+}
+
+async function cmdConsent(flags, out) {
+  const requested = { capability: flags.capability ?? [], useClass: flags.useClass, territory: flags.territory ?? [] }
+  const r = await captureAndCheck(flags, out, requested)
+  out.result(r.summary)
+  if (r.code === EXIT.OK) out.line(c.green('  Every requested term was said.\n'))
+  return r.code
 }
 
 /** The third-party check. Takes a file and asks neither party. */
