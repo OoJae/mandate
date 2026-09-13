@@ -40,10 +40,7 @@
 <main>
 <h1>Mandate: likeness and voice consent vocabulary</h1>
 <p class="meta">Version 1.0.0 · Namespace <code>https://oojae.github.io/mandate/ns/v1#</code> · Apache-2.0</p>
-<p>A vocabulary for publishing consent to render a person's likeness or voice,
-revoking it, and recording what was produced under it — so that the party who
-grants permission, the party who renders, and a third party who trusts neither
-can all reach the same verdict from the same graph.</p>
+<p>A vocabulary for publishing consent to render a person's likeness or voice, revoking it, and recording what was produced under it — so that the party who grants permission, the party who renders, and a third party who trusts neither can all reach the same verdict from the same graph.</p>
 
 <div class="rule">
   <p><strong>The authorship rule.</strong> A <code>mandate:GrantState</code> assertion counts only when its
@@ -63,10 +60,7 @@ can all reach the same verdict from the same graph.</p>
 <article class="term" id="LikenessGrant">
   <h3><a href="#LikenessGrant">LikenessGrant</a></h3>
   <p class="iri"><code>https://oojae.github.io/mandate/ns/v1#LikenessGrant</code></p>
-  <p>Permission, authored by the depicted person's own agent, to render their
-likeness or voice with named capabilities, for named uses, in named territories,
-within a validity window and a spend ceiling. Identifies its subject by a declared
-identifier, never by biometric data.</p>
+  <p>Permission, authored by the depicted person's own agent, to render their likeness or voice with named capabilities, for named uses, in named territories, within a validity window and a spend ceiling. Identifies its subject by a declared identifier, never by biometric data.</p>
   
 </article>
 <article class="term" id="grantor">
@@ -139,10 +133,7 @@ identifier, never by biometric data.</p>
 <article class="term" id="GrantState">
   <h3><a href="#GrantState">GrantState</a></h3>
   <p class="iri"><code>https://oojae.github.io/mandate/ns/v1#GrantState</code></p>
-  <p>An append-only assertion that a grant is active or revoked. Because the graph
-has no delete, assertions accumulate and anyone can write one. A state assertion
-counts only when its mandate:stateAuthor is the mandate:grantor of the grant it
-refers to; among those, the newest wins.</p>
+  <p>An append-only assertion that a grant is active or revoked. Because the graph has no delete, assertions accumulate and anyone can write one. A state assertion counts only when its mandate:stateAuthor is the mandate:grantor of the grant it refers to; among those, the newest wins.</p>
   
 </article>
 <article class="term" id="stateOf">
@@ -154,16 +145,13 @@ refers to; among those, the newest wins.</p>
 <article class="term" id="state">
   <h3><a href="#state">state</a></h3>
   <p class="iri"><code>https://oojae.github.io/mandate/ns/v1#state</code></p>
-  <p>Either "active" or "revoked".</p>
+  <p>Either “active” or “revoked”.</p>
   <dl><dt>domain</dt><dd><code>mandate:GrantState</code></dd><dt>range</dt><dd><code>xsd:string</code></dd></dl>
 </article>
 <article class="term" id="stateAuthor">
   <h3><a href="#stateAuthor">stateAuthor</a></h3>
   <p class="iri"><code>https://oojae.github.io/mandate/ns/v1#stateAuthor</code></p>
-  <p>The agent DID that wrote this state assertion. A resolver MUST ignore any state
-assertion whose author is not the mandate:grantor of the referenced grant.
-Without this rule, the party that profits from rendering can write its own
-"active" assertion and defeat any revocation.</p>
+  <p>The agent DID that wrote this state assertion. A resolver MUST ignore any state assertion whose author is not the mandate:grantor of the referenced grant. Without this rule, the party that profits from rendering can write its own “active” assertion and defeat any revocation.</p>
   <dl><dt>domain</dt><dd><code>mandate:GrantState</code></dd><dt>range</dt><dd><code>rdfs:Resource</code></dd></dl>
 </article>
 <article class="term" id="stateAt">
@@ -176,10 +164,7 @@ Without this rule, the party that profits from rendering can write its own
 <article class="term" id="Derivation">
   <h3><a href="#Derivation">Derivation</a></h3>
   <p class="iri"><code>https://oojae.github.io/mandate/ns/v1#Derivation</code></p>
-  <p>A record of one produced artifact, identified by the SHA-256 of its bytes,
-linking it to the capability that served it and the grant that authorised it.
-Written before the artifact is released, so that revocation can enumerate
-everything produced under a grant.</p>
+  <p>A record of one produced artifact, identified by the SHA-256 of its bytes, linking it to the capability that served it and the grant that authorised it. Written before the artifact is released, so that revocation can enumerate everything produced under a grant.</p>
   
 </article>
 <article class="term" id="outputSha256">
@@ -234,8 +219,7 @@ everything produced under a grant.</p>
 <article class="term" id="Refusal">
   <h3><a href="#Refusal">Refusal</a></h3>
   <p class="iri"><code>https://oojae.github.io/mandate/ns/v1#Refusal</code></p>
-  <p>A record that a render was refused, naming the clause that denied it and the
-spend avoided. Producing a refusal never invokes the refused capability.</p>
+  <p>A record that a render was refused, naming the clause that denied it and the spend avoided. Producing a refusal never invokes the refused capability.</p>
   
 </article>
 <article class="term" id="refusedCapability">

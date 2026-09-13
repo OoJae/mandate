@@ -383,3 +383,111 @@ After publishing the revocation to VM, polling the producer's own node:
 figure only ever held on a single node. Across two independent parties the honest
 number is **~50–60 seconds**, and the README states it rather than the flattering
 one.
+
+---
+
+## M6 step 3 — re-anchoring under the owned namespace
+
+The namespace moved from `mandate.build` (not ours, does not resolve) to
+`https://oojae.github.io/mandate/ns/v1#`. Existing anchored grants use the old
+IRIs, so the resolver stopped recognising them — `0 grant(s)`, refused
+`grant-exists` — which is the fail-closed behaviour working as designed. Every
+UAL above this section is superseded.
+
+### Producer-node run (`demo/e2e-dana-5i66.json`)
+
+| | |
+|---|---|
+| grant | UAL `…/12`, tx `0x69b9a2de…a738` |
+| producer, own node | PERMITTED 3s after the grant anchored |
+| revocation | UAL `…/13` |
+| producer, own node | REFUSED — `not-revoked`, **4s** after the revocation anchored |
+
+Across three runs, anchor-to-refusal on the independent node: **49s, 27s, 4s**.
+
+### A peer cannot write into another party's graph
+
+The first real-media attempt had the producer write its derivation into the
+grantor's graph. It failed:
+
+```
+Unknown contextGraphId ".../mandate-grants". Write operations must target an existing context graph.
+```
+
+The producer lists the graph but holds only a stub of it — no name, no
+description, no creator; `context-graph/exists` returns `false`; the
+subscription reports `synced: false`. It can read the grant data anchored in
+Verifiable Memory but not the graph definition, consistent with the grantor's
+repeated `RFC-64 authority bootstrap incomplete … ERC721NonexistentToken`.
+
+Resolution, and the better design regardless: **each party writes to a graph it
+owns.** The producer created and registered `mandate-derivations` (on-chain
+**431**); the grantor subscribed to it. Readers query both graphs.
+
+### Real media under the new namespace (`demo/media-verify-eve-e3wr.json`)
+
+| | |
+|---|---|
+| grant | UAL `…/15` |
+| derivation | authored and anchored on the **producer's own graph**, UAL `did:dkg:base:84532/0x8eaa…/1` |
+| verify from the grantor node | **CLEAR** at +165s |
+| revocation | UAL `…/16` |
+| verify, same bytes | **TAINTED** |
+| file re-fetched and re-hashed | unchanged, `48a2c16d…9b88` |
+
+The run crashed between the revocation and the second verdict: the media host
+closed the connection mid-download (`UND_ERR_SOCKET: other side closed`), and
+`hashUrl` had no retry. The TAINTED verdict and the unchanged-bytes check were
+taken afterwards against the same anchored graphs; the JSON records that
+honestly rather than presenting it as one uninterrupted run.
+
+### Two verifier defects found and fixed
+
+- **`hashUrl` gave up on one dropped connection.** It now retries transient
+  network failures with backoff and still treats an HTTP error status as final.
+- **The verdict depended on SPARQL row order.** The same bytes had acquired more
+  than one derivation edge, and `verifyKnowledge` used `.find()` — whichever row
+  came back first decided the verdict. That also allowed laundering: link the hash
+  of a file made under a revoked grant to some unrelated live grant, and it could
+  verify CLEAR. Every edge is now judged, sorted deterministically, and a file is
+  CLEAR only if every edge is.
+
+### DKG v10.0.16 cannot publish a double quote or a line break
+
+Publishing the ontology to the DKG failed twice with parser errors reported at
+line and column positions that did not exist in our file — they were in the
+node's own re-serialised output. Probe drafts (Working Memory only, no gas), one
+literal each:
+
+| Literal | Result |
+|---|---|
+| `"hello"` | accepted |
+| `"say \"hi\""` | **rejected** — `The subject of a triple must be an IRI or a blank node` |
+| `"a\nb"` | **rejected** — `Line jumps are not allowed in string literals` |
+| `"a\tb"` | accepted |
+| `"a\\b"` | accepted |
+| `"say “hi”"` | accepted |
+| `"it's"` | accepted |
+
+Correctly escaped input is unescaped by the node and re-serialised to N-Quads
+without re-escaping, which it then cannot parse. Consequences in Mandate:
+
+- The ontology uses single-line literals and typographic quotes.
+- `src/rdf.mjs` refuses a literal containing `"` or a line break with an
+  `UnpublishableLiteralError` naming the field. It never rewrites the value —
+  silently altering someone's consent transcript would be worse than failing.
+
+### The ontology is on the DKG
+
+Published into the **system `ontology` context graph** — the registry intended
+for shared vocabularies — and anchored:
+
+- UAL `did:dkg:base:84532/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/26`
+- tx `0x94ba6ea19e437c7afefbe920052a9069a1810554145c637bcad173a0f5f1dbaa`
+- 154 triples, Merkle root `0xc2efbb47…0046`
+
+Queried from the **producer's** node on the first attempt:
+
+```
+SELECT ?label WHERE { mandate:stateAuthor rdfs:label ?label }   ->   "state author"
+```

@@ -7,7 +7,37 @@
  */
 import * as V from './vocab.mjs'
 
-const lit = s => `"${String(s).replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`
+// Correct Turtle escaping, for any consumer of this output.
+const escapeLiteral = s => String(s)
+  .replace(/\\/g, '\\\\')
+  .replace(/"/g, '\\"')
+  .replace(/\n/g, '\\n')
+  .replace(/\r/g, '\\r')
+  .replace(/\t/g, '\\t')
+
+/**
+ * DKG v10.0.16 cannot publish a literal containing a double quote or a line
+ * break, however it is escaped: the node unescapes its input, re-serialises to
+ * N-Quads without re-escaping, and fails to parse its own output. Measured with
+ * probe drafts; tabs, backslashes, apostrophes and typographic quotes are fine.
+ *
+ * Refusing here gives a clear error naming the field, instead of an opaque
+ * parser failure from the node — and it never silently rewrites someone's words.
+ */
+export class UnpublishableLiteralError extends Error {}
+
+let dkgSafe = true
+/** For Turtle destined somewhere other than a DKG node. */
+export function setDkgSafe(v) { dkgSafe = !!v }
+
+const lit = (s, field = 'value') => {
+  const str = String(s)
+  if (dkgSafe && /["\r\n]/.test(str)) {
+    throw new UnpublishableLiteralError(
+      `${field} contains a double quote or line break, which DKG v10 cannot publish: ${JSON.stringify(str.slice(0, 60))}`)
+  }
+  return `"${escapeLiteral(str)}"`
+}
 const iri = s => `<${s}>`
 const term = s => (/^(https?:|urn:|did:)/.test(s) ? iri(s) : lit(s))
 
@@ -21,13 +51,13 @@ export function grantToTurtle(g) {
   const add = (p, o) => rows.push(`  ${iri(p)} ${o} ;`)
 
   add(V.grantor, iri(g.grantor))
-  add(V.subject, lit(g.subject))
+  add(V.subject, lit(g.subject, 'subject'))
   if (g.consentClipSha256) add(V.consentClipSha256, lit(g.consentClipSha256))
-  if (g.consentTranscript) add(V.consentTranscript, lit(g.consentTranscript))
-  for (const c of g.permitsCapability ?? []) add(V.permitsCapability, lit(c))
-  for (const u of g.permitsUseClass ?? []) add(V.permitsUseClass, lit(u))
-  for (const u of g.forbidsUseClass ?? []) add(V.forbidsUseClass, lit(u))
-  for (const t of g.territory ?? []) add(V.territory, lit(t))
+  if (g.consentTranscript) add(V.consentTranscript, lit(g.consentTranscript, 'consentTranscript'))
+  for (const c of g.permitsCapability ?? []) add(V.permitsCapability, lit(c, 'permitsCapability'))
+  for (const u of g.permitsUseClass ?? []) add(V.permitsUseClass, lit(u, 'permitsUseClass'))
+  for (const u of g.forbidsUseClass ?? []) add(V.forbidsUseClass, lit(u, 'forbidsUseClass'))
+  for (const t of g.territory ?? []) add(V.territory, lit(t, 'territory'))
   if (g.validFrom) add(V.validFrom, `${lit(g.validFrom)}^^xsd:dateTime`)
   if (g.validUntil) add(V.validUntil, `${lit(g.validUntil)}^^xsd:dateTime`)
   if (g.maxSpendUsd != null) add(V.maxSpendUsd, `"${g.maxSpendUsd}"^^xsd:decimal`)

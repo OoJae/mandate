@@ -51,7 +51,8 @@
     "vocab",
     "README.md",
     "LICENSE",
-    "DESIGN.md"
+    "DESIGN.md",
+    ".env.example"
   ],
   "scripts": {
     "test": "node --test test/*.test.mjs",

@@ -8,10 +8,7 @@
 <https://oojae.github.io/mandate/ns/v1>
     a owl:Ontology ;
     dcterms:title "Mandate: likeness and voice consent vocabulary"@en ;
-    dcterms:description """A vocabulary for publishing consent to render a person's likeness or voice,
-revoking it, and recording what was produced under it — so that the party who
-grants permission, the party who renders, and a third party who trusts neither
-can all reach the same verdict from the same graph."""@en ;
+    dcterms:description "A vocabulary for publishing consent to render a person's likeness or voice, revoking it, and recording what was produced under it — so that the party who grants permission, the party who renders, and a third party who trusts neither can all reach the same verdict from the same graph."@en ;
     owl:versionInfo "1.0.0" ;
     owl:versionIRI <https://oojae.github.io/mandate/ns/v1/1.0.0> ;
     dcterms:creator "OoJae" ;
@@ -25,32 +22,22 @@ can all reach the same verdict from the same graph."""@en ;
 mandate:LikenessGrant
     a rdfs:Class , owl:Class ;
     rdfs:label "Likeness grant"@en ;
-    rdfs:comment """Permission, authored by the depicted person's own agent, to render their
-likeness or voice with named capabilities, for named uses, in named territories,
-within a validity window and a spend ceiling. Identifies its subject by a declared
-identifier, never by biometric data."""@en .
+    rdfs:comment "Permission, authored by the depicted person's own agent, to render their likeness or voice with named capabilities, for named uses, in named territories, within a validity window and a spend ceiling. Identifies its subject by a declared identifier, never by biometric data."@en .
 
 mandate:GrantState
     a rdfs:Class , owl:Class ;
     rdfs:label "Grant state assertion"@en ;
-    rdfs:comment """An append-only assertion that a grant is active or revoked. Because the graph
-has no delete, assertions accumulate and anyone can write one. A state assertion
-counts only when its mandate:stateAuthor is the mandate:grantor of the grant it
-refers to; among those, the newest wins."""@en .
+    rdfs:comment "An append-only assertion that a grant is active or revoked. Because the graph has no delete, assertions accumulate and anyone can write one. A state assertion counts only when its mandate:stateAuthor is the mandate:grantor of the grant it refers to; among those, the newest wins."@en .
 
 mandate:Derivation
     a rdfs:Class , owl:Class ;
     rdfs:label "Derivation"@en ;
-    rdfs:comment """A record of one produced artifact, identified by the SHA-256 of its bytes,
-linking it to the capability that served it and the grant that authorised it.
-Written before the artifact is released, so that revocation can enumerate
-everything produced under a grant."""@en .
+    rdfs:comment "A record of one produced artifact, identified by the SHA-256 of its bytes, linking it to the capability that served it and the grant that authorised it. Written before the artifact is released, so that revocation can enumerate everything produced under a grant."@en .
 
 mandate:Refusal
     a rdfs:Class , owl:Class ;
     rdfs:label "Refusal"@en ;
-    rdfs:comment """A record that a render was refused, naming the clause that denied it and the
-spend avoided. Producing a refusal never invokes the refused capability."""@en .
+    rdfs:comment "A record that a render was refused, naming the clause that denied it and the spend avoided. Producing a refusal never invokes the refused capability."@en .
 
 # ---------------------------------------------------------------------------
 # LikenessGrant properties
@@ -144,17 +131,14 @@ mandate:stateOf
 mandate:state
     a rdf:Property ;
     rdfs:label "state"@en ;
-    rdfs:comment "Either \"active\" or \"revoked\"."@en ;
+    rdfs:comment "Either “active” or “revoked”."@en ;
     rdfs:domain mandate:GrantState ;
     rdfs:range xsd:string .
 
 mandate:stateAuthor
     a rdf:Property ;
     rdfs:label "state author"@en ;
-    rdfs:comment """The agent DID that wrote this state assertion. A resolver MUST ignore any state
-assertion whose author is not the mandate:grantor of the referenced grant.
-Without this rule, the party that profits from rendering can write its own
-"active" assertion and defeat any revocation."""@en ;
+    rdfs:comment "The agent DID that wrote this state assertion. A resolver MUST ignore any state assertion whose author is not the mandate:grantor of the referenced grant. Without this rule, the party that profits from rendering can write its own “active” assertion and defeat any revocation."@en ;
     rdfs:domain mandate:GrantState ;
     rdfs:range rdfs:Resource .
 
