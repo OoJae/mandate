@@ -62,15 +62,32 @@ repo. See [`docs/SPIKES.md`](docs/SPIKES.md) for raw evidence.
 
 | Area | State |
 |---|---|
-| Gate: 7 clauses, forgery rejection | **working**, 17 tests |
-| Grant authored + sealed on the grantor's node | **working**, real Merkle roots |
-| Revocation, grantor-authored | **working** |
+| Gate: 7 clauses, fails closed | **working**, 26 tests |
+| Grant authored, sealed and **anchored on Base Sepolia** | **working** — real UALs, confirmed txs |
+| Producer permits from **its own node**, under a grant it did not author | **working** |
+| Revocation propagates **across independent nodes** | **working** — measured 30–60s |
 | Forged state assertion rejected | **working** — see below |
 | EIP-712 authorship, and un-forgeability | **working** |
 | Consent capture via phone link | **working** (`request_upload`, keyless) |
 | Derivation ledger + reconciliation | **working** |
-| Cross-node sync / on-chain UAL | **blocked** — testnet faucet is out of gas |
-| Live identity render | **intermittent** — provider-side, see Limitations |
+| Third-party verify from the bytes alone | **working** — CLEAR, then TAINTED after revocation |
+| Live identity render | **working inline**; the platform's async worker is broken — see Limitations |
+
+### Two parties, two nodes, one chain
+
+A fresh subject, run end to end from the **producer's own daemon** with nothing
+stubbed ([`demo/e2e.mjs`](demo/e2e.mjs)):
+
+```
+[ +32s] grant UAL: did:dkg:base:84532/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/10
+[ +32s] grant tx:  0x818d2c13b71e1eae797fad7cbf6460b2098fcd12d9ceb79ed6454102d8d22464
+[ +49s] producer, own node, after grant:  PERMITTED under urn:mandate:grant:dana-w0io
+[ +79s] revoke UAL: did:dkg:base:84532/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/11
+[+106s] producer, own node, after revoke: REFUSED — clause: not-revoked
+```
+
+Both UALs resolve on the Base Sepolia explorer. The producer never talks to the
+grantor; it learns about the revocation from the graph.
 
 ### The beat that matters
 
@@ -115,8 +132,14 @@ Livepeer is load-bearing here, not a swappable image API.
 | Where | What |
 |---|---|
 | **Local — Working Memory, never transmitted** | consent video bytes, reference images, real names, prompts, output URLs |
-| **Shared — SWM gossip** | grant clauses, state assertions, derivation edges |
-| **Published — Verifiable Memory, Base Sepolia** | the same clause data, once gas is available. Hashes, DIDs, capability names, dates, ceilings |
+| **Shared — SWM** | drafts and derivation edges on the authoring node |
+| **Published — Verifiable Memory, Base Sepolia** | grant clauses and revocations. Hashes, DIDs, capability names, dates, ceilings |
+
+Grants and revocations **must** be published to Verifiable Memory. We measured
+that SWM content for the context graph did not reach the other party, while
+Verifiable Memory synced durably — so a revocation left in SWM leaves the
+producer rendering. `grant` and `revoke` anchor by default, and `revoke` fails
+loudly if it cannot.
 
 No faces, no biometrics, no media bytes, and no real names are required on chain.
 
@@ -154,20 +177,23 @@ except sustained rendering.
 Stated plainly, because a judge should be able to tell a working path from a
 planned one.
 
-- **The OriginTrail testnet faucet is out of Base Sepolia gas.** It funds TRAC but
-  every native transfer fails; its own wallet is short. Consequences: on-chain
-  context-graph registration, UAL minting, and therefore **cross-node sync** are
-  blocked. Both nodes run and gossip; a user-created context graph is not
-  queryable by a peer until it has an on-chain catalog entry
-  (`RFC-64 catalog replay incomplete`). Grants, revocations, forgery rejection
-  and the gate all work regardless. Unblocking needs ~0.0000005 ETH per
-  transaction.
-- **Identity renders are intermittent platform-side.** `talking-head` failed twice
-  with `runner_abandoned` (worker stopped heartbeating at ~128s) and
-  `face-swap-image` with a closed provider stream. `flux-schnell`, `inworld-tts`
-  and `nemotron-asr` are reliable. Note the structural mitigation: **a refusal
-  never invokes the capability**, so the majority of the demo cannot be broken by
-  provider flakiness.
+- **Revocation is not instant across parties.** Measured at 30–60 seconds from
+  revoke to refusal on an independent node: ~13s of chain confirmation plus
+  durable sync. During that window a producer resolving from its own node may
+  still permit. The sub-second refusal only holds on the grantor's own node, and
+  we do not claim it for the cross-party case.
+- **Shared Working Memory did not cross nodes** for the registered context graph;
+  the grantor logs `RFC-64 authority bootstrap incomplete … ERC721NonexistentToken`.
+  Only Verifiable Memory synced, so every grant and revocation costs a (tiny)
+  Base Sepolia transaction.
+- **The OriginTrail testnet faucet was out of Base Sepolia gas** on 2026-09-12. It
+  delivered TRAC but no ETH; the wallets were funded manually.
+- **The Livepeer async worker abandons jobs at ~128 seconds.** Three submissions
+  across `talking-head` and `sync-lipsync-v3` all died with `runner_abandoned`.
+  The same `sync-lipsync-v3` render **succeeded inline in 103 seconds**, so gated
+  renders run with `async: false`. `face-swap-image` failed separately with a
+  closed provider stream. Structural mitigation: **a refusal never invokes the
+  capability**, so every refusal beat is immune to provider failures.
 - **`talking-head` is audio-driven.** It rejects a bare text prompt with
   `missing field audio_url`; speech has to be synthesised first.
 - **Subject linkage is a declared identifier**, not identity proof and not a legal
@@ -179,8 +205,7 @@ planned one.
 - **Costs are list-price estimates**, not invoices, and failed renders are still
   billed. The one exact figure is *spend avoided by a refusal* — nothing was
   called.
-- The two nodes run on one machine with separate `DKG_HOME`s and separate
-  self-sovereign keys. The producer never holds the grantor's key — but they are
+- The two nodes run on one machine with separate `DKG_HOME`s and separate keys. The producer never holds the grantor's key — but they are
   not two organisations.
 
 ## Licence

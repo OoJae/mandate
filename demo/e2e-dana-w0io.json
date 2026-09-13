@@ -1,0 +1,30 @@
+[
+  {
+    "at": "+0s",
+    "subject": "dana-w0io"
+  },
+  {
+    "at": "+32s",
+    "grant UAL": "did:dkg:base:84532/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/10"
+  },
+  {
+    "at": "+32s",
+    "grant tx": "0x818d2c13b71e1eae797fad7cbf6460b2098fcd12d9ceb79ed6454102d8d22464"
+  },
+  {
+    "at": "+49s",
+    "producer, own node, after grant": "PERMITTED under urn:mandate:grant:dana-w0io"
+  },
+  {
+    "at": "+79s",
+    "revoke UAL": "did:dkg:base:84532/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/11"
+  },
+  {
+    "at": "+106s",
+    "producer, own node, after revoke": "REFUSED — clause: not-revoked"
+  },
+  {
+    "at": "+106s",
+    "cross-node revocation latency": "27s from revoke command returning"
+  }
+]
