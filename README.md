@@ -205,6 +205,21 @@ Livepeer carries weight here. It is not a swappable image API.
 - **Gated capabilities**, all verified live: `talking-head`, `face-swap-image`,
   `face-swap-video`, `lipsync`, `sync-lipsync-v3`, `heygen-twin`.
 
+## Beyond this repo
+
+- **npm:** [`mandate-consent`](https://www.npmjs.com/package/mandate-consent). The
+  core has zero dependencies; the adapters' packages are optional peers.
+- **OriginTrail DKG integrations registry:** listing submitted as a draft,
+  [OriginTrail/dkg-integrations#31](https://github.com/OriginTrail/dkg-integrations/pull/31).
+  It was validated locally with the registry's own `validate.mjs` and
+  `security-checks.mjs`.
+- **Livepeer community skill:** [`skills/likeness-consent.md`](skills/likeness-consent.md)
+  carries the consent norm for any Livepeer agent: explicit, current, scoped
+  consent; no identifying people from their faces; refuse and say what is missing;
+  honour withdrawal. The skill catalogue permits style and domain guidance only, so
+  **a skill asks an agent to behave, while the gate is what actually stops the
+  spend.** Publishing is pending an API key: `node scripts/publish-skill.mjs --publish`.
+
 ## Where the data lives (Track 2 requirement)
 
 Each party writes only to a graph it owns. Verifiers read both.
