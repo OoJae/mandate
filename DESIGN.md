@@ -36,8 +36,11 @@ into it.
   finalize → share → publish. Nothing is written to SPARQL directly.
 - **Authorship.** `wm/finalize` returns an EIP-712 AuthorAttestation. The
   producer's node refuses to finalize with the grantor's address as author
-  (`not a registered local agent on this node`), so a grant's author cannot be
-  forged by the party that profits from rendering.
+  (`not a registered local agent on this node`). The chain binds each anchored
+  Knowledge Asset to its publisher's address. **The 0.1.0 resolver does not use
+  this:** it reads the `mandate:grantor` and `mandate:stateAuthor` values inside
+  the asset, which anyone can write. 0.2.0 attributes every object to the address
+  that anchored it.
 - **UALs.** Anchored grants, revocations and derivations are addressable by UAL,
   and a verifier can check any of them on the Base Sepolia explorer.
 
@@ -45,7 +48,7 @@ into it.
 
 | Stage | What | Why it stops or continues |
 |---|---|---|
-| **Working Memory** | Drafts are written and finalized on the authoring node. Consent video, reference images, real names, prompts and media never leave this layer. | Private by construction. Only clause data proceeds. |
+| **Working Memory** | Drafts are written and finalized on the authoring node. Only clause data, hashes and identifiers are ever written. Consent video, reference images, prompts and media never enter the DKG; they go to Livepeer Agent and its providers to be transcribed and rendered. | Only clause data proceeds. |
 | **Shared Working Memory** | The finalized asset is shared to the owning graph. | A staging step on the authoring node. Measured: SWM content for these graphs **did not reach the other party**. |
 | **Verifiable Memory** | Grants, revocations and derivations are published and anchored. | Required, not optional. A revocation left in SWM was never seen by the producer, which kept permitting. After anchoring, the producer's own node refused within 4–49 seconds across three runs. |
 
@@ -59,23 +62,30 @@ cannot.
 
 1. **State is counted only when written by the grantor.** The graph is
    append-only, so "active" and "revoked" coexist, and anyone can write either.
-   The newest assertion *written by the grant's grantor* wins; every other
-   assertion is ignored and reported.
+   Only assertions *written by the grant's grantor* count; every other assertion
+   is ignored and reported. "Written by" must mean the address that anchored the
+   assertion. 0.1.0 compares the declared `stateAuthor` value instead, which a
+   forger can set to the grantor's DID.
 2. **Capabilities match exactly**, never by family. A grant for `face-swap-image`
    does not cover `face-swap-video`.
 3. **A forbid beats a permit.**
 4. **Every derivation edge for a file is judged.** A file is CLEAR only if all of
    them are. A new grant can authorise new renders; it cannot clear an artifact
    whose authorisation was withdrawn.
-5. **The gate fails closed.** An empty or partial read refuses. It never permits.
+5. **The gate fails closed on empty or failed reads.** A read that returns nothing,
+   or errors, refuses. In 0.1.0 a read that silently misses a later revocation, or
+   earlier derivations that count toward the ceiling, can still permit.
 
 The gate (`src/gate.mjs`) and the verifier (`src/verify-core.mjs`) are pure
 functions with no I/O, so these rules can be read and tested in isolation.
 
 ## Security
 
-- **Network egress:** `agent.livepeer.org` (Livepeer Agent MCP), the local DKG
-  nodes, and media URLs the operator supplies for hashing.
+- **Network egress:** `agent.livepeer.org` (Livepeer Agent MCP), which receives
+  the consent clip, reference media and prompts and returns media URLs from its
+  providers; the local DKG nodes; and media URLs the operator supplies for hashing.
+- **Scope of enforcement:** the gate runs in the producer's own pipeline and binds
+  producers that choose to run it. Files from anyone else verify `UNKNOWN`.
 - **Credentials:** each DKG node's API token, read from its `DKG_HOME`, and an
   optional `LIVEPEER_AGENT_KEY`. Mandate never reads wallet keystores.
 - **Write authority:** the Knowledge Asset lifecycle routes on the operator's own
