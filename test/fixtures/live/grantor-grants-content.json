@@ -1,0 +1,278 @@
+{
+  "node": "grantor",
+  "contextGraphId": "0xeD1eeB64CaC09874257F05Fd6B51A55695ad0B69/mandate-grants",
+  "sparql": "SELECT ?g ?s ?p ?o WHERE {\n  GRAPH ?g { ?s ?p ?o }\n  FILTER(STRSTARTS(STR(?g), \"did:dkg:context-graph:0xeD1eeB64CaC09874257F05Fd6B51A55695ad0B69/mandate-grants/_verifiable_memory/\"))\n  FILTER(STRSTARTS(STR(?p), \"https://oojae.github.io/mandate/ns/v1#\") || (?p = <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> && STRSTARTS(STR(?o), \"https://oojae.github.io/mandate/ns/v1#\")))\n} ORDER BY ?g ?s ?p ?o",
+  "observedCounts": [
+    44,
+    44
+  ],
+  "response": {
+    "type": "bindings",
+    "bindings": [
+      {
+        "g": "did:dkg:context-graph:0xeD1eeB64CaC09874257F05Fd6B51A55695ad0B69/mandate-grants/_verifiable_memory/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/12",
+        "s": "urn:mandate:grant:dana-5i66",
+        "p": "http://www.w3.org/1999/02/22-rdf-syntax-ns#type",
+        "o": "https://oojae.github.io/mandate/ns/v1#LikenessGrant"
+      },
+      {
+        "g": "did:dkg:context-graph:0xeD1eeB64CaC09874257F05Fd6B51A55695ad0B69/mandate-grants/_verifiable_memory/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/12",
+        "s": "urn:mandate:grant:dana-5i66",
+        "p": "https://oojae.github.io/mandate/ns/v1#forbidsUseClass",
+        "o": "\"adult\""
+      },
+      {
+        "g": "did:dkg:context-graph:0xeD1eeB64CaC09874257F05Fd6B51A55695ad0B69/mandate-grants/_verifiable_memory/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/12",
+        "s": "urn:mandate:grant:dana-5i66",
+        "p": "https://oojae.github.io/mandate/ns/v1#forbidsUseClass",
+        "o": "\"political\""
+      },
+      {
+        "g": "did:dkg:context-graph:0xeD1eeB64CaC09874257F05Fd6B51A55695ad0B69/mandate-grants/_verifiable_memory/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/12",
+        "s": "urn:mandate:grant:dana-5i66",
+        "p": "https://oojae.github.io/mandate/ns/v1#grantor",
+        "o": "did:dkg:agent:0xeD1eeB64CaC09874257F05Fd6B51A55695ad0B69"
+      },
+      {
+        "g": "did:dkg:context-graph:0xeD1eeB64CaC09874257F05Fd6B51A55695ad0B69/mandate-grants/_verifiable_memory/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/12",
+        "s": "urn:mandate:grant:dana-5i66",
+        "p": "https://oojae.github.io/mandate/ns/v1#maxSpendUsd",
+        "o": "\"4\"^^<http://www.w3.org/2001/XMLSchema#decimal>"
+      },
+      {
+        "g": "did:dkg:context-graph:0xeD1eeB64CaC09874257F05Fd6B51A55695ad0B69/mandate-grants/_verifiable_memory/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/12",
+        "s": "urn:mandate:grant:dana-5i66",
+        "p": "https://oojae.github.io/mandate/ns/v1#permitsCapability",
+        "o": "\"sync-lipsync-v3\""
+      },
+      {
+        "g": "did:dkg:context-graph:0xeD1eeB64CaC09874257F05Fd6B51A55695ad0B69/mandate-grants/_verifiable_memory/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/12",
+        "s": "urn:mandate:grant:dana-5i66",
+        "p": "https://oojae.github.io/mandate/ns/v1#permitsCapability",
+        "o": "\"talking-head\""
+      },
+      {
+        "g": "did:dkg:context-graph:0xeD1eeB64CaC09874257F05Fd6B51A55695ad0B69/mandate-grants/_verifiable_memory/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/12",
+        "s": "urn:mandate:grant:dana-5i66",
+        "p": "https://oojae.github.io/mandate/ns/v1#permitsUseClass",
+        "o": "\"advertising\""
+      },
+      {
+        "g": "did:dkg:context-graph:0xeD1eeB64CaC09874257F05Fd6B51A55695ad0B69/mandate-grants/_verifiable_memory/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/12",
+        "s": "urn:mandate:grant:dana-5i66",
+        "p": "https://oojae.github.io/mandate/ns/v1#subject",
+        "o": "\"dana-5i66\""
+      },
+      {
+        "g": "did:dkg:context-graph:0xeD1eeB64CaC09874257F05Fd6B51A55695ad0B69/mandate-grants/_verifiable_memory/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/12",
+        "s": "urn:mandate:grant:dana-5i66",
+        "p": "https://oojae.github.io/mandate/ns/v1#territory",
+        "o": "\"GB\""
+      },
+      {
+        "g": "did:dkg:context-graph:0xeD1eeB64CaC09874257F05Fd6B51A55695ad0B69/mandate-grants/_verifiable_memory/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/12",
+        "s": "urn:mandate:grant:dana-5i66",
+        "p": "https://oojae.github.io/mandate/ns/v1#validFrom",
+        "o": "\"2026-09-13T09:02:22.931Z\"^^<http://www.w3.org/2001/XMLSchema#dateTime>"
+      },
+      {
+        "g": "did:dkg:context-graph:0xeD1eeB64CaC09874257F05Fd6B51A55695ad0B69/mandate-grants/_verifiable_memory/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/12",
+        "s": "urn:mandate:grant:dana-5i66",
+        "p": "https://oojae.github.io/mandate/ns/v1#validUntil",
+        "o": "\"2026-12-12T09:02:22.932Z\"^^<http://www.w3.org/2001/XMLSchema#dateTime>"
+      },
+      {
+        "g": "did:dkg:context-graph:0xeD1eeB64CaC09874257F05Fd6B51A55695ad0B69/mandate-grants/_verifiable_memory/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/13",
+        "s": "urn:mandate:state:state-dana-5i66-revoked-mtzl73pq",
+        "p": "http://www.w3.org/1999/02/22-rdf-syntax-ns#type",
+        "o": "https://oojae.github.io/mandate/ns/v1#GrantState"
+      },
+      {
+        "g": "did:dkg:context-graph:0xeD1eeB64CaC09874257F05Fd6B51A55695ad0B69/mandate-grants/_verifiable_memory/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/13",
+        "s": "urn:mandate:state:state-dana-5i66-revoked-mtzl73pq",
+        "p": "https://oojae.github.io/mandate/ns/v1#state",
+        "o": "\"revoked\""
+      },
+      {
+        "g": "did:dkg:context-graph:0xeD1eeB64CaC09874257F05Fd6B51A55695ad0B69/mandate-grants/_verifiable_memory/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/13",
+        "s": "urn:mandate:state:state-dana-5i66-revoked-mtzl73pq",
+        "p": "https://oojae.github.io/mandate/ns/v1#stateAt",
+        "o": "\"2026-09-13T09:03:37.358Z\"^^<http://www.w3.org/2001/XMLSchema#dateTime>"
+      },
+      {
+        "g": "did:dkg:context-graph:0xeD1eeB64CaC09874257F05Fd6B51A55695ad0B69/mandate-grants/_verifiable_memory/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/13",
+        "s": "urn:mandate:state:state-dana-5i66-revoked-mtzl73pq",
+        "p": "https://oojae.github.io/mandate/ns/v1#stateAuthor",
+        "o": "did:dkg:agent:0xeD1eeB64CaC09874257F05Fd6B51A55695ad0B69"
+      },
+      {
+        "g": "did:dkg:context-graph:0xeD1eeB64CaC09874257F05Fd6B51A55695ad0B69/mandate-grants/_verifiable_memory/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/13",
+        "s": "urn:mandate:state:state-dana-5i66-revoked-mtzl73pq",
+        "p": "https://oojae.github.io/mandate/ns/v1#stateOf",
+        "o": "urn:mandate:grant:dana-5i66"
+      },
+      {
+        "g": "did:dkg:context-graph:0xeD1eeB64CaC09874257F05Fd6B51A55695ad0B69/mandate-grants/_verifiable_memory/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/14",
+        "s": "urn:mandate:grant:eve-94eu",
+        "p": "http://www.w3.org/1999/02/22-rdf-syntax-ns#type",
+        "o": "https://oojae.github.io/mandate/ns/v1#LikenessGrant"
+      },
+      {
+        "g": "did:dkg:context-graph:0xeD1eeB64CaC09874257F05Fd6B51A55695ad0B69/mandate-grants/_verifiable_memory/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/14",
+        "s": "urn:mandate:grant:eve-94eu",
+        "p": "https://oojae.github.io/mandate/ns/v1#forbidsUseClass",
+        "o": "\"adult\""
+      },
+      {
+        "g": "did:dkg:context-graph:0xeD1eeB64CaC09874257F05Fd6B51A55695ad0B69/mandate-grants/_verifiable_memory/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/14",
+        "s": "urn:mandate:grant:eve-94eu",
+        "p": "https://oojae.github.io/mandate/ns/v1#forbidsUseClass",
+        "o": "\"political\""
+      },
+      {
+        "g": "did:dkg:context-graph:0xeD1eeB64CaC09874257F05Fd6B51A55695ad0B69/mandate-grants/_verifiable_memory/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/14",
+        "s": "urn:mandate:grant:eve-94eu",
+        "p": "https://oojae.github.io/mandate/ns/v1#grantor",
+        "o": "did:dkg:agent:0xeD1eeB64CaC09874257F05Fd6B51A55695ad0B69"
+      },
+      {
+        "g": "did:dkg:context-graph:0xeD1eeB64CaC09874257F05Fd6B51A55695ad0B69/mandate-grants/_verifiable_memory/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/14",
+        "s": "urn:mandate:grant:eve-94eu",
+        "p": "https://oojae.github.io/mandate/ns/v1#maxSpendUsd",
+        "o": "\"4\"^^<http://www.w3.org/2001/XMLSchema#decimal>"
+      },
+      {
+        "g": "did:dkg:context-graph:0xeD1eeB64CaC09874257F05Fd6B51A55695ad0B69/mandate-grants/_verifiable_memory/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/14",
+        "s": "urn:mandate:grant:eve-94eu",
+        "p": "https://oojae.github.io/mandate/ns/v1#permitsCapability",
+        "o": "\"sync-lipsync-v3\""
+      },
+      {
+        "g": "did:dkg:context-graph:0xeD1eeB64CaC09874257F05Fd6B51A55695ad0B69/mandate-grants/_verifiable_memory/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/14",
+        "s": "urn:mandate:grant:eve-94eu",
+        "p": "https://oojae.github.io/mandate/ns/v1#permitsUseClass",
+        "o": "\"advertising\""
+      },
+      {
+        "g": "did:dkg:context-graph:0xeD1eeB64CaC09874257F05Fd6B51A55695ad0B69/mandate-grants/_verifiable_memory/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/14",
+        "s": "urn:mandate:grant:eve-94eu",
+        "p": "https://oojae.github.io/mandate/ns/v1#subject",
+        "o": "\"eve-94eu\""
+      },
+      {
+        "g": "did:dkg:context-graph:0xeD1eeB64CaC09874257F05Fd6B51A55695ad0B69/mandate-grants/_verifiable_memory/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/14",
+        "s": "urn:mandate:grant:eve-94eu",
+        "p": "https://oojae.github.io/mandate/ns/v1#territory",
+        "o": "\"GB\""
+      },
+      {
+        "g": "did:dkg:context-graph:0xeD1eeB64CaC09874257F05Fd6B51A55695ad0B69/mandate-grants/_verifiable_memory/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/14",
+        "s": "urn:mandate:grant:eve-94eu",
+        "p": "https://oojae.github.io/mandate/ns/v1#validFrom",
+        "o": "\"2026-09-13T09:05:11.713Z\"^^<http://www.w3.org/2001/XMLSchema#dateTime>"
+      },
+      {
+        "g": "did:dkg:context-graph:0xeD1eeB64CaC09874257F05Fd6B51A55695ad0B69/mandate-grants/_verifiable_memory/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/14",
+        "s": "urn:mandate:grant:eve-94eu",
+        "p": "https://oojae.github.io/mandate/ns/v1#validUntil",
+        "o": "\"2026-12-12T09:05:11.714Z\"^^<http://www.w3.org/2001/XMLSchema#dateTime>"
+      },
+      {
+        "g": "did:dkg:context-graph:0xeD1eeB64CaC09874257F05Fd6B51A55695ad0B69/mandate-grants/_verifiable_memory/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/15",
+        "s": "urn:mandate:grant:eve-e3wr",
+        "p": "http://www.w3.org/1999/02/22-rdf-syntax-ns#type",
+        "o": "https://oojae.github.io/mandate/ns/v1#LikenessGrant"
+      },
+      {
+        "g": "did:dkg:context-graph:0xeD1eeB64CaC09874257F05Fd6B51A55695ad0B69/mandate-grants/_verifiable_memory/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/15",
+        "s": "urn:mandate:grant:eve-e3wr",
+        "p": "https://oojae.github.io/mandate/ns/v1#forbidsUseClass",
+        "o": "\"adult\""
+      },
+      {
+        "g": "did:dkg:context-graph:0xeD1eeB64CaC09874257F05Fd6B51A55695ad0B69/mandate-grants/_verifiable_memory/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/15",
+        "s": "urn:mandate:grant:eve-e3wr",
+        "p": "https://oojae.github.io/mandate/ns/v1#forbidsUseClass",
+        "o": "\"political\""
+      },
+      {
+        "g": "did:dkg:context-graph:0xeD1eeB64CaC09874257F05Fd6B51A55695ad0B69/mandate-grants/_verifiable_memory/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/15",
+        "s": "urn:mandate:grant:eve-e3wr",
+        "p": "https://oojae.github.io/mandate/ns/v1#grantor",
+        "o": "did:dkg:agent:0xeD1eeB64CaC09874257F05Fd6B51A55695ad0B69"
+      },
+      {
+        "g": "did:dkg:context-graph:0xeD1eeB64CaC09874257F05Fd6B51A55695ad0B69/mandate-grants/_verifiable_memory/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/15",
+        "s": "urn:mandate:grant:eve-e3wr",
+        "p": "https://oojae.github.io/mandate/ns/v1#maxSpendUsd",
+        "o": "\"4\"^^<http://www.w3.org/2001/XMLSchema#decimal>"
+      },
+      {
+        "g": "did:dkg:context-graph:0xeD1eeB64CaC09874257F05Fd6B51A55695ad0B69/mandate-grants/_verifiable_memory/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/15",
+        "s": "urn:mandate:grant:eve-e3wr",
+        "p": "https://oojae.github.io/mandate/ns/v1#permitsCapability",
+        "o": "\"sync-lipsync-v3\""
+      },
+      {
+        "g": "did:dkg:context-graph:0xeD1eeB64CaC09874257F05Fd6B51A55695ad0B69/mandate-grants/_verifiable_memory/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/15",
+        "s": "urn:mandate:grant:eve-e3wr",
+        "p": "https://oojae.github.io/mandate/ns/v1#permitsUseClass",
+        "o": "\"advertising\""
+      },
+      {
+        "g": "did:dkg:context-graph:0xeD1eeB64CaC09874257F05Fd6B51A55695ad0B69/mandate-grants/_verifiable_memory/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/15",
+        "s": "urn:mandate:grant:eve-e3wr",
+        "p": "https://oojae.github.io/mandate/ns/v1#subject",
+        "o": "\"eve-e3wr\""
+      },
+      {
+        "g": "did:dkg:context-graph:0xeD1eeB64CaC09874257F05Fd6B51A55695ad0B69/mandate-grants/_verifiable_memory/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/15",
+        "s": "urn:mandate:grant:eve-e3wr",
+        "p": "https://oojae.github.io/mandate/ns/v1#territory",
+        "o": "\"GB\""
+      },
+      {
+        "g": "did:dkg:context-graph:0xeD1eeB64CaC09874257F05Fd6B51A55695ad0B69/mandate-grants/_verifiable_memory/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/15",
+        "s": "urn:mandate:grant:eve-e3wr",
+        "p": "https://oojae.github.io/mandate/ns/v1#validFrom",
+        "o": "\"2026-09-13T09:09:04.343Z\"^^<http://www.w3.org/2001/XMLSchema#dateTime>"
+      },
+      {
+        "g": "did:dkg:context-graph:0xeD1eeB64CaC09874257F05Fd6B51A55695ad0B69/mandate-grants/_verifiable_memory/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/15",
+        "s": "urn:mandate:grant:eve-e3wr",
+        "p": "https://oojae.github.io/mandate/ns/v1#validUntil",
+        "o": "\"2026-12-12T09:09:04.344Z\"^^<http://www.w3.org/2001/XMLSchema#dateTime>"
+      },
+      {
+        "g": "did:dkg:context-graph:0xeD1eeB64CaC09874257F05Fd6B51A55695ad0B69/mandate-grants/_verifiable_memory/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/16",
+        "s": "urn:mandate:state:state-eve-e3wr-revoked-mtzlhn82",
+        "p": "http://www.w3.org/1999/02/22-rdf-syntax-ns#type",
+        "o": "https://oojae.github.io/mandate/ns/v1#GrantState"
+      },
+      {
+        "g": "did:dkg:context-graph:0xeD1eeB64CaC09874257F05Fd6B51A55695ad0B69/mandate-grants/_verifiable_memory/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/16",
+        "s": "urn:mandate:state:state-eve-e3wr-revoked-mtzlhn82",
+        "p": "https://oojae.github.io/mandate/ns/v1#state",
+        "o": "\"revoked\""
+      },
+      {
+        "g": "did:dkg:context-graph:0xeD1eeB64CaC09874257F05Fd6B51A55695ad0B69/mandate-grants/_verifiable_memory/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/16",
+        "s": "urn:mandate:state:state-eve-e3wr-revoked-mtzlhn82",
+        "p": "https://oojae.github.io/mandate/ns/v1#stateAt",
+        "o": "\"2026-09-13T09:11:49.201Z\"^^<http://www.w3.org/2001/XMLSchema#dateTime>"
+      },
+      {
+        "g": "did:dkg:context-graph:0xeD1eeB64CaC09874257F05Fd6B51A55695ad0B69/mandate-grants/_verifiable_memory/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/16",
+        "s": "urn:mandate:state:state-eve-e3wr-revoked-mtzlhn82",
+        "p": "https://oojae.github.io/mandate/ns/v1#stateAuthor",
+        "o": "did:dkg:agent:0xeD1eeB64CaC09874257F05Fd6B51A55695ad0B69"
+      },
+      {
+        "g": "did:dkg:context-graph:0xeD1eeB64CaC09874257F05Fd6B51A55695ad0B69/mandate-grants/_verifiable_memory/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/16",
+        "s": "urn:mandate:state:state-eve-e3wr-revoked-mtzlhn82",
+        "p": "https://oojae.github.io/mandate/ns/v1#stateOf",
+        "o": "urn:mandate:grant:eve-e3wr"
+      }
+    ]
+  }
+}

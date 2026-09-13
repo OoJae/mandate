@@ -1,0 +1,99 @@
+{
+  "node": "producer",
+  "contextGraphId": "0x8EaA4857B22dddbfb5ebC476087FEc39336e0CB5/mandate-derivations",
+  "sparql": "SELECT ?s ?p ?o WHERE {\n  GRAPH <did:dkg:context-graph:0x8EaA4857B22dddbfb5ebC476087FEc39336e0CB5/mandate-derivations/_meta> { ?s ?p ?o }\n  FILTER(STRSTARTS(STR(?s), \"did:dkg:base:\"))\n} ORDER BY ?s ?p ?o",
+  "observedCounts": [
+    17,
+    17
+  ],
+  "response": {
+    "type": "bindings",
+    "bindings": [
+      {
+        "s": "did:dkg:base:84532/0x8eaa4857b22dddbfb5ebc476087fec39336e0cb5/1",
+        "p": "http://dkg.io/ontology/accessPolicy",
+        "o": "\"public\""
+      },
+      {
+        "s": "did:dkg:base:84532/0x8eaa4857b22dddbfb5ebc476087fec39336e0cb5/1",
+        "p": "http://dkg.io/ontology/assertionGraph",
+        "o": "did:dkg:context-graph:0x8EaA4857B22dddbfb5ebC476087FEc39336e0CB5/mandate-derivations/_verifiable_memory/0x8eaa4857b22dddbfb5ebc476087fec39336e0cb5/1"
+      },
+      {
+        "s": "did:dkg:base:84532/0x8eaa4857b22dddbfb5ebc476087fec39336e0cb5/1",
+        "p": "http://dkg.io/ontology/assertionVersion",
+        "o": "\"1\"^^<http://www.w3.org/2001/XMLSchema#integer>"
+      },
+      {
+        "s": "did:dkg:base:84532/0x8eaa4857b22dddbfb5ebc476087fec39336e0cb5/1",
+        "p": "http://dkg.io/ontology/batchId",
+        "o": "\"64529287789852937627707493375911794044462126645639507861563942126180125114369\"^^<http://www.w3.org/2001/XMLSchema#integer>"
+      },
+      {
+        "s": "did:dkg:base:84532/0x8eaa4857b22dddbfb5ebc476087fec39336e0cb5/1",
+        "p": "http://dkg.io/ontology/confirmationKind",
+        "o": "\"transaction\""
+      },
+      {
+        "s": "did:dkg:base:84532/0x8eaa4857b22dddbfb5ebc476087fec39336e0cb5/1",
+        "p": "http://dkg.io/ontology/contentScopeVersion",
+        "o": "\"2\"^^<http://www.w3.org/2001/XMLSchema#integer>"
+      },
+      {
+        "s": "did:dkg:base:84532/0x8eaa4857b22dddbfb5ebc476087fec39336e0cb5/1",
+        "p": "http://dkg.io/ontology/contextGraph",
+        "o": "did:dkg:context-graph:0x8EaA4857B22dddbfb5ebC476087FEc39336e0CB5/mandate-derivations"
+      },
+      {
+        "s": "did:dkg:base:84532/0x8eaa4857b22dddbfb5ebc476087fec39336e0cb5/1",
+        "p": "http://dkg.io/ontology/kaUal",
+        "o": "did:dkg:base:84532/0x8eaa4857b22dddbfb5ebc476087fec39336e0cb5/1"
+      },
+      {
+        "s": "did:dkg:base:84532/0x8eaa4857b22dddbfb5ebc476087fec39336e0cb5/1",
+        "p": "http://dkg.io/ontology/materializedVersion",
+        "o": "\"46770887:0\""
+      },
+      {
+        "s": "did:dkg:base:84532/0x8eaa4857b22dddbfb5ebc476087fec39336e0cb5/1",
+        "p": "http://dkg.io/ontology/merkleRoot",
+        "o": "\"9cf70cb516669559f014eab76d01c0470d6def40c21460faf366e040f55d7c82\""
+      },
+      {
+        "s": "did:dkg:base:84532/0x8eaa4857b22dddbfb5ebc476087fec39336e0cb5/1",
+        "p": "http://dkg.io/ontology/privateTripleCount",
+        "o": "\"0\"^^<http://www.w3.org/2001/XMLSchema#integer>"
+      },
+      {
+        "s": "did:dkg:base:84532/0x8eaa4857b22dddbfb5ebc476087fec39336e0cb5/1",
+        "p": "http://dkg.io/ontology/publicTripleCount",
+        "o": "\"8\"^^<http://www.w3.org/2001/XMLSchema#integer>"
+      },
+      {
+        "s": "did:dkg:base:84532/0x8eaa4857b22dddbfb5ebc476087fec39336e0cb5/1",
+        "p": "http://dkg.io/ontology/publishedAt",
+        "o": "\"2026-09-13T09:10:50.742Z\"^^<http://www.w3.org/2001/XMLSchema#dateTime>"
+      },
+      {
+        "s": "did:dkg:base:84532/0x8eaa4857b22dddbfb5ebc476087fec39336e0cb5/1",
+        "p": "http://dkg.io/ontology/publisherPeerId",
+        "o": "\"12D3KooWKrXL9RvuGPuydWJUMXKbRnAKxmMLhR6GFX1wVVzrndHL\""
+      },
+      {
+        "s": "did:dkg:base:84532/0x8eaa4857b22dddbfb5ebc476087fec39336e0cb5/1",
+        "p": "http://dkg.io/ontology/status",
+        "o": "\"confirmed\""
+      },
+      {
+        "s": "did:dkg:base:84532/0x8eaa4857b22dddbfb5ebc476087fec39336e0cb5/1",
+        "p": "http://dkg.io/ontology/transactionHash",
+        "o": "\"0x8d9803140b8e2115e7cf5c9d621ceae5eb949f1e5ce9e48b5015139591a1b581\""
+      },
+      {
+        "s": "did:dkg:base:84532/0x8eaa4857b22dddbfb5ebc476087fec39336e0cb5/1",
+        "p": "http://www.w3.org/ns/prov#wasAttributedTo",
+        "o": "did:dkg:agent:0x8eaa4857b22dddbfb5ebc476087fec39336e0cb5"
+      }
+    ]
+  }
+}

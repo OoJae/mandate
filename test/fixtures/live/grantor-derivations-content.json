@@ -1,0 +1,62 @@
+{
+  "node": "grantor",
+  "contextGraphId": "0x8EaA4857B22dddbfb5ebC476087FEc39336e0CB5/mandate-derivations",
+  "sparql": "SELECT ?g ?s ?p ?o WHERE {\n  GRAPH ?g { ?s ?p ?o }\n  FILTER(STRSTARTS(STR(?g), \"did:dkg:context-graph:0x8EaA4857B22dddbfb5ebC476087FEc39336e0CB5/mandate-derivations/_verifiable_memory/\"))\n  FILTER(STRSTARTS(STR(?p), \"https://oojae.github.io/mandate/ns/v1#\") || (?p = <http://www.w3.org/1999/02/22-rdf-syntax-ns#type> && STRSTARTS(STR(?o), \"https://oojae.github.io/mandate/ns/v1#\")))\n} ORDER BY ?g ?s ?p ?o",
+  "observedCounts": [
+    8,
+    8
+  ],
+  "response": {
+    "type": "bindings",
+    "bindings": [
+      {
+        "g": "did:dkg:context-graph:0x8EaA4857B22dddbfb5ebC476087FEc39336e0CB5/mandate-derivations/_verifiable_memory/0x8eaa4857b22dddbfb5ebc476087fec39336e0cb5/1",
+        "s": "urn:mandate:derivation:48a2c16d22920ce5",
+        "p": "http://www.w3.org/1999/02/22-rdf-syntax-ns#type",
+        "o": "https://oojae.github.io/mandate/ns/v1#Derivation"
+      },
+      {
+        "g": "did:dkg:context-graph:0x8EaA4857B22dddbfb5ebC476087FEc39336e0CB5/mandate-derivations/_verifiable_memory/0x8eaa4857b22dddbfb5ebc476087fec39336e0cb5/1",
+        "s": "urn:mandate:derivation:48a2c16d22920ce5",
+        "p": "https://oojae.github.io/mandate/ns/v1#authorizedUnder",
+        "o": "urn:mandate:grant:eve-e3wr"
+      },
+      {
+        "g": "did:dkg:context-graph:0x8EaA4857B22dddbfb5ebC476087FEc39336e0CB5/mandate-derivations/_verifiable_memory/0x8eaa4857b22dddbfb5ebc476087fec39336e0cb5/1",
+        "s": "urn:mandate:derivation:48a2c16d22920ce5",
+        "p": "https://oojae.github.io/mandate/ns/v1#billedUsd",
+        "o": "\"0.6999\"^^<http://www.w3.org/2001/XMLSchema#decimal>"
+      },
+      {
+        "g": "did:dkg:context-graph:0x8EaA4857B22dddbfb5ebC476087FEc39336e0CB5/mandate-derivations/_verifiable_memory/0x8eaa4857b22dddbfb5ebc476087fec39336e0cb5/1",
+        "s": "urn:mandate:derivation:48a2c16d22920ce5",
+        "p": "https://oojae.github.io/mandate/ns/v1#derivedAt",
+        "o": "\"2026-09-13T09:10:20.71Z\"^^<http://www.w3.org/2001/XMLSchema#dateTime>"
+      },
+      {
+        "g": "did:dkg:context-graph:0x8EaA4857B22dddbfb5ebC476087FEc39336e0CB5/mandate-derivations/_verifiable_memory/0x8eaa4857b22dddbfb5ebc476087fec39336e0cb5/1",
+        "s": "urn:mandate:derivation:48a2c16d22920ce5",
+        "p": "https://oojae.github.io/mandate/ns/v1#outputSha256",
+        "o": "\"48a2c16d22920ce5ab051987c435bf5517e80bb7c1f50eb4b1b2e98efdbd9b88\""
+      },
+      {
+        "g": "did:dkg:context-graph:0x8EaA4857B22dddbfb5ebC476087FEc39336e0CB5/mandate-derivations/_verifiable_memory/0x8eaa4857b22dddbfb5ebc476087fec39336e0cb5/1",
+        "s": "urn:mandate:derivation:48a2c16d22920ce5",
+        "p": "https://oojae.github.io/mandate/ns/v1#servedCapability",
+        "o": "\"sync-lipsync-v3\""
+      },
+      {
+        "g": "did:dkg:context-graph:0x8EaA4857B22dddbfb5ebC476087FEc39336e0CB5/mandate-derivations/_verifiable_memory/0x8eaa4857b22dddbfb5ebc476087fec39336e0cb5/1",
+        "s": "urn:mandate:derivation:48a2c16d22920ce5",
+        "p": "https://oojae.github.io/mandate/ns/v1#servedModelId",
+        "o": "\"fal-ai/sync-lipsync/v3/image-to-video\""
+      },
+      {
+        "g": "did:dkg:context-graph:0x8EaA4857B22dddbfb5ebC476087FEc39336e0CB5/mandate-derivations/_verifiable_memory/0x8eaa4857b22dddbfb5ebc476087fec39336e0cb5/1",
+        "s": "urn:mandate:derivation:48a2c16d22920ce5",
+        "p": "https://oojae.github.io/mandate/ns/v1#sessionId",
+        "o": "\"s7c-inline\""
+      }
+    ]
+  }
+}
