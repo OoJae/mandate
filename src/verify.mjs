@@ -17,10 +17,27 @@ import { verifyKnowledge } from './verify-core.mjs'
 
 export { CLEAR, TAINTED, UNKNOWN, verifyKnowledge } from './verify-core.mjs'
 
-export async function hashUrl(url) {
-  const res = await fetch(url)
-  if (!res.ok) throw new Error(`cannot fetch media: HTTP ${res.status}`)
-  return createHash('sha256').update(Buffer.from(await res.arrayBuffer())).digest('hex')
+/**
+ * Hash the bytes behind a URL.
+ *
+ * Retries transient network failures: media hosts drop connections mid-body, and
+ * a verifier that gives up on one closed socket reports nothing at all. An HTTP
+ * error status is not retried — that is an answer, not a hiccup.
+ */
+export async function hashUrl(url, { attempts = 4, backoffMs = 1500 } = {}) {
+  let lastErr
+  for (let i = 0; i < attempts; i++) {
+    try {
+      const res = await fetch(url)
+      if (!res.ok) throw Object.assign(new Error(`cannot fetch media: HTTP ${res.status}`), { final: true })
+      return createHash('sha256').update(Buffer.from(await res.arrayBuffer())).digest('hex')
+    } catch (e) {
+      if (e.final) throw e
+      lastErr = e
+      if (i < attempts - 1) await new Promise(r => setTimeout(r, backoffMs * 2 ** i))
+    }
+  }
+  throw new Error(`cannot fetch media after ${attempts} attempts: ${lastErr?.cause?.code ?? lastErr?.message}`)
 }
 
 /**

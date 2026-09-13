@@ -1,0 +1,30 @@
+[
+  {
+    "at": "+0s",
+    "subject": "dana-5i66"
+  },
+  {
+    "at": "+71s",
+    "grant UAL": "did:dkg:base:84532/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/12"
+  },
+  {
+    "at": "+71s",
+    "grant tx": "0x69b9a2ded0a6f604fa4bd94769daf3aae347ea50cc6b9f131cf50f842c49a738"
+  },
+  {
+    "at": "+74s",
+    "producer, own node, after grant": "PERMITTED under urn:mandate:grant:dana-5i66"
+  },
+  {
+    "at": "+148s",
+    "revoke UAL": "did:dkg:base:84532/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/13"
+  },
+  {
+    "at": "+152s",
+    "producer, own node, after revoke": "REFUSED — clause: not-revoked"
+  },
+  {
+    "at": "+152s",
+    "cross-node revocation latency": "4s from revoke command returning"
+  }
+]

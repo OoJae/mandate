@@ -73,3 +73,39 @@ test('TAINTED once the grant has expired, even though it was valid at render tim
   assert.equal(r.verdict, TAINTED)
   assert.match(r.reason, /expired/)
 })
+
+// ---------------------------------------------------------------------------
+// Several derivation edges for the same bytes.
+// ---------------------------------------------------------------------------
+
+const second = () => grant({ id: 'urn:mandate:grant:ana-002' })
+const edgeUnder = (grantId, id) => derivation({ id, authorizedUnder: grantId })
+const revokedFirst = [{ stateOf: 'urn:mandate:grant:ana-001', state: STATE_REVOKED, stateAuthor: ANA, stateAt: '2026-09-11T00:00:00Z' }]
+
+test('a live grant cannot launder bytes already produced under a revoked one', () => {
+  const r = verifyKnowledge(K({
+    grants: [grant(), second()],
+    assertions: revokedFirst,
+    derivations: [edgeUnder('urn:mandate:grant:ana-001', 'urn:d:1'), edgeUnder('urn:mandate:grant:ana-002', 'urn:d:2')],
+  }), SHA, { now: NOW })
+  assert.equal(r.verdict, TAINTED)
+  assert.equal(r.edges, 2)
+})
+
+test('the verdict does not depend on the order edges are returned in', () => {
+  const edges = [edgeUnder('urn:mandate:grant:ana-001', 'urn:d:1'), edgeUnder('urn:mandate:grant:ana-002', 'urn:d:2')]
+  const base = { grants: [grant(), second()], assertions: revokedFirst }
+  const a = verifyKnowledge(K({ ...base, derivations: edges }), SHA, { now: NOW })
+  const b = verifyKnowledge(K({ ...base, derivations: [...edges].reverse() }), SHA, { now: NOW })
+  assert.equal(a.verdict, b.verdict)
+  assert.equal(a.reason, b.reason)
+})
+
+test('CLEAR when every edge for the bytes is clear', () => {
+  const r = verifyKnowledge(K({
+    grants: [grant(), second()],
+    derivations: [edgeUnder('urn:mandate:grant:ana-001', 'urn:d:1'), edgeUnder('urn:mandate:grant:ana-002', 'urn:d:2')],
+  }), SHA, { now: NOW })
+  assert.equal(r.verdict, CLEAR)
+  assert.equal(r.judgements.length, 2)
+})

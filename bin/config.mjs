@@ -44,4 +44,19 @@ export function grantsCg() {
   return cg
 }
 
+/**
+ * The producer's own graph for derivation edges. Writing derivations into the
+ * grantor's graph would need write authority the producer should not have, and
+ * a peer that has only synced a graph's anchored data cannot write to it anyway.
+ */
+export function derivationsCg() {
+  const cg = process.env.MANDATE_DERIVATIONS_CG
+  if (!cg) {
+    throw new Error('MANDATE_DERIVATIONS_CG is not set.\n'
+      + '  Create and register a context graph on the producer node for derivation edges, and set\n'
+      + '  MANDATE_DERIVATIONS_CG=<producer-address>/<name>. See .env.example.')
+  }
+  return cg
+}
+
 export const workDir = () => env('MANDATE_WORK_DIR', defaultWorkDir())

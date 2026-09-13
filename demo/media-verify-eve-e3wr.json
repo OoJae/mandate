@@ -1,0 +1,42 @@
+{
+  "subject": "eve-e3wr",
+  "note": "Observed run. CLEAR was recorded at +165s; the process then crashed downloading the MP4 (UND_ERR_SOCKET, fixed by adding retries to hashUrl). The post-revocation verdict and the unchanged-bytes check below were taken afterwards against the same anchored graphs.",
+  "observed": [
+    {
+      "at": "+0s",
+      "subject": "eve-e3wr"
+    },
+    {
+      "at": "+69s",
+      "grant UAL": "did:dkg:base:84532/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/15"
+    },
+    {
+      "at": "+124s",
+      "derivation author": "producer node"
+    },
+    {
+      "at": "+124s",
+      "derivation sha256": "48a2c16d22920ce5ab051987c435bf5517e80bb7c1f50eb4b1b2e98efdbd9b88"
+    },
+    {
+      "at": "+124s",
+      "derivation UAL": "did:dkg:base:84532/0x8eaa4857b22dddbfb5ebc476087fec39336e0cb5/1"
+    },
+    {
+      "at": "+165s",
+      "verify before revocation": "CLEAR — authorised by did:dkg:agent:0xeD1eeB64CaC09874257F05Fd6B51A55695ad0B69 under urn:mandate:grant:eve-e3wr, served by \"sync-lipsync-v3\""
+    },
+    {
+      "at": "+264s",
+      "revoke UAL": "did:dkg:base:84532/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/16"
+    }
+  ],
+  "afterRevocation": {
+    "verifier": "grantor node",
+    "verdict": "TAINTED",
+    "reason": "the grant authorising this file was revoked at 2026-09-13T09:11:49.201Z by did:dkg:agent:0xeD1eeB64CaC09874257F05Fd6B51A55695ad0B69",
+    "edges": 1
+  },
+  "deliveredFileSha256": "48a2c16d22920ce5ab051987c435bf5517e80bb7c1f50eb4b1b2e98efdbd9b88",
+  "unchanged": true
+}

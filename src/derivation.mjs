@@ -38,6 +38,9 @@ export async function recordDerivation(node, contextGraphId, {
   outputUrl, servedCapability, servedModelId, authorizedUnder,
   loraId = null, sessionId = null, billedUsd = 0, jobId = null,
   workDir = defaultWorkDir(),
+  // Only Verifiable Memory was measured to reach other nodes. A derivation that
+  // stays in SWM is invisible to every verifier except the producer itself.
+  anchor = true,
 }) {
   const outputSha256 = await sha256OfUrl(outputUrl)
   const id = `urn:mandate:derivation:${outputSha256.slice(0, 16)}`
@@ -68,10 +71,19 @@ export async function recordDerivation(node, contextGraphId, {
     if (status !== 'swm-shared') {
       // Refusing to report a half-committed derivation as committed is the
       // whole point: an edge the graph does not have cannot be quarantined.
-      throw new Error(`derivation ${id} sealed but not shared to SWM:\n${shared.slice(0, 400)}`)
+      const stage = created.status ? 'sealed but not shared to SWM' : 'could not be created'
+      throw new Error(`derivation ${id} ${stage}:\n${(created.status ? shared : created.raw).slice(0, 400)}`)
     }
   }
-  return { id, outputSha256, path, name, ...created, status }
+  let vm = null
+  if (anchor) {
+    vm = await node.publishVM(name, contextGraphId)
+    if (!vm.ual) {
+      throw new Error(`derivation ${id} shared but not anchored; other parties cannot verify against it:\n`
+        + vm.raw.slice(0, 400))
+    }
+  }
+  return { id, outputSha256, path, name, ...created, status, ual: vm?.ual ?? null, txHash: vm?.txHash ?? null }
 }
 
 /**

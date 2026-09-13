@@ -5,7 +5,7 @@
  * `render` is the whole argument in one command: resolve the grant knowledge
  * from a graph the producer does not own, decide, and only then spend money.
  */
-import { PRODUCER, GRANTOR, grantsCg, workDir } from './config.mjs'
+import { PRODUCER, GRANTOR, grantsCg, derivationsCg, workDir } from './config.mjs'
 import { readKnowledge, priorSpendFor, blastRadius } from '../src/resolve.mjs'
 import { decide } from '../src/gate.mjs'
 import { grantToTurtle, stateToTurtle } from '../src/rdf.mjs'
@@ -34,8 +34,11 @@ const captureConsent = async (...a) => {
 }
 
 // Resolved on first use, so the help screen works without configuration.
-let _cg
+let _cg, _dcg
 const GRANTS_CG_ = () => (_cg ??= grantsCg())
+const DERIVATIONS_CG_ = () => (_dcg ??= derivationsCg())
+/** What a reader needs: grants and revocations, plus derivation edges. */
+const READ_GRAPHS = () => [GRANTS_CG_(), DERIVATIONS_CG_()]
 
 // Live list prices, verified via describe_capability. Labelled as estimates
 // everywhere they are shown: get_cost_report is Livepeer's estimate at list
@@ -101,7 +104,7 @@ async function cmdRender() {
   // needs an on-chain context-graph registration and therefore gas.
   const resolver = arg('resolver', 'producer') === 'grantor' ? GRANTOR() : PRODUCER()
   process.stdout.write(c.dim(`\n  resolving grant knowledge from ${resolver.name}… `))
-  const k = await readKnowledge(resolver, GRANTS_CG_())
+  const k = await readKnowledge(resolver, READ_GRAPHS())
   console.log(c.dim(`${k.grants.length} grant(s), ${k.assertions.length} state assertion(s)`))
 
   const candidate = k.grants.find(g => g.subject === subject)
@@ -170,7 +173,9 @@ async function cmdRender() {
     return
   }
   try {
-    const rec = await recordDerivation(GRANTOR(), GRANTS_CG_(), {
+    // Authored on the PRODUCER's node: a derivation is the producer's own record
+    // of what it made, and it is anchored so any other party can verify against it.
+    const rec = await recordDerivation(PRODUCER(), DERIVATIONS_CG_(), {
       outputUrl: mediaUrl,
       servedCapability: capability,
       authorizedUnder: d.grantId,
@@ -180,6 +185,7 @@ async function cmdRender() {
     })
     console.log(c.green(`\n  derivation recorded  ${rec.id}`))
     console.log(c.dim(`  sha256 ${rec.outputSha256}`))
+    if (rec.ual) console.log(c.dim(`  UAL    ${rec.ual}`))
   } catch (e) {
     console.log(c.red(`\n  DERIVATION FAILED TO COMMIT — treating this render as failed.`))
     console.log(c.red(`  ${e.message}`))
@@ -203,7 +209,7 @@ async function cmdStatus() {
 
 async function cmdBlastRadius() {
   const resolver = arg('resolver', 'producer') === 'grantor' ? GRANTOR() : PRODUCER()
-  const k = await readKnowledge(resolver, GRANTS_CG_())
+  const k = await readKnowledge(resolver, READ_GRAPHS())
   const grantId = arg('grant', k.grants[0]?.id)
   const r = blastRadius(grantId, k.derivations)
   console.log(c.bold(`\nQuarantine list for ${grantId}\n`))
@@ -362,7 +368,7 @@ async function cmdVerify() {
   console.log(`  file      ${url.slice(0, 92)}`)
   console.log(c.dim(`  verifier  ${node.name} — no relationship to the producer\n`))
 
-  const r = await verifyMedia(node, GRANTS_CG_(), url)
+  const r = await verifyMedia(node, READ_GRAPHS(), url)
   console.log(`  sha256    ${r.sha256}`)
   if (r.ignoredForgeries?.length) {
     console.log(c.yellow(`  ignored ${r.ignoredForgeries.length} state assertion(s) not authored by the grantor`))

@@ -72,15 +72,20 @@ function toDerivation(o) {
 }
 
 /**
- * Pull every grant, state assertion and derivation edge a node can see.
+ * Pull every grant, state assertion and derivation edge a node can see across
+ * one or more context graphs.
  *
  * State assertions are returned WITHOUT filtering by author. Authenticity is
  * decided in the gate, not here, so that a forged assertion is visible and
  * reportable rather than silently dropped on the way in.
  */
-export async function readKnowledge(node, contextGraph) {
-  const out = await node.query(contextGraph, SELECT_ALL)
-  const objects = group(parseQueryTable(out))
+export async function readKnowledge(node, contextGraphs) {
+  // Each party writes to a graph it owns — grants and revocations in the
+  // grantor's, derivations in the producer's — so a reader usually needs several.
+  const graphs = [].concat(contextGraphs)
+  const outs = await Promise.all(graphs.map(cg => node.query(cg, SELECT_ALL)))
+  const out = outs.join('\n')
+  const objects = group(outs.flatMap(parseQueryTable))
   return {
     grants: objects.filter(o => isType(o, V.LikenessGrant)).map(toGrant),
     assertions: objects.filter(o => isType(o, V.GrantState)).map(toState),
