@@ -6,7 +6,7 @@
  * the I/O stays testable in isolation.
  */
 import * as V from './vocab.mjs'
-import { parseQueryTable } from './dkg.mjs'
+import { parseQueryTable } from './sparql-table.mjs'
 
 const SELECT_ALL = `SELECT ?s ?p ?o WHERE { ?s ?p ?o }`
 

@@ -8,7 +8,7 @@
  * This spike creates a draft on Ana's node, finalizes it, and reports the
  * author address the seal actually carries.
  */
-import { GRANTOR, PRODUCER } from '../src/dkg.mjs'
+import { GRANTOR, PRODUCER } from '../bin/config.mjs'
 import { grantToTurtle } from '../src/rdf.mjs'
 import { writeFileSync } from 'node:fs'
 

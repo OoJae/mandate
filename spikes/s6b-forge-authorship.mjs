@@ -5,7 +5,7 @@
  * only meaningful if the producer CANNOT make a seal that says the same thing.
  * This spike tries to, from the producer's node, using Ana's address.
  */
-import { PRODUCER, GRANTOR } from '../src/dkg.mjs'
+import { PRODUCER, GRANTOR } from '../bin/config.mjs'
 import { grantToTurtle } from '../src/rdf.mjs'
 import { writeFileSync } from 'node:fs'
 

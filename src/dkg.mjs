@@ -9,9 +9,33 @@
 import { readFileSync } from 'node:fs'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
+import { createRequire } from 'node:module'
+import { dirname, join } from 'node:path'
 
 const run = promisify(execFile)
-const CLI = 'node_modules/@origintrail-official/dkg/dist/cli.js'
+
+/**
+ * Locate the `dkg` CLI through public interfaces only.
+ *
+ * Order: an explicit `DKG_CLI` path; then the `bin.dkg` entry declared in
+ * `@origintrail-official/dkg`'s package.json (a public export), resolved from
+ * wherever this package is installed; then `dkg` on PATH. The OriginTrail
+ * registry forbids reaching into non-public subpaths, and a cwd-relative path
+ * breaks the moment this is installed as a dependency.
+ */
+export function resolveDkgCli() {
+  if (process.env.DKG_CLI) return { cmd: 'node', pre: [process.env.DKG_CLI] }
+  try {
+    const require = createRequire(import.meta.url)
+    const pkgPath = require.resolve('@origintrail-official/dkg/package.json')
+    const bin = JSON.parse(readFileSync(pkgPath, 'utf8')).bin
+    const rel = typeof bin === 'string' ? bin : bin?.dkg
+    if (rel) return { cmd: 'node', pre: [join(dirname(pkgPath), rel)] }
+  } catch { /* not installed alongside; fall through to PATH */ }
+  return { cmd: 'dkg', pre: [] }
+}
+
+export { parseQueryTable } from './sparql-table.mjs'
 
 /** auth.token carries a `#` comment line; strip it. */
 export function readToken(home) {
@@ -22,7 +46,7 @@ export function readToken(home) {
 
 export class DkgNode {
   constructor({ home, port, name }) {
-    this.home = home.replace(/^~/, process.env.HOME)
+    this.home = home.replace(/^~(?=$|\/)/, process.env.HOME ?? '')
     this.port = port
     this.name = name
     this.base = `http://127.0.0.1:${port}`
@@ -63,7 +87,8 @@ export class DkgNode {
    */
   async cli(args, { timeout = 240000, tolerant = false } = {}) {
     try {
-      const { stdout, stderr } = await run('node', [CLI, ...args], {
+      const { cmd, pre } = resolveDkgCli()
+      const { stdout, stderr } = await run(cmd, [...pre, ...args], {
         env: { ...process.env, DKG_HOME: this.home },
         timeout,
         maxBuffer: 32 * 1024 * 1024,
@@ -132,32 +157,4 @@ DkgNode.prototype.publishVM = async function publishVM(name, contextGraphId) {
   }
 }
 
-/** The two parties, as the demo runs them. */
-export const GRANTOR = () => new DkgNode({
-  home: '~/.dkg-mandate-grantor', port: 9201, name: 'mandate-grantor',
-})
-export const PRODUCER = () => new DkgNode({
-  home: '~/.dkg-mandate-producer', port: 9202, name: 'mandate-producer',
-})
 
-/** Parse the CLI's table output back into rows of {var: value}. */
-export function parseQueryTable(out) {
-  const lines = out.split('\n')
-  const sep = lines.findIndex(l => /^[─\s]+$/.test(l) && l.includes('─'))
-  if (sep < 1) return []
-  const header = lines[sep - 1]
-  // Column starts are wherever a run of dashes begins on the separator line.
-  const cols = []
-  const re = /─+/g
-  let m
-  while ((m = re.exec(lines[sep]))) cols.push({ start: m.index, end: m.index + m[0].length })
-  const names = cols.map(c => header.slice(c.start, c.end).trim())
-  const rows = []
-  for (const line of lines.slice(sep + 1)) {
-    if (!line.trim() || /row\(s\)/.test(line)) break
-    const row = {}
-    cols.forEach((c, i) => { row[names[i]] = line.slice(c.start, c.end).trim() })
-    rows.push(row)
-  }
-  return rows
-}

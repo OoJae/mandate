@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { verifyKnowledge, CLEAR, TAINTED, UNKNOWN } from '../src/verify.mjs'
+import { verifyKnowledge, CLEAR, TAINTED, UNKNOWN } from '../src/verify-core.mjs'
 import { STATE_REVOKED, STATE_ACTIVE } from '../src/vocab.mjs'
 
 const ANA = 'did:dkg:agent:0xANA'

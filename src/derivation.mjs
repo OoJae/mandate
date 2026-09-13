@@ -13,9 +13,12 @@
  */
 import { createHash } from 'node:crypto'
 import { writeFileSync, mkdirSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { derivationToTurtle } from './rdf.mjs'
 
-const OUT = 'spikes/out/derivations'
+/** Scratch Turtle lands here before the CLI seals it. Never inside the caller's project. */
+export const defaultWorkDir = () => join(tmpdir(), 'mandate')
 
 export async function sha256OfUrl(url) {
   const res = await fetch(url)
@@ -34,6 +37,7 @@ export async function sha256OfUrl(url) {
 export async function recordDerivation(node, contextGraphId, {
   outputUrl, servedCapability, servedModelId, authorizedUnder,
   loraId = null, sessionId = null, billedUsd = 0, jobId = null,
+  workDir = defaultWorkDir(),
 }) {
   const outputSha256 = await sha256OfUrl(outputUrl)
   const id = `urn:mandate:derivation:${outputSha256.slice(0, 16)}`
@@ -43,8 +47,9 @@ export async function recordDerivation(node, contextGraphId, {
     derivedAt: new Date().toISOString(),
   })
 
-  mkdirSync(OUT, { recursive: true })
-  const path = `${OUT}/${outputSha256.slice(0, 16)}.ttl`
+  const dir = join(workDir, 'derivations')
+  mkdirSync(dir, { recursive: true })
+  const path = join(dir, `${outputSha256.slice(0, 16)}.ttl`)
   writeFileSync(path, ttl)
 
   // The KA name is only a local handle; the derivation's identity is the content

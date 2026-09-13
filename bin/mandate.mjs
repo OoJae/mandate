@@ -5,18 +5,37 @@
  * `render` is the whole argument in one command: resolve the grant knowledge
  * from a graph the producer does not own, decide, and only then spend money.
  */
-import { PRODUCER, GRANTOR } from '../src/dkg.mjs'
+import { PRODUCER, GRANTOR, grantsCg, workDir } from './config.mjs'
 import { readKnowledge, priorSpendFor, blastRadius } from '../src/resolve.mjs'
 import { decide } from '../src/gate.mjs'
-import * as LP from '../src/livepeer.mjs'
 import { grantToTurtle, stateToTurtle } from '../src/rdf.mjs'
-import { captureConsent } from '../src/consent.mjs'
 import { recordDerivation } from '../src/derivation.mjs'
 import { verifyMedia, CLEAR, TAINTED } from '../src/verify.mjs'
 import { writeFileSync, mkdirSync } from 'node:fs'
+import { join } from 'node:path'
 
-const GRANTS_CG = process.env.MANDATE_GRANTS_CG
-  ?? '0xeD1eeB64CaC09874257F05Fd6B51A55695ad0B69/mandate-grants'
+// The Livepeer client needs the optional @modelcontextprotocol/sdk peer. Only
+// the commands that actually talk to Livepeer load it, so status, grant, revoke,
+// verify and a non-executing render work without it.
+async function livepeer() {
+  try {
+    return await import('../src/livepeer.mjs')
+  } catch (e) {
+    if (e.code === 'ERR_MODULE_NOT_FOUND' && /@modelcontextprotocol\/sdk/.test(e.message)) {
+      throw new Error('This command talks to Livepeer Agent and needs the optional peer:\n'
+        + '  npm install @modelcontextprotocol/sdk')
+    }
+    throw e
+  }
+}
+const captureConsent = async (...a) => {
+  await livepeer()
+  return (await import('../src/consent.mjs')).captureConsent(...a)
+}
+
+// Resolved on first use, so the help screen works without configuration.
+let _cg
+const GRANTS_CG_ = () => (_cg ??= grantsCg())
 
 // Live list prices, verified via describe_capability. Labelled as estimates
 // everywhere they are shown: get_cost_report is Livepeer's estimate at list
@@ -82,7 +101,7 @@ async function cmdRender() {
   // needs an on-chain context-graph registration and therefore gas.
   const resolver = arg('resolver', 'producer') === 'grantor' ? GRANTOR() : PRODUCER()
   process.stdout.write(c.dim(`\n  resolving grant knowledge from ${resolver.name}… `))
-  const k = await readKnowledge(resolver, GRANTS_CG)
+  const k = await readKnowledge(resolver, GRANTS_CG_())
   console.log(c.dim(`${k.grants.length} grant(s), ${k.assertions.length} state assertion(s)`))
 
   const candidate = k.grants.find(g => g.subject === subject)
@@ -120,6 +139,7 @@ async function cmdRender() {
   }
 
   console.log(c.dim('\n  dispatching via run_capability on /api/mcp/raw (no model substitution)…'))
+  const LP = await livepeer()
   const client = await LP.connect(LP.RAW)
   let out
   try {
@@ -150,12 +170,13 @@ async function cmdRender() {
     return
   }
   try {
-    const rec = await recordDerivation(GRANTOR(), GRANTS_CG, {
+    const rec = await recordDerivation(GRANTOR(), GRANTS_CG_(), {
       outputUrl: mediaUrl,
       servedCapability: capability,
       authorizedUnder: d.grantId,
       billedUsd: estimatedUsd,
       jobId: (out.match(/mjob_[a-f0-9]+/) || [])[0] ?? null,
+      workDir: workDir(),
     })
     console.log(c.green(`\n  derivation recorded  ${rec.id}`))
     console.log(c.dim(`  sha256 ${rec.outputSha256}`))
@@ -182,7 +203,7 @@ async function cmdStatus() {
 
 async function cmdBlastRadius() {
   const resolver = arg('resolver', 'producer') === 'grantor' ? GRANTOR() : PRODUCER()
-  const k = await readKnowledge(resolver, GRANTS_CG)
+  const k = await readKnowledge(resolver, GRANTS_CG_())
   const grantId = arg('grant', k.grants[0]?.id)
   const r = blastRadius(grantId, k.derivations)
   console.log(c.bold(`\nQuarantine list for ${grantId}\n`))
@@ -254,21 +275,21 @@ async function cmdGrant() {
     maxSpendUsd: Number(arg('max-spend', '5')),
   }
 
-  mkdirSync('spikes/out', { recursive: true })
-  const path = `spikes/out/${name}.ttl`
+  mkdirSync(workDir(), { recursive: true })
+  const path = join(workDir(), `${name}.ttl`)
   writeFileSync(path, grantToTurtle(grant))
 
   console.log(c.dim(`\n  sealing on ${grantor.name} …`))
-  const r = await grantor.createKA(name, GRANTS_CG, path, { share: true })
+  const r = await grantor.createKA(name, GRANTS_CG_(), path, { share: true })
   if (r.sharePending || r.status !== 'swm-shared') {
     console.log(c.dim('  share did not complete on create; retrying (it is not atomic)…'))
-    await grantor.cli(['ka', 'share', name, '-c', GRANTS_CG], { tolerant: true })
+    await grantor.cli(['ka', 'share', name, '-c', GRANTS_CG_()], { tolerant: true })
   }
   // Another party can only act on what is anchored — see publishVM.
   let vm = null
   if (!has('local-only')) {
     console.log(c.dim('  publishing to Verifiable Memory (Base Sepolia)…'))
-    vm = await grantor.publishVM(name, GRANTS_CG)
+    vm = await grantor.publishVM(name, GRANTS_CG_())
   }
   console.log(c.green(`\n  GRANTED  ${grantId}`))
   console.log(`  author      ${id.agentDid}`)
@@ -290,19 +311,19 @@ async function cmdRevoke() {
   const grantId = arg('id', 'urn:mandate:grant:ana-7f3c')
   const at = new Date().toISOString()
   const name = `state-${grantId.split(':').pop()}-revoked-${Date.now().toString(36)}`
-  const path = `spikes/out/${name}.ttl`
-  mkdirSync('spikes/out', { recursive: true })
+  mkdirSync(workDir(), { recursive: true })
+  const path = join(workDir(), `${name}.ttl`)
   writeFileSync(path, stateToTurtle({
     id: `urn:mandate:state:${name}`, stateOf: grantId,
     state: 'revoked', stateAuthor: id.agentDid, stateAt: at,
   }))
-  const r = await grantor.createKA(name, GRANTS_CG, path, { share: true })
+  const r = await grantor.createKA(name, GRANTS_CG_(), path, { share: true })
   if (r.sharePending || r.status !== 'swm-shared') {
-    await grantor.cli(['ka', 'share', name, '-c', GRANTS_CG], { tolerant: true })
+    await grantor.cli(['ka', 'share', name, '-c', GRANTS_CG_()], { tolerant: true })
   }
   // A revocation that stays in SWM does not reach the producer — measured, not
   // assumed. It must be anchored, or the producer keeps rendering.
-  const vm = await grantor.publishVM(name, GRANTS_CG)
+  const vm = await grantor.publishVM(name, GRANTS_CG_())
   console.log(c.red(`\n  REVOKED ${grantId}`))
   console.log(`  by   ${id.agentDid} at ${at}`)
   if (vm.ual) {
@@ -341,7 +362,7 @@ async function cmdVerify() {
   console.log(`  file      ${url.slice(0, 92)}`)
   console.log(c.dim(`  verifier  ${node.name} — no relationship to the producer\n`))
 
-  const r = await verifyMedia(node, GRANTS_CG, url)
+  const r = await verifyMedia(node, GRANTS_CG_(), url)
   console.log(`  sha256    ${r.sha256}`)
   if (r.ignoredForgeries?.length) {
     console.log(c.yellow(`  ignored ${r.ignoredForgeries.length} state assertion(s) not authored by the grantor`))

@@ -1,26 +1,81 @@
 {
-  "name": "mandate",
+  "name": "mandate-consent",
   "version": "0.1.0",
-  "private": true,
-  "type": "module",
-  "description": "A consent rail for generative media: no likeness or voice renders until the depicted person's own agent has published a live, signed grant.",
+  "description": "A consent rail for generative media: no likeness or voice renders until the depicted person's own agent has published a live, signed grant on the OriginTrail DKG.",
   "license": "Apache-2.0",
+  "author": "OoJae",
+  "type": "module",
   "engines": {
     "node": ">=22.13.0"
   },
-  "scripts": {
-    "spike:caps": "node spikes/s1-capabilities.mjs",
-    "spike:upload": "node spikes/s2-request-upload.mjs",
-    "test": "node --test test/*.test.mjs",
-    "nodes:init": "python3 spikes/drive-init.py ~/.dkg-mandate-grantor mandate-grantor 9201 && python3 spikes/drive-init.py ~/.dkg-mandate-producer mandate-producer 9202",
-    "nodes:start": "DKG_HOME=~/.dkg-mandate-grantor node node_modules/@origintrail-official/dkg/dist/cli.js start && DKG_HOME=~/.dkg-mandate-producer node node_modules/@origintrail-official/dkg/dist/cli.js start"
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/OoJae/mandate.git"
   },
-  "dependencies": {
+  "homepage": "https://github.com/OoJae/mandate#readme",
+  "bugs": {
+    "url": "https://github.com/OoJae/mandate/issues"
+  },
+  "keywords": [
+    "consent",
+    "likeness",
+    "generative-media",
+    "provenance",
+    "revocation",
+    "origintrail",
+    "dkg",
+    "knowledge-graph",
+    "rdf",
+    "livepeer",
+    "ai-agents"
+  ],
+  "main": "./src/index.mjs",
+  "exports": {
+    ".": "./src/index.mjs",
+    "./dkg": "./src/dkg.mjs",
+    "./resolve": "./src/resolve.mjs",
+    "./verify": "./src/verify.mjs",
+    "./derivation": "./src/derivation.mjs",
+    "./livepeer": "./src/livepeer.mjs",
+    "./consent": "./src/consent.mjs",
+    "./vocab/mandate.ttl": "./vocab/mandate.ttl",
+    "./vocab/context.jsonld": "./vocab/context.jsonld",
+    "./package.json": "./package.json"
+  },
+  "bin": {
+    "mandate": "./bin/mandate.mjs"
+  },
+  "files": [
+    "src",
+    "bin",
+    "vocab",
+    "README.md",
+    "LICENSE",
+    "DESIGN.md"
+  ],
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "build:vocab-docs": "node scripts/build-vocab-docs.mjs",
+    "smoke:pack": "node scripts/smoke-pack.mjs",
+    "spike:caps": "node spikes/s1-capabilities.mjs",
+    "nodes:init": "python3 spikes/drive-init.py ~/.dkg-mandate-grantor mandate-grantor 9201 && python3 spikes/drive-init.py ~/.dkg-mandate-producer mandate-producer 9202",
+    "nodes:start": "DKG_HOME=~/.dkg-mandate-grantor npx dkg start && DKG_HOME=~/.dkg-mandate-producer npx dkg start"
+  },
+  "peerDependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",
-    "@noble/hashes": "^2.4.0",
+    "@origintrail-official/dkg": "^10.0.16"
+  },
+  "peerDependenciesMeta": {
+    "@modelcontextprotocol/sdk": {
+      "optional": true
+    },
+    "@origintrail-official/dkg": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
     "@origintrail-official/dkg": "^10.0.16",
-    "hono": "^4.13.7",
-    "n3": "^2.7.12",
-    "zod": "^4.6.2"
+    "n3": "^2.7.12"
   }
 }

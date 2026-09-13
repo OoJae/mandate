@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { checkSpokenScope } from '../src/consent.mjs'
+import { checkSpokenScope } from '../src/scope.mjs'
 import { reconcile } from '../src/derivation.mjs'
 
 test('spoken scope reports coverage rather than deciding', () => {
