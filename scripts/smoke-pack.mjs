@@ -74,8 +74,12 @@ try {
   check('vocabulary ships under the owned namespace', r.ttlHasNs && r.ns === 'https://oojae.github.io/mandate/ns/v1#')
 
   let help = ''
-  try { sh(join(nm, '.bin', 'mandate'), [], { cwd: app }) } catch (e) { help = (e.stdout || '') + (e.stderr || '') }
-  check('bin runs and prints help', /consent rail for generative media/.test(help))
+  let helpExit = 0
+  try { help = sh(join(nm, '.bin', 'mandate'), [], { cwd: app }) } catch (e) { help = (e.stdout || '') + (e.stderr || ''); helpExit = e.status }
+  check('bin runs and prints help, exiting 0', helpExit === 0 && /consent rail for generative media/.test(help))
+  let usageExit = 0
+  try { sh(join(nm, '.bin', 'mandate'), ['revoke'], { cwd: app }) } catch (e) { usageExit = e.status }
+  check('a usage error exits 1', usageExit === 1)
 
   let peerError = ''
   try { sh('node', ['--input-type=module', '-e', "await import('mandate-consent/livepeer')"], { cwd: app }) }

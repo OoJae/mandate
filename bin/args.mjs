@@ -97,7 +97,6 @@ export const COMMANDS = {
   revoke: 'revoke a grant, as the grantor that published it',
   verify: 'check a delivered file from its bytes alone',
   'blast-radius': 'everything produced under a grant',
-  record: 'recover a render whose derivation did not commit',
 }
 
 /** [name, type, commands, help, {required, default}] */
@@ -120,7 +119,7 @@ export const FLAGS = [
   ['with-consent', 'bool', ['grant'], 'capture a consent clip on a phone before granting'],
   ['consent-kind', enumOf(['video', 'audio']), ['grant', 'consent'], 'what the phone link records (default video)'],
   ['force', 'bool', ['grant'], 'grant even if the spoken consent does not mention every requested term'],
-  ['yes', 'bool', ['grant', 'revoke'], 'skip the typed confirmation'],
+  ['yes', 'bool', ['grant', 'revoke'], 'publish without the typed confirmation (required when not on a terminal)'],
 
   ['seconds', 'decimal', ['render'], 'expected output duration, used for the cost estimate'],
   ['at', 'iso', ['render'], 'decide as of this time (dry runs only; refused with --execute)'],
@@ -138,7 +137,6 @@ export const FLAGS = [
   ['sha256', 'sha256', ['verify'], 'the delivered file\'s SHA-256, instead of --url'],
   ['node', enumOf(['verifier', 'grantor', 'producer']), ['verify'], 'which node reads the graph (default verifier)'],
   ['grant', 'iri', ['blast-radius'], 'the grant IRI', { required: ['blast-radius'] }],
-  ['pending', 'string', ['record'], 'the pending render key', { required: ['record'] }],
 ]
 
 const camel = s => s.replace(/-([a-z])/g, (_, c) => c.toUpperCase())

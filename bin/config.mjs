@@ -1,68 +1,78 @@
 /**
  * CLI configuration.
  *
- * Deployment details — which nodes, which context graph — belong to whoever runs
- * Mandate, not to the library. Values come from the environment, with a `.env`
- * in the working directory filling in anything unset (see `.env.example`).
+ * Deployment details — which nodes, which context graphs, which producers to
+ * trust — belong to whoever runs Mandate, not to the library. Values come from
+ * the environment, with a `.env` in the working directory filling in anything
+ * unset (see `.env.example`).
+ *
+ * Only Mandate's own keys are read from `.env`. A `.env` is often shared or
+ * copied between projects, and a stray NODE_OPTIONS or PATH in one should not
+ * change how this process, or anything it starts, runs.
  */
 import { existsSync, readFileSync } from 'node:fs'
 import { parseEnv } from 'node:util'
 import { join } from 'node:path'
 import { DkgNode } from '../src/dkg.mjs'
-import { defaultWorkDir } from '../src/derivation.mjs'
 import { contextGraphAddress } from '../src/resolve.mjs'
+import { assertContextGraphId } from '../src/queries.mjs'
 import { fileStateStore } from '../src/state-store.mjs'
 import { normAddress } from '../src/rdf-term.mjs'
 
-const envFile = join(process.cwd(), '.env')
-if (existsSync(envFile)) {
-  for (const [k, v] of Object.entries(parseEnv(readFileSync(envFile, 'utf8')))) {
-    if (process.env[k] === undefined) process.env[k] = v
+export const ENV_KEY = /^(MANDATE_[A-Z0-9_]+|LIVEPEER_AGENT_KEY)$/
+
+/** Copy allow-listed, unset keys from a .env file into `env`. */
+export function loadEnvFile(path, env = process.env) {
+  const loaded = []
+  const ignored = []
+  if (!existsSync(path)) return { loaded, ignored }
+  for (const [k, v] of Object.entries(parseEnv(readFileSync(path, 'utf8')))) {
+    if (!ENV_KEY.test(k)) { ignored.push(k); continue }
+    if (env[k] === undefined) { env[k] = v; loaded.push(k) }
   }
+  return { loaded, ignored }
 }
+
+export const envLoad = loadEnvFile(join(process.cwd(), '.env'))
 
 const env = (k, d) => process.env[k] ?? d
 
-export const GRANTOR = () => new DkgNode({
-  home: env('MANDATE_GRANTOR_HOME', '~/.dkg-mandate-grantor'),
-  port: Number(env('MANDATE_GRANTOR_PORT', '9201')),
-  name: env('MANDATE_GRANTOR_NAME', 'mandate-grantor'),
-})
-
-export const PRODUCER = () => new DkgNode({
-  home: env('MANDATE_PRODUCER_HOME', '~/.dkg-mandate-producer'),
-  port: Number(env('MANDATE_PRODUCER_PORT', '9202')),
-  name: env('MANDATE_PRODUCER_NAME', 'mandate-producer'),
-})
-
-/** Read lazily, so `mandate` with no arguments still prints help. */
-export function grantsCg() {
-  const cg = process.env.MANDATE_GRANTS_CG
-  if (!cg) {
-    throw new Error('MANDATE_GRANTS_CG is not set.\n'
-      + '  Create a public context graph on the grantor node, register it on-chain, and set\n'
-      + '  MANDATE_GRANTS_CG=<agent-address>/<name> in the environment or in .env.\n'
-      + '  See .env.example.')
-  }
-  return cg
+function node(role, defaults) {
+  return new DkgNode({
+    home: env(`MANDATE_${role}_HOME`, defaults.home),
+    port: Number(env(`MANDATE_${role}_PORT`, defaults.port)),
+    name: env(`MANDATE_${role}_NAME`, defaults.name),
+  })
 }
+
+export const GRANTOR = () => node('GRANTOR', { home: '~/.dkg-mandate-grantor', port: '9201', name: 'mandate-grantor' })
+export const PRODUCER = () => node('PRODUCER', { home: '~/.dkg-mandate-producer', port: '9202', name: 'mandate-producer' })
+
+/** The independent read-only node a verifier runs, if one is configured. */
+export const VERIFIER = () => (process.env.MANDATE_VERIFIER_PORT
+  ? node('VERIFIER', { home: '~/.dkg-mandate-verifier', port: '9203', name: 'mandate-verifier' })
+  : null)
+
+function requiredCg(key, help) {
+  const cg = process.env[key]
+  if (!cg) throw new Error(`${key} is not set.\n  ${help}\n  See .env.example.`)
+  try {
+    return assertContextGraphId(cg)
+  } catch {
+    throw new Error(`${key} must look like 0x<40 hex>/<name>, got ${JSON.stringify(cg)}`)
+  }
+}
+
+/** The public context graph grants and revocations are published to. */
+export const grantsCg = () => requiredCg('MANDATE_GRANTS_CG',
+  'Create a public context graph on the grantor node, register it on-chain, and set MANDATE_GRANTS_CG=<agent-address>/<name>.')
 
 /**
  * The producer's own graph for derivation edges. Writing derivations into the
- * grantor's graph would need write authority the producer should not have, and
- * a peer that has only synced a graph's anchored data cannot write to it anyway.
+ * grantor's graph would need write authority the producer should not have.
  */
-export function derivationsCg() {
-  const cg = process.env.MANDATE_DERIVATIONS_CG
-  if (!cg) {
-    throw new Error('MANDATE_DERIVATIONS_CG is not set.\n'
-      + '  Create and register a context graph on the producer node for derivation edges, and set\n'
-      + '  MANDATE_DERIVATIONS_CG=<producer-address>/<name>. See .env.example.')
-  }
-  return cg
-}
-
-export const workDir = () => env('MANDATE_WORK_DIR', defaultWorkDir())
+export const derivationsCg = () => requiredCg('MANDATE_DERIVATIONS_CG',
+  'Create and register a context graph on the producer node for derivation edges, and set MANDATE_DERIVATIONS_CG=<producer-address>/<name>.')
 
 /**
  * Producers whose derivation edges count: for spend under a grant, and for a

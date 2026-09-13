@@ -2,404 +2,470 @@
 /**
  * Mandate CLI.
  *
- * `render` is the whole argument in one command: resolve the grant knowledge
- * from a graph the producer does not own, decide, and only then spend money.
+ * `render` is the whole argument in one command: resolve grant knowledge from
+ * graphs the producer does not control, decide, and only then spend money.
+ *
+ * Every command succeeds only when what it claims has happened: a grant or
+ * revocation is reported only once it is anchored on-chain, and a refusal or an
+ * incomplete read exits non-zero with the code from bin/args.mjs.
  */
-import { PRODUCER, GRANTOR, grantsCg, derivationsCg, workDir, readConfig } from './config.mjs'
+import { createInterface } from 'node:readline/promises'
+import { parseArgs, helpText, UsageError, EXIT } from './args.mjs'
+import { GRANTOR, PRODUCER, VERIFIER, grantsCg, derivationsCg, readConfig, envLoad } from './config.mjs'
+import { c, clean, txLink, makeOutput } from './ui.mjs'
 import { readKnowledge } from '../src/resolve.mjs'
-import { decide } from '../src/gate.mjs'
+import { decide, revocationOf } from '../src/gate.mjs'
 import { blastRadius } from '../src/verify-core.mjs'
-import { grantToTurtle, stateToTurtle } from '../src/rdf.mjs'
+import { verifyKnowledge, hashUrl, CLEAR, TAINTED, INCONCLUSIVE } from '../src/verify.mjs'
+import { grantToQuads, stateToQuads } from '../src/rdf.mjs'
 import { recordDerivation } from '../src/derivation.mjs'
-import { verifyMedia, CLEAR, TAINTED, INCONCLUSIVE } from '../src/verify.mjs'
-import { writeFileSync, mkdirSync } from 'node:fs'
-import { join } from 'node:path'
+import { DkgWriteError, DkgHttpError } from '../src/dkg.mjs'
+import { isProhibitedUseClass, PROHIBITED_USE_CLASSES } from '../src/policy.mjs'
+import { grantIriAddress } from '../src/provenance.mjs'
+import { TermError, makeSubject, subjectAddress, agentAddress, nonce16 } from '../src/rdf-term.mjs'
 
 // The Livepeer client needs the optional @modelcontextprotocol/sdk peer. Only
-// the commands that actually talk to Livepeer load it, so status, grant, revoke,
-// verify and a non-executing render work without it.
+// commands that talk to Livepeer load it.
 async function livepeer() {
   try {
     return await import('../src/livepeer.mjs')
   } catch (e) {
     if (e.code === 'ERR_MODULE_NOT_FOUND' && /@modelcontextprotocol\/sdk/.test(e.message)) {
-      throw new Error('This command talks to Livepeer Agent and needs the optional peer:\n'
-        + '  npm install @modelcontextprotocol/sdk')
+      throw new UsageError('This command talks to Livepeer Agent and needs the optional peer:\n  npm install @modelcontextprotocol/sdk')
     }
     throw e
   }
 }
-const captureConsent = async (...a) => {
-  await livepeer()
-  return (await import('../src/consent.mjs')).captureConsent(...a)
-}
 
-// Resolved on first use, so the help screen works without configuration.
-let _cg, _dcg
-const GRANTS_CG_ = () => (_cg ??= grantsCg())
-const DERIVATIONS_CG_ = () => (_dcg ??= derivationsCg())
-
-// Live list prices, verified via describe_capability. Labelled as estimates
-// everywhere they are shown: get_cost_report is Livepeer's estimate at list
-// price, not an invoice, and failed renders are still billed. The one exact
-// figure is spend avoided by a refusal — nothing was called, so it is not an
-// estimate at all.
+// List prices verified via describe_capability. Estimates, labelled as such
+// everywhere they are shown.
 const PRICE_PER_SEC = {
-  'talking-head': 0.168,
-  'face-swap-video': 0.024,
-  'lipsync': 0.14,
-  'sync-lipsync-v3': 0.13997,
-  'heygen-twin': 0.105,
+  'talking-head': 0.168, 'face-swap-video': 0.024, lipsync: 0.14, 'sync-lipsync-v3': 0.13997, 'heygen-twin': 0.105,
 }
 const PRICE_FLAT = { 'face-swap-image': 0.009, 'flux-lora-training': 2.10 }
 
-function estimate(capability, seconds = 6) {
+function estimate(capability, seconds) {
   if (capability in PRICE_FLAT) return PRICE_FLAT[capability]
   const perSec = PRICE_PER_SEC[capability]
-  if (perSec == null) {
-    // An unpriced capability must not silently report $0.00 avoided — that
-    // understates the refusal and is the kind of number a judge should catch.
-    console.log(c.yellow(`  note: no local list price for "${capability}"; ` +
-      'spend avoided is reported as unknown rather than zero'))
-    return null
-  }
-  return perSec * seconds
+  return perSec == null ? null : perSec * seconds
 }
 
-const arg = (name, def) => {
-  const i = process.argv.indexOf(`--${name}`)
-  return i > -1 ? process.argv[i + 1] : def
-}
-const has = name => process.argv.includes(`--${name}`)
+const shortAddr = a => (a ? `${a.slice(0, 6)}…${a.slice(-4)}` : 'unknown')
 
-const c = {
-  red: s => `\x1b[31m${s}\x1b[0m`,
-  green: s => `\x1b[32m${s}\x1b[0m`,
-  yellow: s => `\x1b[33m${s}\x1b[0m`,
-  dim: s => `\x1b[2m${s}\x1b[0m`,
-  bold: s => `\x1b[1m${s}\x1b[0m`,
-}
-
-async function cmdRender() {
-  const subject = arg('subject')
-  const capability = arg('capability', 'talking-head')
-  const useClass = arg('use-class', 'advertising')
-  const territory = arg('territory', 'GB')
-  const seconds = Number(arg('seconds', '6'))
-  const at = arg('at', new Date().toISOString())
-  const estimatedUsd = estimate(capability, seconds)
-
-  console.log(c.bold('\nMandate — consent gate\n'))
-  console.log(`  subject     ${subject}`)
-  console.log(`  capability  ${capability}`)
-  console.log(`  use class   ${useClass}`)
-  console.log(`  territory   ${territory}`)
-  console.log(`  estimate    ${estimatedUsd == null ? c.yellow('unknown') : '$' + estimatedUsd.toFixed(4)}` +
-    ` ${c.dim('(list price, not an invoice)')}`)
-
-  // Which node resolves. The producer is the honest default — it is the party
-  // that must not be able to vouch for itself. `--resolver grantor` exists only
-  // so the permit path can be exercised before the two nodes can sync, which
-  // needs an on-chain context-graph registration and therefore gas.
-  const resolver = arg('resolver', 'producer') === 'grantor' ? GRANTOR() : PRODUCER()
-  process.stdout.write(c.dim(`\n  resolving grant knowledge from ${resolver.name}… `))
-  const k = await readKnowledge(resolver, readConfig(), { subject })
-  console.log(c.dim(`${k.grants.length} grant(s), ${k.states.length} revocation(s), ${k.derivations.length} derivation(s)`))
-
-  const d = decide({ subject, capability, useClass, territory, at, estimatedUsd }, k)
-  printForgeries(d.forgeries)
-
-  if (!d.permit) {
-    console.log(c.red(`\n  REFUSED — clause: ${d.clause}`))
-    console.log(`  ${d.reason}`)
-    console.log(c.green('\n  not spent: ' +
-      (d.spend.estimateUsd == null ? 'unknown (no local list price)' : `~$${d.spend.estimateUsd.toFixed(4)} at list price`)) +
-      ' ' + c.dim('(the capability was never invoked)'))
-    console.log(c.dim('\n  No Livepeer call was made.\n'))
-    process.exitCode = d.clause === 'read-inconsistent' ? 9 : 2
-    return
-  }
-
-  console.log(c.green(`\n  PERMITTED under ${d.grantId}`))
-  console.log(c.dim(`  published by ${d.publisher}${d.grantUal ? ` as ${d.grantUal}` : ''}`))
-
-  if (!has('execute')) {
-    console.log(c.dim('\n  --execute not set; stopping before dispatch (no spend).\n'))
-    return
-  }
-
-  console.log(c.dim('\n  dispatching via run_capability on /api/mcp/raw (no model substitution)…'))
-  const LP = await livepeer()
-  const client = await LP.connect(LP.RAW)
-  let out
+/** Ask for typed confirmation before spending gas on a permanent write. */
+async function confirm(flags, out, prompt, expected) {
+  if (flags.yes) return
+  if (!process.stdin.isTTY || out.json) throw new UsageError('not on a terminal: pass --yes to publish without confirmation')
+  const rl = createInterface({ input: process.stdin, output: process.stdout })
   try {
-    const grant = k.grants.find(g => g.id === d.grantId)
-    // The platform's spend_cap is a second belt only: its pre-flight is
-    // documented against create_media, and we dispatch through run_capability.
-    // The ceiling that actually bound this render was checked in the gate.
-    if (grant?.maxSpendUsd != null) {
-      try { await LP.setSpendCap(client, grant.maxSpendUsd) } catch { /* advisory */ }
-    }
-    out = await LP.runCapability(client, capability, {
-      source_url: arg('source-url', undefined),
-      inputs: arg('audio-url') ? { image_url: arg('source-url'), audio_url: arg('audio-url') } : undefined,
-      prompt: arg('prompt', undefined),
-      idempotency_key: arg('idempotency-key', undefined),
-    }, { timeout: 700 })
-    console.log('\n' + out.slice(0, 900))
+    const answer = (await rl.question(`${prompt} Type ${c.bold(expected)} to publish: `)).trim()
+    if (answer !== expected) throw new UsageError('not confirmed; nothing was published')
   } finally {
-    await client.close()
-  }
-
-  // Eager, transactional derivation. If this fails the render is reported as
-  // FAILED even though the media exists and was billed — we would rather lose a
-  // render than hold an asset the revocation path cannot account for.
-  const mediaUrl = (out.match(/https?:\/\/\S+?\.(?:mp4|webm|mov|png|jpg|jpeg)/i) || [])[0]
-  if (!mediaUrl) {
-    console.log(c.yellow('\n  no media URL in the result — nothing to record.\n'))
-    return
-  }
-  try {
-    // Authored on the PRODUCER's node: a derivation is the producer's own record
-    // of what it made, and it is anchored so any other party can verify against it.
-    const rec = await recordDerivation(PRODUCER(), DERIVATIONS_CG_(), {
-      outputUrl: mediaUrl,
-      servedCapability: capability,
-      authorizedUnder: d.grantId,
-      billedUsd: estimatedUsd,
-      jobId: (out.match(/mjob_[a-f0-9]+/) || [])[0] ?? null,
-      workDir: workDir(),
-    })
-    console.log(c.green(`\n  derivation recorded  ${rec.id}`))
-    console.log(c.dim(`  sha256 ${rec.outputSha256}`))
-    if (rec.ual) console.log(c.dim(`  UAL    ${rec.ual}`))
-  } catch (e) {
-    console.log(c.red(`\n  DERIVATION FAILED TO COMMIT — treating this render as failed.`))
-    console.log(c.red(`  ${e.message}`))
-    console.log(c.dim('  The media exists and was billed, but it is not accounted for,'))
-    console.log(c.dim('  so a future revocation could not enumerate it.\n'))
-    process.exitCode = 4
+    rl.close()
   }
 }
 
-async function cmdStatus() {
-  for (const mk of [GRANTOR, PRODUCER]) {
-    const n = mk()
+function anchoredLines(out, r) {
+  out.line(`  UAL         ${r.ual}`)
+  if (r.txHash) out.line(`  tx          ${r.txHash}`)
+  const link = txLink(r.ual, r.txHash)
+  if (link) out.line(c.dim(`              ${link}`))
+}
+
+function printForgeries(out, forgeries = []) {
+  if (!forgeries.length) return
+  out.line(c.yellow(`\n  ⚠ ${forgeries.length} object(s) rejected — published by an address not entitled to them:`))
+  for (const f of forgeries.slice(0, 10)) {
+    out.line(c.yellow(`      ${f.kind}: ${clean(f.id, 120)} by ${f.publisher ?? 'unknown'}${f.ual ? ` (${f.ual})` : ''}`))
+    out.line(c.dim(`        ${clean(f.detail, 200)}`))
+  }
+  if (forgeries.length > 10) out.line(c.dim(`      …and ${forgeries.length - 10} more (use --json)`))
+}
+
+function printWarnings(out, warnings = []) {
+  for (const w of warnings.slice(0, 5)) out.line(c.dim(`  note: ${clean(w, 240)}`))
+}
+
+/* ------------------------------------------------------------------------- */
+
+async function cmdStatus(flags, out) {
+  const rows = []
+  for (const [role, make] of [['grantor', GRANTOR], ['producer', PRODUCER], ['verifier', VERIFIER]]) {
+    let n = null
     try {
+      n = make()
+      if (!n) { rows.push({ role, configured: false }); continue }
       const [id, info] = await Promise.all([n.identity(), n.info()])
-      console.log(`${c.green('●')} ${n.name.padEnd(18)} :${n.port}  ${id.agentDid}  peers=${info.peers}`)
+      rows.push({ role, configured: true, reachable: true, name: n.name, port: n.port, agentDid: id.agentDid, peers: info.peers, chain: info.chain?.chainId ?? null, version: info.version })
+      out.line(`${c.green('●')} ${role.padEnd(9)} ${String(n.name).padEnd(18)} :${n.port}  ${id.agentDid}  peers=${info.peers}  ${c.dim(`${info.chain?.chainId ?? ''} v${info.version}`)}`)
     } catch (e) {
-      console.log(`${c.red('●')} ${n.name.padEnd(18)} :${n.port}  ${c.red('unreachable')} ${e.message.slice(0, 60)}`)
+      rows.push({ role, configured: true, reachable: false, port: n?.port ?? null, error: clean(e.message, 300) })
+      out.line(`${c.red('●')} ${role.padEnd(9)} ${String(n?.name ?? '').padEnd(18)} ${n ? `:${n.port}` : ''}  ${c.red('unreachable')}  ${c.dim(clean(e.message, 160))}`)
     }
   }
-}
-
-function printForgeries(forgeries = []) {
-  if (!forgeries.length) return
-  console.log(c.yellow(`\n  ⚠ ${forgeries.length} object(s) rejected — published by an address not entitled to them:`))
-  for (const f of forgeries.slice(0, 10)) {
-    console.log(c.yellow(`      ${f.kind}: ${f.id} by ${f.publisher ?? 'unknown'}${f.ual ? ` (${f.ual})` : ''}`))
-    console.log(c.dim(`        ${f.detail}`))
+  const verifier = rows.find(r => r.role === 'verifier')
+  if (!verifier.configured) out.line(c.dim('○ verifier  not configured (MANDATE_VERIFIER_PORT); verify reads from the grantor node'))
+  for (const [label, get] of [['grants graph', grantsCg], ['derivations graph', derivationsCg]]) {
+    try { out.line(c.dim(`  ${label.padEnd(18)} ${get()}`)) } catch (e) { out.line(c.yellow(`  ${label.padEnd(18)} ${e.message.split('\n')[0]}`)) }
   }
-}
-
-async function cmdBlastRadius() {
-  const grantId = arg('grant')
-  if (!grantId) { console.log(c.red('\n  --grant <grant id> is required\n')); process.exitCode = 1; return }
-  const resolver = arg('resolver', 'producer') === 'grantor' ? GRANTOR() : PRODUCER()
-  const k = await readKnowledge(resolver, readConfig(), { grantId })
-  if (!k.consistency.ok) {
-    console.log(c.yellow(`\n  INCONCLUSIVE — ${k.consistency.reason}\n`))
-    process.exitCode = 9
-    return
-  }
-  const r = blastRadius(grantId, k.derivations)
-  console.log(c.bold(`\nQuarantine list for ${grantId}\n`))
-  console.log(`  assets: ${r.assets.length} ${c.dim('(recorded by trusted producers)')}`)
-  for (const a of r.assets) console.log(`    ${a.outputSha256.slice(0, 16)}… via ${a.servedCapability}  ${c.dim(a.ual ?? '')}`)
-  console.log(`  billed under this grant: ${r.billedUnknown ? 'unknown' : `~$${r.totalBilledUsd.toFixed(4)}`} ${c.dim('(estimated at list price)')}\n`)
+  if (envLoad.ignored.length) out.line(c.dim(`  .env: ignored ${envLoad.ignored.join(', ')} (only MANDATE_* and LIVEPEER_AGENT_KEY are read)`))
+  out.result({ nodes: rows })
+  return rows.some(r => r.configured && !r.reachable) ? EXIT.INCONCLUSIVE : EXIT.OK
 }
 
 /**
- * Author a grant ON THE GRANTOR'S NODE.
- *
- * This runs against the grantor daemon on purpose. The producer cannot seal a
- * grant naming Ana as author — its node refuses, because it holds no key for
- * her — and that refusal is what makes the whole scheme worth anything.
+ * Publish a grant from the grantor's own node. The chain binds it to that
+ * node's address, and only that address can grant or revoke for the subjects
+ * it names, so this has to run where the grantor's key is.
  */
-async function cmdGrant() {
+async function cmdGrant(flags, out) {
   const grantor = GRANTOR()
   const id = await grantor.identity()
-  const subject = arg('subject', 'ana-7f3c')
-  const name = arg('name', `grant-${subject}`)
-  const grantId = arg('id', `urn:mandate:grant:${subject}`)
+  const address = agentAddress(id.agentDid)
+  if (!address) throw new Error(`${grantor.name} reported an unusable agent DID: ${clean(id.agentDid, 80)}`)
 
-  const requested = {
-    useClass: arg('use-class', 'advertising').split(','),
-    territory: arg('territory', 'GB').split(','),
+  const subject = flags.subject.includes(':') ? flags.subject : makeSubject(address, flags.subject)
+  if (subjectAddress(subject) !== address) {
+    throw new UsageError(`subject ${subject} belongs to ${subjectAddress(subject) ?? 'no address'}; this node is ${address} and can only grant for its own subjects`)
   }
+  const permitted = flags.useClass
+  const prohibited = permitted.filter(isProhibitedUseClass)
+  if (prohibited.length) throw new UsageError(`use class ${prohibited.join(', ')} can never be granted (${PROHIBITED_USE_CLASSES.join(', ')} are always refused)`)
+  const forbids = flags.forbid ?? []
+  const overlap = forbids.filter(u => permitted.includes(u))
+  if (overlap.length) throw new UsageError(`--forbid and --use-class both list ${overlap.join(', ')}`)
 
   let consent = null
-  if (has('with-consent')) {
-    console.log(c.bold('\nCapturing consent in the conversation\n'))
+  if (flags.withConsent) {
+    out.line(c.bold('\nCapturing consent in the conversation\n'))
+    const { captureConsent } = await (async () => { await livepeer(); return import('../src/consent.mjs') })()
     consent = await captureConsent({
-      requested,
+      requested: { useClass: permitted, territory: flags.territory ?? [] },
       onLink: url => {
-        console.log('  Open this on the phone of the person being depicted:')
-        console.log(c.bold(`    ${url}`))
-        console.log(c.dim('  Record ~6 seconds saying what you agree to. Waiting…\n'))
+        out.line('  Open this on the phone of the person being depicted:')
+        out.line(c.bold(`    ${clean(url, 300)}`))
+        out.line(c.dim('  Record a short clip saying what you agree to. Waiting…\n'))
       },
     })
     if (!consent.captured) {
-      console.log(c.red('  No clip arrived before the link expired. Not granting.\n'))
-      process.exitCode = 2
-      return
+      out.line(c.red('  No clip arrived before the link expired. Not granting.\n'))
+      out.result({ granted: false, reason: 'no consent clip' })
+      return EXIT.CONSENT_UNCONFIRMED
     }
-    console.log(c.green(`  clip received  sha256 ${consent.sha256.slice(0, 32)}…`))
+    out.line(c.green(`  clip received  sha256 ${consent.sha256}`))
     if (consent.scope) {
-      console.log(`  spoken scope   ${consent.scope.covered}/${consent.scope.total} terms mentioned`)
-      console.log(c.dim(`  ${consent.scope.note}`))
-      if (consent.scope.missing.length && !has('force')) {
-        console.log(c.yellow('\n  Spoken consent does not cover everything requested.'))
-        console.log(c.yellow('  Re-record, narrow the grant, or pass --force to proceed anyway.\n'))
-        process.exitCode = 3
-        return
+      out.line(`  spoken scope   ${consent.scope.covered}/${consent.scope.total} terms mentioned`)
+      if (consent.scope.missing.length && !flags.force) {
+        out.line(c.yellow('\n  Spoken consent does not cover everything requested. Re-record, narrow the grant, or pass --force.\n'))
+        out.result({ granted: false, reason: 'spoken consent incomplete', missing: consent.scope.missing })
+        return EXIT.CONSENT_UNCONFIRMED
       }
     }
   }
 
+  const now = Date.now()
+  const nonce = nonce16()
   const grant = {
-    id: grantId,
-    grantor: id.agentDid,
+    id: `urn:mandate:grant:${subject}:${nonce}`,
+    grantor: `did:dkg:agent:${address}`,
     subject,
-    consentClipSha256: consent?.sha256 ?? undefined,
-    permitsCapability: arg('capability', 'talking-head,face-swap-image').split(','),
-    permitsUseClass: requested.useClass,
-    forbidsUseClass: arg('forbid', 'political,adult').split(','),
-    territory: requested.territory,
-    validFrom: arg('valid-from', new Date().toISOString()),
-    validUntil: arg('valid-until', new Date(Date.now() + 90 * 864e5).toISOString()),
-    maxSpendUsd: Number(arg('max-spend', '5')),
+    consentClipSha256: consent?.sha256 ?? null,
+    permitsCapability: flags.capability,
+    permitsUseClass: permitted,
+    forbidsUseClass: forbids,
+    territory: flags.territory ?? [],
+    validFrom: flags.validFrom ?? new Date(now).toISOString(),
+    validUntil: flags.validUntil ?? new Date(now + 90 * 864e5).toISOString(),
+    maxSpendUsd: flags.maxSpend ?? null,
   }
+  const quads = grantToQuads(grant)
 
-  mkdirSync(workDir(), { recursive: true })
-  const path = join(workDir(), `${name}.ttl`)
-  writeFileSync(path, grantToTurtle(grant))
+  out.line(c.bold('\nGrant'))
+  out.line(`  id           ${grant.id}`)
+  out.line(`  subject      ${subject}`)
+  out.line(`  capabilities ${grant.permitsCapability.join(', ')}`)
+  out.line(`  use classes  ${permitted.join(', ')}${forbids.length ? c.dim(`  (forbids ${forbids.join(', ')})`) : ''}`)
+  out.line(`  territory    ${grant.territory.length ? grant.territory.join(', ') : 'unrestricted'}`)
+  out.line(`  valid        ${grant.validFrom} → ${grant.validUntil}`)
+  out.line(`  ceiling      ${grant.maxSpendUsd == null ? 'none' : `$${grant.maxSpendUsd}`}`)
+  out.line(c.dim(`\n  Publishing to Verifiable Memory is permanent and costs gas on ${grantor.name}.`))
+  await confirm(flags, out, '\n  Publish this grant?', subject.split(':')[1])
 
-  console.log(c.dim(`\n  sealing on ${grantor.name} …`))
-  const r = await grantor.createKA(name, GRANTS_CG_(), path, { share: true })
-  if (r.sharePending || r.status !== 'swm-shared') {
-    console.log(c.dim('  share did not complete on create; retrying (it is not atomic)…'))
-    await grantor.cli(['ka', 'share', name, '-c', GRANTS_CG_()], { tolerant: true })
-  }
-  // Another party can only act on what is anchored — see publishVM.
-  let vm = null
-  if (!has('local-only')) {
-    console.log(c.dim('  publishing to Verifiable Memory (Base Sepolia)…'))
-    vm = await grantor.publishVM(name, GRANTS_CG_())
-  }
-  console.log(c.green(`\n  GRANTED  ${grantId}`))
-  console.log(`  author      ${id.agentDid}`)
-  console.log(`  merkle root ${r.merkleRoot ?? c.dim('n/a')}`)
-  if (vm?.ual) {
-    console.log(`  UAL         ${vm.ual}`)
-    console.log(`  tx          ${vm.txHash}  ${c.dim(vm.status ?? '')}`)
-  } else if (!has('local-only')) {
-    console.log(c.yellow('  not anchored — other parties cannot read this grant yet'))
-  }
-  console.log(`  capabilities ${grant.permitsCapability.join(', ')}`)
-  console.log(`  ceiling     $${grant.maxSpendUsd}\n`)
+  out.line(c.dim(`\n  sealing, sharing and anchoring on ${grantor.name}…`))
+  const r = await grantor.sealShareAnchor({ name: `grant-${subject.split(':')[1]}-${nonce}`, contextGraphId: grantsCg(), quads, expectAuthor: address })
+  out.line(c.green(`\n  GRANTED  ${grant.id}`))
+  anchoredLines(out, r)
+  out.line(c.dim('\n  Renew by publishing a new grant; a revocation ends this one for good.\n'))
+  out.result({ granted: true, grant, ual: r.ual, txHash: r.txHash, name: r.name, explorer: txLink(r.ual, r.txHash) })
+  return EXIT.OK
 }
 
-/** Revoke. Authored by the grantor, or it counts for nothing. */
-async function cmdRevoke() {
+/** Revoke a grant this node published. Terminal: renewal means a new grant. */
+async function cmdRevoke(flags, out) {
   const grantor = GRANTOR()
-  const id = await grantor.identity()
-  const grantId = arg('id', 'urn:mandate:grant:ana-7f3c')
+  const address = agentAddress((await grantor.identity()).agentDid)
+  const grantId = flags.id
+  const owner = grantIriAddress(grantId)
+  if (!owner) {
+    out.line(c.red(`\n  ${clean(grantId, 120)} is not a current-format grant id; nothing to revoke.\n`))
+    out.result({ revoked: false, reason: 'not a grant id' })
+    return EXIT.REFUSED
+  }
+  if (owner !== address) {
+    out.line(c.red(`\n  REFUSED — ${grantId} belongs to ${owner}; this node is ${address}.`))
+    out.line(c.dim('  Only the address that published a grant can revoke it. Nothing was published.\n'))
+    out.result({ revoked: false, reason: 'not published by this node', owner, node: address })
+    return EXIT.REFUSED
+  }
+
+  const k = await readKnowledge(grantor, readConfig(), { grantId })
+  if (!k.consistency.ok) {
+    out.line(c.yellow(`\n  INCONCLUSIVE — cannot confirm the grant's current state: ${clean(k.consistency.reason, 300)}\n`))
+    out.result({ revoked: false, reason: 'read inconsistent', consistency: k.consistency })
+    return EXIT.INCONCLUSIVE
+  }
+  const grant = k.grants.find(g => g.id === grantId)
+  if (!grant) {
+    out.line(c.red(`\n  REFUSED — ${grantId} is not anchored in ${grantsCg()} on ${grantor.name}. Nothing was published.\n`))
+    out.result({ revoked: false, reason: 'grant not found' })
+    return EXIT.REFUSED
+  }
+  const existing = revocationOf(grant, k.states)
+  if (existing.revoked) {
+    out.line(c.dim(`\n  ${grantId} is already revoked${existing.by.ual ? ` (${existing.by.ual})` : ''}. Nothing was published.\n`))
+    out.result({ revoked: true, alreadyRevoked: true, by: existing.by })
+    return EXIT.OK
+  }
+
+  out.line(c.bold(`\nRevoke ${grantId}`))
+  out.line(`  subject   ${grant.subject}`)
+  out.line(`  grant     ${grant.ual}`)
+  out.line(c.dim('\n  Revocation is permanent: this grant can never be used again.'))
+  await confirm(flags, out, '\n  Publish this revocation?', 'revoke')
+
+  const nonce = nonce16()
   const at = new Date().toISOString()
-  const name = `state-${grantId.split(':').pop()}-revoked-${Date.now().toString(36)}`
-  mkdirSync(workDir(), { recursive: true })
-  const path = join(workDir(), `${name}.ttl`)
-  writeFileSync(path, stateToTurtle({
-    id: `urn:mandate:state:${name}`, stateOf: grantId,
-    state: 'revoked', stateAuthor: id.agentDid, stateAt: at,
-  }))
-  const r = await grantor.createKA(name, GRANTS_CG_(), path, { share: true })
-  if (r.sharePending || r.status !== 'swm-shared') {
-    await grantor.cli(['ka', 'share', name, '-c', GRANTS_CG_()], { tolerant: true })
+  const quads = stateToQuads({ id: `urn:mandate:state:${nonce}`, stateOf: grantId, state: 'revoked', stateAuthor: `did:dkg:agent:${address}`, stateAt: at })
+  out.line(c.dim(`\n  sealing, sharing and anchoring on ${grantor.name}…`))
+  const r = await grantor.sealShareAnchor({ name: `revoke-${grant.subject.split(':')[1]}-${nonce}`, contextGraphId: grantsCg(), quads, expectAuthor: address })
+  out.line(c.red(`\n  REVOKED  ${grantId}`))
+  out.line(`  at          ${at}`)
+  anchoredLines(out, r)
+  out.line(c.dim('\n  Other nodes refuse once they sync this anchor, typically within about a minute.'))
+  out.line(c.dim('  Until then a producer resolving from a node that has not synced may still permit.\n'))
+  out.result({ revoked: true, grantId, at, ual: r.ual, txHash: r.txHash, explorer: txLink(r.ual, r.txHash) })
+  return EXIT.OK
+}
+
+async function cmdRender(flags, out) {
+  const { subject, capability, useClass } = flags
+  const territory = flags.territory
+  if (flags.execute && flags.at) throw new UsageError('--at decides as of another time and is for dry runs only; it cannot be combined with --execute')
+  const at = flags.at ?? new Date().toISOString()
+  const seconds = flags.seconds === undefined ? 6 : Number(flags.seconds)
+  const estimatedUsd = estimate(capability, seconds)
+
+  out.line(c.bold('\nMandate — consent gate\n'))
+  out.line(`  subject     ${subject}`)
+  out.line(`  capability  ${capability}`)
+  out.line(`  use class   ${useClass}`)
+  out.line(`  territory   ${territory ?? c.yellow('not given')}`)
+  out.line(`  estimate    ${estimatedUsd == null ? c.yellow('unknown (no list price)') : `~$${estimatedUsd.toFixed(4)}`} ${c.dim('(list price, not an invoice)')}`)
+
+  // The producer resolves from its own node: the party that must not be able to vouch for itself.
+  const resolver = PRODUCER()
+  out.line(c.dim(`\n  resolving from ${resolver.name}…`))
+  const k = await readKnowledge(resolver, readConfig(), { subject })
+  out.line(c.dim(`  ${k.grants.length} grant(s), ${k.states.length} revocation(s), ${k.derivations.length} trusted derivation(s), read in ${k.consistency.attempts} attempt(s)`))
+
+  const d = decide({ subject, capability, useClass, territory, at, estimatedUsd }, k)
+  printForgeries(out, d.forgeries)
+  printWarnings(out, d.warnings)
+
+  if (!d.permit) {
+    out.line(c.red(`\n  REFUSED — clause: ${d.clause}`))
+    out.line(`  ${clean(d.reason, 400)}`)
+    out.line(c.green(`\n  not spent: ${d.spend.estimateUsd == null ? 'unknown' : `~$${d.spend.estimateUsd.toFixed(4)} at list price`}`) + c.dim(' (the capability was never invoked)'))
+    out.line(c.dim('  No Livepeer call was made.\n'))
+    out.result({ decision: d })
+    return d.clause === 'read-inconsistent' ? EXIT.INCONCLUSIVE : d.clause === 'malformed-request' ? EXIT.USAGE : EXIT.REFUSED
   }
-  // A revocation that stays in SWM does not reach the producer — measured, not
-  // assumed. It must be anchored, or the producer keeps rendering.
-  const vm = await grantor.publishVM(name, GRANTS_CG_())
-  console.log(c.red(`\n  REVOKED ${grantId}`))
-  console.log(`  by   ${id.agentDid} at ${at}`)
-  if (vm.ual) {
-    console.log(`  UAL  ${vm.ual}`)
-    console.log(`  tx   ${vm.txHash}  ${c.dim(vm.status ?? '')}`)
-    console.log(c.dim('\n  Anchored. Independent nodes typically refuse within ~1 minute'))
-    console.log(c.dim('  (measured: 13s chain confirmation + sync). Until then a producer'))
-    console.log(c.dim('  resolving from its own node may still permit — that window is real.\n'))
-  } else {
-    console.log(c.yellow('\n  NOT ANCHORED. Only this node will refuse; other parties will not'))
-    console.log(c.yellow('  see this revocation. Retry the publish before relying on it.\n'))
-    process.exitCode = 5
+
+  out.line(c.green(`\n  PERMITTED under ${d.grantId}`))
+  out.line(c.dim(`  published by ${d.publisher}${d.grantUal ? ` as ${d.grantUal}` : ''}`))
+  if (!flags.execute) {
+    out.line(c.dim('\n  --execute not set; stopping before dispatch (no spend).\n'))
+    out.result({ decision: d, executed: false })
+    return EXIT.OK
+  }
+
+  const LP = await livepeer()
+  out.line(c.dim('\n  dispatching via run_capability on /api/mcp/raw (no model substitution)…'))
+  const client = await LP.connect(LP.RAW)
+  let text
+  try {
+    const inputs = { ...(flags.inputs ?? {}) }
+    if (flags.imageUrl) inputs.image_url = flags.imageUrl
+    if (flags.audioUrl) inputs.audio_url = flags.audioUrl
+    if (flags.videoUrl) inputs.video_url = flags.videoUrl
+    text = await LP.runCapability(client, capability, {
+      source_url: flags.sourceUrl,
+      inputs: Object.keys(inputs).length ? inputs : undefined,
+      prompt: flags.prompt,
+      idempotency_key: flags.idempotencyKey,
+    }, { timeout: 280 })
+  } catch (e) {
+    out.line(c.red(`\n  RENDER FAILED — ${clean(e.message, 400)}\n`))
+    out.result({ decision: d, executed: true, rendered: false, error: clean(e.message, 400) })
+    return EXIT.RENDER_FAILED
+  } finally {
+    await client.close()
+  }
+  const mediaUrl = (text.match(/https?:\/\/\S+?\.(?:mp4|webm|mov|png|jpg|jpeg|webp|wav|mp3)\b/i) || [])[0]
+  if (!mediaUrl) {
+    out.line(c.red('\n  RENDER FAILED — the result carried no media URL.\n'))
+    out.line(c.dim(`  ${clean(text, 600)}`))
+    out.result({ decision: d, executed: true, rendered: false, error: 'no media URL' })
+    return EXIT.RENDER_FAILED
+  }
+
+  // The media is released only once its derivation is anchored.
+  const producer = PRODUCER()
+  try {
+    const rec = await recordDerivation(producer, derivationsCg(), {
+      outputUrl: mediaUrl, servedCapability: capability, authorizedUnder: d.grantId,
+      billedUsd: estimatedUsd, jobId: (text.match(/mjob_[a-f0-9]+/) || [])[0] ?? null,
+    })
+    out.line(c.green(`\n  RENDERED  ${clean(mediaUrl, 400)}`))
+    out.line(`  derivation  ${rec.id}`)
+    out.line(`  sha256      ${rec.outputSha256}`)
+    anchoredLines(out, rec)
+    out.line('')
+    out.result({ decision: d, executed: true, rendered: true, mediaUrl, derivation: rec })
+    return EXIT.OK
+  } catch (e) {
+    out.line(c.red('\n  DERIVATION FAILED TO COMMIT — treating this render as failed.'))
+    out.line(c.red(`  ${clean(e.message, 400)}`))
+    if (e.ual) out.line(c.dim(`  minted but unbound: ${e.ual}${e.txHash ? ` tx ${e.txHash}` : ''}`))
+    out.line(c.dim('  The render was billed but is not accounted for, so its URL is withheld.\n'))
+    out.result({ decision: d, executed: true, rendered: true, derivation: null, error: clean(e.message, 400), stage: e.stage ?? null })
+    return EXIT.DERIVATION_FAILED
   }
 }
 
-async function cmdConsent() {
+async function cmdConsent(flags, out) {
+  await livepeer()
+  const { captureConsent } = await import('../src/consent.mjs')
   const r = await captureConsent({
-    requested: { useClass: arg('use-class', 'advertising').split(','), territory: arg('territory', 'GB').split(',') },
-    onLink: url => console.log(`\n  Open on a phone: ${c.bold(url)}\n  ${c.dim('waiting…')}`),
+    requested: { useClass: flags.useClass, territory: flags.territory ?? [] },
+    onLink: url => out.line(`\n  Open on a phone: ${c.bold(clean(url, 300))}\n  ${c.dim('waiting…')}`),
   })
-  console.log(r.captured ? c.green(`\n  captured  sha256 ${r.sha256}`) : c.red('\n  nothing uploaded'))
-  if (r.transcript) console.log(`\n  transcript: ${String(r.transcript).slice(0, 400)}`)
-  if (r.scope) console.log(`  ${r.scope.note}\n`)
+  out.line(r.captured ? c.green(`\n  captured  sha256 ${r.sha256}`) : c.red('\n  nothing uploaded'))
+  if (r.transcript) out.line(`\n  transcript: ${clean(r.transcript, 400)}`)
+  if (r.scope) out.line(`  ${clean(r.scope.note, 300)}\n`)
+  out.result({ captured: r.captured, sha256: r.sha256 ?? null, transcript: r.transcript ?? null, scope: r.scope ?? null })
+  return r.captured ? EXIT.OK : EXIT.CONSENT_UNCONFIRMED
 }
 
-/**
- * The third-party check. Takes a URL and nothing else, and asks neither party.
- */
-async function cmdVerify() {
-  const url = arg('url')
-  if (!url) { console.log(c.red('\n  --url is required\n')); process.exitCode = 1; return }
+/** The third-party check. Takes a file and asks neither party. */
+async function cmdVerify(flags, out) {
+  if (Boolean(flags.url) === Boolean(flags.sha256)) throw new UsageError('verify needs exactly one of --url or --sha256')
+  const choice = flags.node ?? 'verifier'
+  let node = choice === 'grantor' ? GRANTOR() : choice === 'producer' ? PRODUCER() : VERIFIER()
+  let label
+  if (choice === 'verifier' && !node) {
+    node = GRANTOR()
+    label = "the grantor's node (no verifier node configured) — independent of the producer, not of the grantor"
+  } else {
+    label = choice === 'verifier' ? 'an independent read-only node'
+      : choice === 'grantor' ? "the grantor's node — independent of the producer, not of the grantor"
+        : "the producer's own node — not independent of the producer"
+  }
 
-  // Whichever node the verifier runs. It has no relationship to the producer.
-  const node = arg('resolver', 'producer') === 'grantor' ? GRANTOR() : PRODUCER()
-  console.log(c.bold('\nThird-party verification\n'))
-  console.log(`  file      ${url.slice(0, 92)}`)
-  console.log(c.dim(`  verifier  ${node.name} — no relationship to the producer\n`))
+  out.line(c.bold('\nThird-party verification\n'))
+  if (flags.url) out.line(`  file      ${clean(flags.url, 120)}`)
+  out.line(c.dim(`  reading   ${node.name} — ${label}`))
+  const sha256 = flags.sha256 ?? await hashUrl(flags.url)
+  out.line(`  sha256    ${sha256}`)
 
-  const r = await verifyMedia(node, readConfig(), url)
-  console.log(`  sha256    ${r.sha256}`)
-  printForgeries(r.forgeries)
-  if (r.untrusted.length) console.log(c.dim(`  ${r.untrusted.length} edge(s) from untrusted publishers shown but not believed`))
+  const k = await readKnowledge(node, readConfig(), { sha256 })
+  const r = verifyKnowledge(k, sha256)
+  printForgeries(out, r.forgeries)
+  printWarnings(out, r.warnings)
+  if (r.untrusted.length) out.line(c.dim(`  ${r.untrusted.length} edge(s) from untrusted publishers shown but not believed`))
   const paint = r.verdict === CLEAR ? c.green : r.verdict === TAINTED ? c.red : c.yellow
-  console.log(paint(`\n  ${r.verdict}${r.subStatus ? ` / ${r.subStatus}` : ''}`))
-  console.log(`  ${r.reason}\n`)
-  process.exitCode = r.verdict === CLEAR ? 0 : r.verdict === INCONCLUSIVE ? 9 : 2
+  out.line(paint(`\n  ${r.verdict}${r.subStatus ? ` / ${r.subStatus}` : ''}`))
+  out.line(`  ${clean(r.reason, 400)}\n`)
+  out.result({ ...r, node: node.name, nodeRole: choice })
+  return r.verdict === CLEAR ? EXIT.OK : r.verdict === INCONCLUSIVE ? EXIT.INCONCLUSIVE : EXIT.REFUSED
 }
 
-const cmd = process.argv[2]
-const table = {
-  verify: cmdVerify,
-  render: cmdRender, status: cmdStatus, 'blast-radius': cmdBlastRadius,
-  grant: cmdGrant, revoke: cmdRevoke, consent: cmdConsent,
+async function cmdBlastRadius(flags, out) {
+  const grantId = flags.grant
+  const k = await readKnowledge(PRODUCER(), readConfig(), { grantId })
+  if (!k.consistency.ok) {
+    out.line(c.yellow(`\n  INCONCLUSIVE — ${clean(k.consistency.reason, 300)}\n`))
+    out.result({ grantId, consistency: k.consistency })
+    return EXIT.INCONCLUSIVE
+  }
+  const grant = k.grants.find(g => g.id === grantId) ?? null
+  const rev = grant ? revocationOf(grant, k.states) : null
+  const r = blastRadius(grantId, k.derivations)
+  out.line(c.bold(`\nQuarantine list for ${grantId}\n`))
+  printWarnings(out, k.warnings)
+  out.line(`  grant   ${grant ? `${grant.ual}  ${rev.revoked ? c.red('revoked') : c.green('live')}` : c.yellow('not found in the grants graph')}`)
+  out.line(`  assets  ${r.assets.length} ${c.dim('(recorded by trusted producers)')}`)
+  for (const a of r.assets) out.line(`    ${a.outputSha256.slice(0, 16)}…  ${a.servedCapability}  ${c.dim(a.ual)}`)
+  out.line(`  billed  ${r.billedUnknown ? 'unknown' : `~$${r.totalBilledUsd.toFixed(4)}`} ${c.dim('(estimated at list price)')}\n`)
+  out.result({ grantId, grant, revoked: rev?.revoked ?? null, ...r })
+  return EXIT.OK
 }
-if (!table[cmd]) {
-  console.log(`
-${c.bold('mandate')} — a consent rail for generative media
 
-  status                    show both DKG nodes and their agent DIDs
-  grant [--with-consent]    author a grant ON THE GRANTOR'S node
-  consent                   capture a consent clip via a phone link
-  render [--execute]        resolve the grant, decide, and only then spend
-  revoke --id <grant>       revoke, as the grantor
-  verify --url <media>      check a delivered file from its bytes alone
-  blast-radius              everything produced under a grant
-
-  render  : --subject --capability --use-class --territory --seconds --at --resolver
-  grant   : --subject --capability --use-class --territory --forbid --max-spend --with-consent
-`)
-  process.exit(1)
+const COMMAND_FNS = {
+  status: cmdStatus, grant: cmdGrant, revoke: cmdRevoke, render: cmdRender,
+  consent: cmdConsent, verify: cmdVerify, 'blast-radius': cmdBlastRadius,
 }
-table[cmd]().catch(e => { console.error(c.red(`\n${e.message}\n`)); process.exit(1) })
+
+function exitFor(e) {
+  if (e instanceof UsageError || e instanceof TermError) return EXIT.USAGE
+  if (e instanceof DkgWriteError) return ['unbound', 'publish', 'publish-transport'].includes(e.stage) ? EXIT.DKG_ANCHOR_FAILED : EXIT.DKG_WRITE_FAILED
+  if (e instanceof DkgHttpError) return EXIT.INCONCLUSIVE
+  return EXIT.USAGE
+}
+
+async function main(argv) {
+  let parsed
+  try {
+    parsed = parseArgs(argv)
+  } catch (e) {
+    if (!(e instanceof UsageError)) throw e
+    console.error(`${e.message}\n\nRun \`mandate --help\` for usage.`)
+    return EXIT.USAGE
+  }
+  const { command, flags } = parsed
+  if (!command || flags.help) {
+    console.log(helpText(command))
+    return EXIT.OK
+  }
+  const out = makeOutput({ json: flags.json })
+  try {
+    return await COMMAND_FNS[command](flags, out)
+  } catch (e) {
+    const code = exitFor(e)
+    if (out.json) {
+      console.log(JSON.stringify({ error: clean(e.message, 1000), stage: e.stage ?? null, ual: e.ual ?? null, txHash: e.txHash ?? null, mayHaveSent: e.mayHaveSent ?? false, exitCode: code }, null, 2))
+    } else {
+      console.error(c.red(`\n  ${clean(e.message, 1000)}`))
+      if (e instanceof DkgWriteError) {
+        console.error(c.red(`  stage: ${e.stage}`))
+        if (e.ual) console.error(`  UAL: ${e.ual}`)
+        if (e.txHash) console.error(`  tx:  ${e.txHash}${txLink(e.ual, e.txHash) ? `  ${txLink(e.ual, e.txHash)}` : ''}`)
+        if (e.mayHaveSent) console.error(c.yellow('  A transaction may have been sent. Check the node before retrying.'))
+      }
+      console.error('')
+    }
+    return code
+  }
+}
+
+process.exitCode = await main(process.argv.slice(2))

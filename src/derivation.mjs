@@ -1,97 +1,46 @@
 /**
  * The derivation ledger.
  *
- * A revocation is only as honest as this file. When Ana revokes, the product
- * claims it can enumerate everything ever made under her grant — and that claim
- * is a lie the moment one render slips through unrecorded.
+ * A revocation is only as honest as this file. When a grantor revokes, the
+ * product claims it can enumerate everything made under the grant — and that
+ * claim is false the moment one render slips through unrecorded.
  *
- * So derivations are written EAGERLY and TRANSACTIONALLY: a render result is
- * not returned to the caller until its derivation edge is committed. An
- * uncommitted derivation is treated as a FAILED RENDER, even though the media
- * exists and has been billed. That is the deliberate trade — we would rather
- * report a render as failed than hold media we cannot account for.
+ * So derivations are written eagerly and must be anchored before the caller is
+ * given the media. An unrecorded derivation is treated as a failed render, even
+ * though the media exists and was billed: better to report a render as failed
+ * than to hold media a revocation cannot account for.
  */
-import { createHash } from 'node:crypto'
-import { writeFileSync, mkdirSync } from 'node:fs'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
-import { derivationToTurtle } from './rdf.mjs'
-
-/** Scratch Turtle lands here before the CLI seals it. Never inside the caller's project. */
-export const defaultWorkDir = () => join(tmpdir(), 'mandate')
-
-export async function sha256OfUrl(url) {
-  const res = await fetch(url)
-  if (!res.ok) throw new Error(`cannot hash output: HTTP ${res.status}`)
-  return createHash('sha256').update(Buffer.from(await res.arrayBuffer())).digest('hex')
-}
+import { nonce16, normSha256, agentAddress } from './rdf-term.mjs'
+import { derivationToQuads } from './rdf.mjs'
+import { hashUrl } from './verify.mjs'
 
 /**
- * Record one derivation and commit it before the caller sees the media.
+ * Record one derivation and anchor it in the producer's own context graph.
  *
- * Two addressing schemes have to be reconciled: Livepeer indexes lineage by
- * project/session, and this graph is indexed by output content hash. Both keys
- * are stored on every edge so the two can be joined later — missing that join
- * is how a quarantine list silently becomes incomplete.
+ * Every edge gets its own IRI — the output hash prefix plus a random nonce —
+ * so two renders of identical bytes stay two edges, and nobody can add
+ * predicates to an existing edge by computing its IRI.
  */
 export async function recordDerivation(node, contextGraphId, {
-  outputUrl, servedCapability, servedModelId, authorizedUnder,
-  loraId = null, sessionId = null, billedUsd = 0, jobId = null,
-  workDir = defaultWorkDir(),
-  // Only Verifiable Memory was measured to reach other nodes. A derivation that
-  // stays in SWM is invisible to every verifier except the producer itself.
-  anchor = true,
-}) {
-  const outputSha256 = await sha256OfUrl(outputUrl)
-  const id = `urn:mandate:derivation:${outputSha256.slice(0, 16)}`
-  const ttl = derivationToTurtle({
-    id, outputSha256, servedCapability, servedModelId, authorizedUnder,
-    loraId, sessionId: sessionId ?? jobId, billedUsd,
-    derivedAt: new Date().toISOString(),
-  })
-
-  const dir = join(workDir, 'derivations')
-  mkdirSync(dir, { recursive: true })
-  const path = join(dir, `${outputSha256.slice(0, 16)}.ttl`)
-  writeFileSync(path, ttl)
-
-  // The KA name is only a local handle; the derivation's identity is the content
-  // hash. A partially-completed `ka create` leaves a sealed-but-unshared asset
-  // under its name, and re-running create against that name fails with
-  // "private/public partition differs from its existing seal" — so never reuse
-  // a name across attempts.
-  const name = `derivation-${outputSha256.slice(0, 16)}-${Date.now().toString(36)}`
-  // `ka create --share` is NOT atomic: it can seal into Working Memory and then
-  // fail the SWM promote. Retry the share rather than assume it landed.
-  const created = await node.createKA(name, contextGraphId, path, { share: true })
-  let status = created.status
-  if (created.sharePending || status !== 'swm-shared') {
-    const shared = await node.cli(['ka', 'share', name, '-c', contextGraphId], { tolerant: true })
-    status = /shared to SWM/i.test(shared) ? 'swm-shared' : status
-    if (status !== 'swm-shared') {
-      // Refusing to report a half-committed derivation as committed is the
-      // whole point: an edge the graph does not have cannot be quarantined.
-      const stage = created.status ? 'sealed but not shared to SWM' : 'could not be created'
-      throw new Error(`derivation ${id} ${stage}:\n${(created.status ? shared : created.raw).slice(0, 400)}`)
-    }
-  }
-  let vm = null
-  if (anchor) {
-    vm = await node.publishVM(name, contextGraphId)
-    if (!vm.ual) {
-      throw new Error(`derivation ${id} shared but not anchored; other parties cannot verify against it:\n`
-        + vm.raw.slice(0, 400))
-    }
-  }
-  return { id, outputSha256, path, name, ...created, status, ual: vm?.ual ?? null, txHash: vm?.txHash ?? null }
+  outputUrl, outputSha256, servedCapability, servedModelId = null, authorizedUnder,
+  billedUsd = null, jobId = null, derivedAt = new Date().toISOString(), expectAuthor,
+} = {}) {
+  const sha = outputSha256 ? normSha256(outputSha256) : await hashUrl(outputUrl)
+  if (!sha) throw new Error('recordDerivation needs outputUrl or a valid outputSha256')
+  const nonce = nonce16()
+  const id = `urn:mandate:derivation:${sha.slice(0, 16)}:${nonce}`
+  const quads = derivationToQuads({ id, outputSha256: sha, servedCapability, servedModelId, authorizedUnder, billedUsd, jobId, derivedAt })
+  const author = expectAuthor ?? agentAddress((await node.identity()).agentDid)
+  const anchored = await node.sealShareAnchor({ name: `derivation-${sha.slice(0, 16)}-${nonce}`, contextGraphId, quads, expectAuthor: author })
+  return { id, outputSha256: sha, ...anchored }
 }
 
 /**
  * Reconcile billed calls against the graph.
  *
- * This is the check that keeps the quarantine claim honest: every render the
- * platform billed us for must have a derivation edge. Anything billed but
- * unrecorded is an orphan, and an orphan means the blast radius is understated.
+ * Every render the platform billed must have a derivation edge. Anything billed
+ * but unrecorded is an orphan, and an orphan means the blast radius is
+ * understated.
  */
 export function reconcile({ billedJobs = [], derivations = [] }) {
   // Derivations carry the Livepeer job id the platform bills under.
