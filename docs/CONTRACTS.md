@@ -28,19 +28,44 @@ The shapes every module agrees on. Change them here first.
 
 ## Read consistency
 
-DKG v10.0.16 `/api/query` intermittently omits whole named graphs. Each read
-attempt checks:
+DKG v10.0.16 `/api/query` intermittently omits whole named graphs (docs/SPIKES.md).
+A graph comes back whole or not at all; nothing is invented. Reads are therefore
+scoped to one publisher's Verifiable Memory prefix,
+`did:dkg:context-graph:<cg>/_verifiable_memory/<addr>/`, and each attempt runs:
 
-1. The `_meta` anchor set is non-empty when local state says anchors exist, and
-   contains every anchor previously seen for that context graph (anchors are
-   append-only).
-2. `COUNT(DISTINCT ?g)` over the `_verifiable_memory/` prefix equals the number
-   of anchors for that prefix.
-3. Every content graph returned has exactly `publicTripleCount` rows.
+1. `_meta` rows whose UAL path contains `/<addr>/`;
+2. `COUNT(DISTINCT ?g)` over the prefix;
+3. every triple under the prefix.
 
-On failure: retry with backoff; after the last attempt the gate refuses with
-`read-inconsistent` and verify returns `INCONCLUSIVE`. Accepted revocations are
-persisted and never forgotten.
+Attempts are merged: the union of `_meta` rows, the largest graph count, and the
+fullest copy of each graph. The merged read is consistent when:
+
+- the graph count is at least the confirmed anchors under the prefix, and at most
+  that plus the unconfirmed ones (an unconfirmed graph is accounted for, and its
+  content is never accepted);
+- every confirmed anchor's graph returned exactly `publicTripleCount` rows;
+- no returned graph lacks a `_meta` record;
+- every UAL this machine has seen before for the prefix is still present.
+
+A consistent non-empty read stops early. An empty read is believed only when
+every attempt agrees. A row limit exceeded (`LIMIT max+1`) fails at once, with no
+retry. After the last attempt, the gate refuses with `read-inconsistent` and the
+verifier returns `INCONCLUSIVE`.
+
+Outside the publisher's prefix, `readKnowledge` only discovers things; it never
+reads other graphs in full:
+
+| Found | Where | Effect |
+|---|---|---|
+| State about a candidate grant | another address's VM graph | forgery `state-not-by-grantor` (`misplaced-state` in a derivations graph) |
+| Grant for the subject | another address's VM graph | forgery `grant-not-by-subject` (`misplaced-grant` in a derivations graph) |
+| State about a candidate grant | the grantor's own VM graph, absent from the grantor read | read inconsistent |
+| Non-`active` state | `_shared_memory/…` | warning only |
+| Non-`active` state | merged view (`<cg>/context/<id>`) with no VM copy anywhere | revocation, tier `context` |
+| Derivation for a file | an untrusted address's VM graph | shown in `untrusted`, never believed |
+
+Discovered forgeries carry their UAL, and the transaction hash where their `_meta`
+anchor can be read.
 
 ## Wire terms
 
@@ -68,22 +93,38 @@ the strict coercions shared by writer and reader:
 
 ## Knowledge (reader output)
 
+`readKnowledge(node, cfg, scope)`:
+
+- `cfg = { grantsCg, derivationsCgs, trustedProducers?, stateStore?, attempts?, backoffMs?, max?, sleep? }`
+- `trustedProducers` defaults to the derivations graphs' own addresses.
+- `scope` is exactly one of `{ subject }` (render), `{ grantId }` (blast radius) or `{ sha256 }` (verify).
+
 ```js
 {
-  anchors: [{ ual, graph, publisher, number, status, confirmationKind, txHash,
-              materializedVersion, publicTripleCount, contextGraphId }],
-  grants: [{ id, ual, publisher, subject, grantor, grantorAddress,
-             permitsCapability, permitsUseClass, forbidsUseClass, territory,
-             validFrom, validUntil, maxSpendUsd, consentClipSha256, tier }],
-  states: [{ id, ual, publisher, stateOf, state, stateAt, tier }],
-  derivations: [{ id, ual, publisher, outputSha256, servedCapability,
-                  servedModelId, authorizedUnder, billedUsd, jobId, derivedAt,
-                  trusted }],
-  forgeries: [{ kind, graph, ual, publisher, subject, detail }],
+  scope,
+  anchors: [{ ual, graph, publisher, number, contextGraphId, publicTripleCount,
+              txHash, materializedVersion, confirmationKind }],
+  grants: [{ id, ual, txHash, graph, publisher, subject, subjectAddress, grantor,
+             grantorAddress, permitsCapability, permitsUseClass, forbidsUseClass,
+             territory, validFrom, validUntil, maxSpendUsd, consentClipSha256,
+             tier: 'vm' }],
+  states: [{ id, ual, txHash, graph, publisher, stateOf, state: 'active'|'revoked',
+             stateAuthor, stateAt, materializedVersion, tier: 'vm'|'context',
+             source?: 'local-state' }],
+  derivations: [{ id, ual, txHash, graph, publisher, trusted, outputSha256,
+                  servedCapability, servedModelId, authorizedUnder, jobId,
+                  billedUsd, derivedAt }],
+  forgeries: [{ kind, detail, id, graph, ual, txHash, publisher, anchored?,
+                claims: { subject?, stateOf?, state?, outputSha256?, authorizedUnder? } }],
   warnings: [string],
-  consistency: { ok, attempts, reason },
+  trustedProducers: [address],
+  consistency: { ok, reason, attempts },
+  reads: [{ contextGraphId, publisher, role, anchors, consistency }],
 }
 ```
+
+Dates are normalised to UTC ISO strings. A state value other than exactly
+`active` is `revoked`.
 
 ## Decision
 
@@ -96,24 +137,39 @@ decide(request, knowledge) → {
 }
 ```
 
-`request = { subject, capability, useClass, territory, at, estimatedUsd }`.
+`request = { subject, capability, useClass, territory, at, estimatedUsd }`. Every
+field is required. `estimatedUsd` may be `null`, meaning the price is unknown.
 
 Clause order: `malformed-request`, `use-class-prohibited`, `read-inconsistent`,
 `grant-exists`, `capability-permitted`, `use-class-permitted`,
 `territory-permitted`, `validity-window`, `not-revoked`, `spend-ceiling`.
+
+- Grants are checked independently, in id order. A refusal names the furthest
+  clause any grant reached.
+- Prior spend is summed per grant from trusted derivations, in integer
+  micro-dollars.
+- Under a ceiling, an unknown estimate or an unknown prior spend refuses.
 
 ## Verdict
 
 ```js
 verifyKnowledge(knowledge, sha256, { now }) → {
   verdict: 'CLEAR' | 'TAINTED' | 'UNKNOWN' | 'INCONCLUSIVE',
-  subStatus: 'REVOKED' | 'EXPIRED' | 'NOT_YET_VALID' | 'UNAUTHORISED' | 'MALFORMED' | null,
-  sha256, reason, judgements, untrusted,
+  subStatus: 'REVOKED' | 'UNAUTHORISED' | 'MALFORMED' | 'NOT_YET_VALID' | 'EXPIRED' | null,
+  sha256, reason, grantId?, grantUal?, grantor?,
+  judgements: [{ derivation, derivationUal, publisher, grant, grantUal, grantor, verdict, subStatus, reason }],
+  untrusted: [{ derivation, derivationUal, publisher, grant }],
+  forgeries, warnings,
 }
 ```
 
-Only edges from trusted producers (`MANDATE_TRUSTED_PRODUCERS`, default the
-derivations context-graph address prefixes) decide the verdict.
+Only trusted producers' edges are judged. A file is CLEAR only when every trusted
+edge is clear; otherwise the headline is the most serious sub-status, in the order
+listed above. `derivedAt` is the producer's own claim, so it is believed only when
+it incriminates: a render before `validFrom` or after `validUntil`.
+
+`blastRadius(grantId, derivations) → { grantId, assets, totalBilledUsd, billedUnknown }`
+lists trusted edges only.
 
 ## CLI exit codes
 
@@ -133,5 +189,9 @@ derivations context-graph address prefixes) decide the verdict.
 
 ## Local state
 
-`~/.mandate` (mode 0700): `pending/` holds render records written before dispatch;
-`state/<context-graph>.json` holds known anchors and accepted revocations.
+`~/.mandate` (mode 0700; `MANDATE_HOME` overrides):
+
+- `pending/` holds render records written before dispatch.
+- `state/<context-graph>.json` (mode 0600, written atomically) is
+  `{ version: 1, knownUals: { <addr>: [ual] }, revocations: { <grantId>: { id, ual, txHash, publisher, stateOf, stateAt } } }`.
+  It is updated only after a consistent read, and entries are never removed.

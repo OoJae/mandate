@@ -526,3 +526,39 @@ Consequences: Mandate runs entirely on the keyless demo tier, which is unaffecte
 The only thing blocked is publishing the community skill under an owner key.
 `scripts/publish-skill.mjs` now refuses an `sk_` key with that explanation instead
 of failing with an opaque 401.
+
+## DKG v10.0.16 leaves whole named graphs out of query results (2026-09-13)
+
+Found while capturing resolver fixtures (`scripts/capture-fixtures.mjs`,
+`test/fixtures/live/*.json`, which record every observed row count). Identical
+read-only `POST /api/query` requests, seconds apart, with no writes in between:
+
+| Node | Query | Row counts over repeated requests |
+|---|---|---|
+| grantor (publisher) | one KA's graph, read explicitly | full in 6 of 8, **0** in 2 of 8 |
+| producer (synced) | `_meta`, filtered to one publisher | 125, **0**, 125, **0** |
+| producer | `COUNT(DISTINCT ?g)` over a publisher prefix | **0**, 1, **0**, 1 |
+| producer | whole publisher prefix | **0**, 77, 77 |
+
+A graph is either returned whole or not at all; nothing is invented. The likely
+cause is in `dkg-storage/dist/graph-set-index-store.js`: the index of which named
+graphs exist drops a graph after a failed existence probe, so a query sees an
+incomplete graph set until the index recovers.
+
+For Mandate this is a correctness problem, not a performance one. A read that
+silently omits the graph holding a revocation looks exactly like a grant that was
+never revoked. `src/resolve.mjs` therefore:
+
+- reads one publisher's Verifiable Memory at a time, together with its `_meta`
+  anchors and the node's own graph count;
+- merges repeated attempts (safe, because anchored data is append-only and the
+  fault only omits);
+- accepts the read only when every anchored graph returned exactly the
+  `publicTripleCount` its anchor declares, no graph lacks an anchor, the graph
+  count matches, and every anchor this machine has seen before (`~/.mandate/state`)
+  is still present;
+- believes an empty answer only when every attempt agrees.
+
+Otherwise the gate refuses with `read-inconsistent` and the verifier answers
+`INCONCLUSIVE`. With four attempts, live reads on both nodes settle within 2–9
+seconds. `test/resolve.test.mjs` replays the fault.

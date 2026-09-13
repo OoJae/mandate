@@ -28,7 +28,7 @@ test('a clip with no consent language at all is flagged', () => {
 test('reconcile flags a billed render with no derivation edge', () => {
   const r = reconcile({
     billedJobs: [{ jobId: 'mjob_a' }, { jobId: 'mjob_b' }],
-    derivations: [{ sessionId: 'mjob_a' }],
+    derivations: [{ jobId: 'mjob_a' }],
   })
   assert.equal(r.complete, false)
   assert.equal(r.orphans.length, 1)
@@ -38,7 +38,7 @@ test('reconcile flags a billed render with no derivation edge', () => {
 test('reconcile passes when every billed render is recorded', () => {
   const r = reconcile({
     billedJobs: [{ jobId: 'mjob_a' }],
-    derivations: [{ sessionId: 'mjob_a' }],
+    derivations: [{ jobId: 'mjob_a' }],
   })
   assert.equal(r.complete, true)
 })

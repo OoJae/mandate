@@ -77,6 +77,9 @@ export const refusedAt         = t('refusedAt')
 
 /** The clauses a request is checked against, in the order the gate applies them. */
 export const CLAUSES = [
+  'malformed-request',
+  'use-class-prohibited',
+  'read-inconsistent',
   'grant-exists',
   'capability-permitted',
   'use-class-permitted',

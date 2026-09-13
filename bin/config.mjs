@@ -10,6 +10,9 @@ import { parseEnv } from 'node:util'
 import { join } from 'node:path'
 import { DkgNode } from '../src/dkg.mjs'
 import { defaultWorkDir } from '../src/derivation.mjs'
+import { contextGraphAddress } from '../src/resolve.mjs'
+import { fileStateStore } from '../src/state-store.mjs'
+import { normAddress } from '../src/rdf-term.mjs'
 
 const envFile = join(process.cwd(), '.env')
 if (existsSync(envFile)) {
@@ -60,3 +63,28 @@ export function derivationsCg() {
 }
 
 export const workDir = () => env('MANDATE_WORK_DIR', defaultWorkDir())
+
+/**
+ * Producers whose derivation edges count: for spend under a grant, and for a
+ * verifier's verdict. Anyone can publish an edge into an open graph, so the
+ * default is only the derivations graph's own address.
+ */
+export function trustedProducers() {
+  const raw = process.env.MANDATE_TRUSTED_PRODUCERS
+  if (!raw) return [contextGraphAddress(derivationsCg())]
+  return raw.split(',').map(s => s.trim()).filter(Boolean).map(a => {
+    const n = normAddress(a)
+    if (!n) throw new Error(`MANDATE_TRUSTED_PRODUCERS: ${JSON.stringify(a)} is not an address`)
+    return n
+  })
+}
+
+/** What readKnowledge needs, with local memory of anchors and revocations under ~/.mandate/state. */
+export function readConfig() {
+  return {
+    grantsCg: grantsCg(),
+    derivationsCgs: [derivationsCg()],
+    trustedProducers: trustedProducers(),
+    stateStore: fileStateStore(),
+  }
+}

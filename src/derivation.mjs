@@ -94,8 +94,9 @@ export async function recordDerivation(node, contextGraphId, {
  * unrecorded is an orphan, and an orphan means the blast radius is understated.
  */
 export function reconcile({ billedJobs = [], derivations = [] }) {
-  const bySession = new Set(derivations.map(d => d.sessionId).filter(Boolean))
-  const orphans = billedJobs.filter(j => !bySession.has(j.jobId))
+  // Derivations carry the Livepeer job id the platform bills under.
+  const byJob = new Set(derivations.map(d => d.jobId).filter(Boolean))
+  const orphans = billedJobs.filter(j => !byJob.has(j.jobId))
   return {
     billed: billedJobs.length,
     recorded: derivations.length,

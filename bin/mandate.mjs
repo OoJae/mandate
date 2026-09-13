@@ -5,12 +5,13 @@
  * `render` is the whole argument in one command: resolve the grant knowledge
  * from a graph the producer does not own, decide, and only then spend money.
  */
-import { PRODUCER, GRANTOR, grantsCg, derivationsCg, workDir } from './config.mjs'
-import { readKnowledge, priorSpendFor, blastRadius } from '../src/resolve.mjs'
+import { PRODUCER, GRANTOR, grantsCg, derivationsCg, workDir, readConfig } from './config.mjs'
+import { readKnowledge } from '../src/resolve.mjs'
 import { decide } from '../src/gate.mjs'
+import { blastRadius } from '../src/verify-core.mjs'
 import { grantToTurtle, stateToTurtle } from '../src/rdf.mjs'
 import { recordDerivation } from '../src/derivation.mjs'
-import { verifyMedia, CLEAR, TAINTED } from '../src/verify.mjs'
+import { verifyMedia, CLEAR, TAINTED, INCONCLUSIVE } from '../src/verify.mjs'
 import { writeFileSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 
@@ -37,8 +38,6 @@ const captureConsent = async (...a) => {
 let _cg, _dcg
 const GRANTS_CG_ = () => (_cg ??= grantsCg())
 const DERIVATIONS_CG_ = () => (_dcg ??= derivationsCg())
-/** What a reader needs: grants and revocations, plus derivation edges. */
-const READ_GRAPHS = () => [GRANTS_CG_(), DERIVATIONS_CG_()]
 
 // Live list prices, verified via describe_capability. Labelled as estimates
 // everywhere they are shown: get_cost_report is Livepeer's estimate at list
@@ -82,7 +81,7 @@ const c = {
 }
 
 async function cmdRender() {
-  const subject = arg('subject', 'ana-7f3c')
+  const subject = arg('subject')
   const capability = arg('capability', 'talking-head')
   const useClass = arg('use-class', 'advertising')
   const territory = arg('territory', 'GB')
@@ -104,37 +103,25 @@ async function cmdRender() {
   // needs an on-chain context-graph registration and therefore gas.
   const resolver = arg('resolver', 'producer') === 'grantor' ? GRANTOR() : PRODUCER()
   process.stdout.write(c.dim(`\n  resolving grant knowledge from ${resolver.name}… `))
-  const k = await readKnowledge(resolver, READ_GRAPHS())
-  console.log(c.dim(`${k.grants.length} grant(s), ${k.assertions.length} state assertion(s)`))
+  const k = await readKnowledge(resolver, readConfig(), { subject })
+  console.log(c.dim(`${k.grants.length} grant(s), ${k.states.length} revocation(s), ${k.derivations.length} derivation(s)`))
 
-  const candidate = k.grants.find(g => g.subject === subject)
-  const priorSpendUsd = candidate ? priorSpendFor(candidate.id, k.derivations) : 0
-
-  const d = decide(
-    { subject, capability, useClass, territory, at, estimatedUsd },
-    { grants: k.grants, assertions: k.assertions, priorSpendUsd },
-  )
-
-  if (d.ignoredForgeries?.length) {
-    console.log(c.yellow(`\n  ⚠ ignored ${d.ignoredForgeries.length} state assertion(s) not authored by the grantor:`))
-    for (const f of d.ignoredForgeries) {
-      console.log(c.yellow(`      "${f.claimed}" claimed by ${f.author}`))
-    }
-  }
+  const d = decide({ subject, capability, useClass, territory, at, estimatedUsd }, k)
+  printForgeries(d.forgeries)
 
   if (!d.permit) {
     console.log(c.red(`\n  REFUSED — clause: ${d.clause}`))
     console.log(`  ${d.reason}`)
-    console.log(c.green('\n  spend avoided: ' +
-      (d.spendAvoidedUsd == null ? 'unknown (no local list price)' : `$${d.spendAvoidedUsd.toFixed(4)}`) +
-      ' ' + c.dim('(exact — the capability was never invoked)')))
+    console.log(c.green('\n  not spent: ' +
+      (d.spend.estimateUsd == null ? 'unknown (no local list price)' : `~$${d.spend.estimateUsd.toFixed(4)} at list price`)) +
+      ' ' + c.dim('(the capability was never invoked)'))
     console.log(c.dim('\n  No Livepeer call was made.\n'))
-    process.exitCode = 2
+    process.exitCode = d.clause === 'read-inconsistent' ? 9 : 2
     return
   }
 
   console.log(c.green(`\n  PERMITTED under ${d.grantId}`))
-  console.log(c.dim(`  authored by ${d.grantor} — a node this producer does not control`))
+  console.log(c.dim(`  published by ${d.publisher}${d.grantUal ? ` as ${d.grantUal}` : ''}`))
 
   if (!has('execute')) {
     console.log(c.dim('\n  --execute not set; stopping before dispatch (no spend).\n'))
@@ -207,16 +194,30 @@ async function cmdStatus() {
   }
 }
 
+function printForgeries(forgeries = []) {
+  if (!forgeries.length) return
+  console.log(c.yellow(`\n  ⚠ ${forgeries.length} object(s) rejected — published by an address not entitled to them:`))
+  for (const f of forgeries.slice(0, 10)) {
+    console.log(c.yellow(`      ${f.kind}: ${f.id} by ${f.publisher ?? 'unknown'}${f.ual ? ` (${f.ual})` : ''}`))
+    console.log(c.dim(`        ${f.detail}`))
+  }
+}
+
 async function cmdBlastRadius() {
+  const grantId = arg('grant')
+  if (!grantId) { console.log(c.red('\n  --grant <grant id> is required\n')); process.exitCode = 1; return }
   const resolver = arg('resolver', 'producer') === 'grantor' ? GRANTOR() : PRODUCER()
-  const k = await readKnowledge(resolver, READ_GRAPHS())
-  const grantId = arg('grant', k.grants[0]?.id)
+  const k = await readKnowledge(resolver, readConfig(), { grantId })
+  if (!k.consistency.ok) {
+    console.log(c.yellow(`\n  INCONCLUSIVE — ${k.consistency.reason}\n`))
+    process.exitCode = 9
+    return
+  }
   const r = blastRadius(grantId, k.derivations)
   console.log(c.bold(`\nQuarantine list for ${grantId}\n`))
-  console.log(`  LoRAs:  ${r.loras.length ? r.loras.join(', ') : c.dim('none')}`)
-  console.log(`  assets: ${r.assets.length}`)
-  for (const a of r.assets) console.log(`    ${a.outputSha256?.slice(0, 16)}… via ${a.servedCapability}`)
-  console.log(`  billed under this grant: $${r.totalBilledUsd.toFixed(4)} ${c.dim('(estimated at list price)')}\n`)
+  console.log(`  assets: ${r.assets.length} ${c.dim('(recorded by trusted producers)')}`)
+  for (const a of r.assets) console.log(`    ${a.outputSha256.slice(0, 16)}… via ${a.servedCapability}  ${c.dim(a.ual ?? '')}`)
+  console.log(`  billed under this grant: ${r.billedUnknown ? 'unknown' : `~$${r.totalBilledUsd.toFixed(4)}`} ${c.dim('(estimated at list price)')}\n`)
 }
 
 /**
@@ -368,15 +369,14 @@ async function cmdVerify() {
   console.log(`  file      ${url.slice(0, 92)}`)
   console.log(c.dim(`  verifier  ${node.name} — no relationship to the producer\n`))
 
-  const r = await verifyMedia(node, READ_GRAPHS(), url)
+  const r = await verifyMedia(node, readConfig(), url)
   console.log(`  sha256    ${r.sha256}`)
-  if (r.ignoredForgeries?.length) {
-    console.log(c.yellow(`  ignored ${r.ignoredForgeries.length} state assertion(s) not authored by the grantor`))
-  }
+  printForgeries(r.forgeries)
+  if (r.untrusted.length) console.log(c.dim(`  ${r.untrusted.length} edge(s) from untrusted publishers shown but not believed`))
   const paint = r.verdict === CLEAR ? c.green : r.verdict === TAINTED ? c.red : c.yellow
-  console.log(paint(`\n  ${r.verdict}`))
+  console.log(paint(`\n  ${r.verdict}${r.subStatus ? ` / ${r.subStatus}` : ''}`))
   console.log(`  ${r.reason}\n`)
-  process.exitCode = r.verdict === CLEAR ? 0 : 2
+  process.exitCode = r.verdict === CLEAR ? 0 : r.verdict === INCONCLUSIVE ? 9 : 2
 }
 
 const cmd = process.argv[2]

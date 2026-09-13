@@ -1,0 +1,15 @@
+{
+  "node": "grantor",
+  "contextGraphId": "0x8EaA4857B22dddbfb5ebC476087FEc39336e0CB5/mandate-derivations",
+  "prefix": "did:dkg:context-graph:0x8EaA4857B22dddbfb5ebC476087FEc39336e0CB5/mandate-derivations/_verifiable_memory/0x8eaa4857b22dddbfb5ebc476087fec39336e0cb5/",
+  "sparql": "SELECT (COUNT(DISTINCT ?g) AS ?n) WHERE {\n  GRAPH ?g { ?s ?p ?o }\n  FILTER(STRSTARTS(STR(?g), \"did:dkg:context-graph:0x8EaA4857B22dddbfb5ebC476087FEc39336e0CB5/mandate-derivations/_verifiable_memory/0x8eaa4857b22dddbfb5ebc476087fec39336e0cb5/\"))\n}",
+  "observedCounts": [
+    1,
+    1
+  ],
+  "bindings": [
+    {
+      "n": "\"1\"^^<http://www.w3.org/2001/XMLSchema#integer>"
+    }
+  ]
+}

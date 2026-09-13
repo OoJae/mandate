@@ -15,7 +15,7 @@ import { createHash } from 'node:crypto'
 import { readKnowledge } from './resolve.mjs'
 import { verifyKnowledge } from './verify-core.mjs'
 
-export { CLEAR, TAINTED, UNKNOWN, verifyKnowledge } from './verify-core.mjs'
+export { CLEAR, TAINTED, UNKNOWN, INCONCLUSIVE, verifyKnowledge } from './verify-core.mjs'
 
 /**
  * Hash the bytes behind a URL.
@@ -43,11 +43,12 @@ export async function hashUrl(url, { attempts = 4, backoffMs = 1500 } = {}) {
 /**
  * Verify a delivered file from its bytes alone.
  *
- * `node` is the VERIFIER's own node — deliberately not the producer's. Nothing
- * here asks the producer anything.
+ * `node` should be the verifier's own node, not the producer's. `cfg` is the
+ * readKnowledge configuration: the grants graph, the derivations graphs, and
+ * which producers' edges the verifier believes.
  */
-export async function verifyMedia(node, contextGraph, mediaUrl, { now = new Date().toISOString() } = {}) {
+export async function verifyMedia(node, cfg, mediaUrl, { now = new Date().toISOString() } = {}) {
   const sha256 = await hashUrl(mediaUrl)
-  const k = await readKnowledge(node, contextGraph)
+  const k = await readKnowledge(node, cfg, { sha256 })
   return verifyKnowledge(k, sha256, { now })
 }
