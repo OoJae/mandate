@@ -313,3 +313,73 @@ closed.** A partial or failed read produces a refusal, never a permit.
 **Unpriced capabilities report unknown, not zero.** `sync-lipsync-v3` was
 initially missing from the local price table and a refusal claimed `$0.0000`
 avoided, which understates the refusal. Unknown is now reported as unknown.
+
+---
+
+## S5 revisited — funded, and what cross-node actually requires
+
+All four wallets funded with 0.01 Base Sepolia ETH on 2026-09-13.
+
+### On-chain, for real
+
+| Step | Result |
+|---|---|
+| `context-graph register` | on-chain context graph **430** |
+| grant published to VM | UAL `did:dkg:base:84532/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/4`, tx `0x16b4a73b…489f`, confirmed |
+| agent profiles | both published on-chain |
+| revocation published to VM | UAL `…/9`, tx `0x47827947…7b36`, confirmed in **13s** |
+
+### The producer reads the grant from its own node
+
+With the graph registered and the grant anchored, `mandate render` run against
+the **producer's own daemon** — no `--resolver` stand-in — returns:
+
+```
+resolving grant knowledge from mandate-producer… 1 grant(s)
+PERMITTED under urn:mandate:grant:bella-4a1e
+authored by did:dkg:agent:0xeD1e…0B69 — a node this producer does not control
+```
+
+### Only Verifiable Memory crossed nodes — SWM did not
+
+This overturns an assumption in the plan. The producer saw exactly one grant,
+`bella-4a1e`: the one published to Verifiable Memory. Grants that existed only in
+the grantor's Shared Working Memory never arrived, even though the grantor's log
+shows it answering the producer's sync requests (`Sync responder SWM data …
+auth=0ms`). The grantor also logs, repeatedly:
+
+```
+RFC-64 authority bootstrap incomplete for ".../mandate-grants":
+  execution reverted: ERC721NonexistentToken(uint256)
+```
+
+— an on-chain authority lookup failing for the registered graph, which is the
+most likely reason SWM content is not accepted by the peer.
+
+**Consequence, and it is a correctness issue rather than a performance one:** the
+plan called for revocation to be "SWM-first, chain-second" for a sub-two-second
+refusal. Measured, a revocation left in SWM **never reaches the producer**:
+
+```
+Ana revokes (SWM only)  ->  producer: 0 state assertion(s) -> PERMITTED
+```
+
+A consent gate whose revocations do not propagate is worse than none. `grant`
+and `revoke` now publish to Verifiable Memory, and `revoke` exits non-zero and
+says so plainly if the anchor fails.
+
+### The real revocation window: about one minute
+
+After publishing the revocation to VM, polling the producer's own node:
+
+```
+[+17s] 0 state assertion(s) -> PERMITTED
+[+32s] 0 state assertion(s) -> PERMITTED
+[+47s] 0 state assertion(s) -> PERMITTED
+[+62s] 1 state assertion(s) -> REFUSED — clause: not-revoked
+```
+
+13s of that is chain confirmation; the rest is durable sync. The sub-two-second
+figure only ever held on a single node. Across two independent parties the honest
+number is **~50–60 seconds**, and the README states it rather than the flattering
+one.

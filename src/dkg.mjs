@@ -109,6 +109,29 @@ export class DkgNode {
   }
 }
 
+/**
+ * Publish an already-shared Knowledge Asset to Verifiable Memory.
+ *
+ * Measured on two live testnet nodes: SWM gossip for a user context graph did
+ * NOT reach the other party, while Verifiable Memory synced durably. So anything
+ * another party must act on — a grant, and above all a revocation — has to be
+ * published here. A revocation left in SWM leaves the producer rendering.
+ *
+ * Uses the synchronous route on purpose. `publish-async` can park a job in
+ * `503 LIFT_JOB_PENDING_CHAIN_PROOF`, which never expires and needs a human to
+ * clear by hand.
+ */
+DkgNode.prototype.publishVM = async function publishVM(name, contextGraphId) {
+  const out = await this.cli(['ka', 'publish', name, '--context-graph-id', contextGraphId],
+    { tolerant: true, timeout: 480000 })
+  return {
+    raw: out,
+    ual: (out.match(/UAL:\s*(\S+)/) || [])[1] || null,
+    txHash: (out.match(/Tx hash:\s*(\S+)/) || [])[1] || null,
+    status: (out.match(/Status:\s*(\S+)/) || [])[1] || null,
+  }
+}
+
 /** The two parties, as the demo runs them. */
 export const GRANTOR = () => new DkgNode({
   home: '~/.dkg-mandate-grantor', port: 9201, name: 'mandate-grantor',

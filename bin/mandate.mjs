@@ -260,13 +260,25 @@ async function cmdGrant() {
 
   console.log(c.dim(`\n  sealing on ${grantor.name} …`))
   const r = await grantor.createKA(name, GRANTS_CG, path, { share: true })
-  if (r.status !== 'swm-shared') {
+  if (r.sharePending || r.status !== 'swm-shared') {
     console.log(c.dim('  share did not complete on create; retrying (it is not atomic)…'))
-    await grantor.cli(['ka', 'share', name, '-c', GRANTS_CG])
+    await grantor.cli(['ka', 'share', name, '-c', GRANTS_CG], { tolerant: true })
+  }
+  // Another party can only act on what is anchored — see publishVM.
+  let vm = null
+  if (!has('local-only')) {
+    console.log(c.dim('  publishing to Verifiable Memory (Base Sepolia)…'))
+    vm = await grantor.publishVM(name, GRANTS_CG)
   }
   console.log(c.green(`\n  GRANTED  ${grantId}`))
   console.log(`  author      ${id.agentDid}`)
   console.log(`  merkle root ${r.merkleRoot ?? c.dim('n/a')}`)
+  if (vm?.ual) {
+    console.log(`  UAL         ${vm.ual}`)
+    console.log(`  tx          ${vm.txHash}  ${c.dim(vm.status ?? '')}`)
+  } else if (!has('local-only')) {
+    console.log(c.yellow('  not anchored — other parties cannot read this grant yet'))
+  }
   console.log(`  capabilities ${grant.permitsCapability.join(', ')}`)
   console.log(`  ceiling     $${grant.maxSpendUsd}\n`)
 }
@@ -285,10 +297,25 @@ async function cmdRevoke() {
     state: 'revoked', stateAuthor: id.agentDid, stateAt: at,
   }))
   const r = await grantor.createKA(name, GRANTS_CG, path, { share: true })
-  if (r.status !== 'swm-shared') await grantor.cli(['ka', 'share', name, '-c', GRANTS_CG])
+  if (r.sharePending || r.status !== 'swm-shared') {
+    await grantor.cli(['ka', 'share', name, '-c', GRANTS_CG], { tolerant: true })
+  }
+  // A revocation that stays in SWM does not reach the producer — measured, not
+  // assumed. It must be anchored, or the producer keeps rendering.
+  const vm = await grantor.publishVM(name, GRANTS_CG)
   console.log(c.red(`\n  REVOKED ${grantId}`))
-  console.log(`  by ${id.agentDid} at ${at}`)
-  console.log(c.dim('  shared to SWM; the gate refuses on the next resolve.\n'))
+  console.log(`  by   ${id.agentDid} at ${at}`)
+  if (vm.ual) {
+    console.log(`  UAL  ${vm.ual}`)
+    console.log(`  tx   ${vm.txHash}  ${c.dim(vm.status ?? '')}`)
+    console.log(c.dim('\n  Anchored. Independent nodes typically refuse within ~1 minute'))
+    console.log(c.dim('  (measured: 13s chain confirmation + sync). Until then a producer'))
+    console.log(c.dim('  resolving from its own node may still permit — that window is real.\n'))
+  } else {
+    console.log(c.yellow('\n  NOT ANCHORED. Only this node will refuse; other parties will not'))
+    console.log(c.yellow('  see this revocation. Retry the publish before relying on it.\n'))
+    process.exitCode = 5
+  }
 }
 
 async function cmdConsent() {
