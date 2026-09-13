@@ -119,16 +119,17 @@ if (grant.exitCode !== 0) fail('grant', grant)
 const g = grant.result
 if (opt.consent) {
   const c = g.consent ?? {}
-  log(`consent clip sha256 ${g.grant.consentClipSha256}`)
+  log(`consent clip sha256 ${g.grant.consentClipSha256}${c.bytes ? ` (${c.bytes} bytes${c.mime ? `, ${c.mime}` : ''})` : ''}`)
   if (c.transcript) log(`transcript "${c.transcript}"`)
+  if (c.scope) log(`spoken scope: ${c.scope.checks.map(k => `${k.term} ${k.matched ? 'said' : k.contradicted ? 'CONTRADICTED' : 'not said'}`).join(', ')}`)
 }
 log(`GRANTED  ${g.grant.id}`)
 log(`  UAL     ${anchored(g)}`)
 
 /* 3. A capability the grant never named: refused on the producer's node, for free */
 const refused = await until(['render', '--subject', g.grant.subject, '--capability', opt.refused, '--use-class', 'advertising', '--territory', 'GB', '--seconds', opt.seconds],
-  'render refused capability', s => s.exitCode === 2)
-if (refused.exitCode !== 2) fail(`expected ${opt.refused} to be refused`, refused)
+  'render refused capability', s => s.exitCode === 2 && s.result.decision?.clause === 'capability-permitted')
+if (refused.result.decision?.clause !== 'capability-permitted') fail(`expected ${opt.refused} to be refused by capability-permitted`, refused)
 log(`REFUSED  ${opt.refused}: ${refused.result.decision.clause} — ${refused.result.decision.reason}`)
 
 /* 4. The gated render, once the producer's node has the grant */
@@ -136,7 +137,8 @@ const renderArgs = ['render', '--subject', g.grant.subject, '--capability', opt.
 const permitted = await until(renderArgs, 'render dry run', s => s.exitCode === 0)
 if (permitted.exitCode !== 0) fail('the producer never permitted the render', permitted)
 log(`PERMITTED on the producer's node under ${permitted.result.decision.grantId}; estimate ~$${permitted.result.price.usd?.toFixed(4)}`)
-const render = await mandate([...renderArgs, '--execute', '--image-url', opt['image-url'], '--audio-url', opt['audio-url']], 'render --execute')
+// The same input shape as the S7c render that succeeded inline.
+const render = await mandate([...renderArgs, '--execute', '--source-url', opt['image-url'], '--image-url', opt['image-url'], '--audio-url', opt['audio-url'], '--video-url', opt['image-url']], 'render --execute')
 if (render.exitCode !== 0) fail('render', render)
 const d = render.result.derivation
 log(`RENDERED ${render.result.mediaUrl}`)

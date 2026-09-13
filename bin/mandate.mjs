@@ -200,7 +200,9 @@ async function cmdGrant(flags, out) {
   out.line(c.green(`\n  GRANTED  ${grant.id}`))
   anchoredLines(out, r)
   out.line(c.dim('\n  Renew by publishing a new grant; a revocation ends this one for good.\n'))
-  out.result({ granted: true, grant, ual: r.ual, txHash: r.txHash, name: r.name, explorer: txLink(r.ual, r.txHash) })
+  // The clip's hosted URL is link-accessible, so it is never echoed into results that may be saved.
+  const consentSummary = consent ? { sha256: consent.sha256, bytes: consent.bytes ?? null, mime: consent.mime ?? null, transcript: consent.transcript ?? null, asrError: consent.asrError ?? null, scope: consent.scope ?? null } : null
+  out.result({ granted: true, grant, ual: r.ual, txHash: r.txHash, name: r.name, explorer: txLink(r.ual, r.txHash), consent: consentSummary })
   return EXIT.OK
 }
 
@@ -472,7 +474,7 @@ async function captureAndCheck(flags, out, requested, { allowForce = false } = {
     },
     onPending: ({ polls, remainingMs }) => { if (polls % 6 === 0) out.notice(c.dim(`  still waiting (${Math.round(remainingMs / 60000)} min left)`)) },
   })
-  const summary = { captured: r.captured, sha256: r.sha256 ?? null, bytes: r.bytes ?? null, transcript: r.transcript ?? null, asrError: r.asrError ?? null, scope: r.scope ?? null, raw: r.raw ?? null }
+  const summary = { captured: r.captured, sha256: r.sha256 ?? null, bytes: r.bytes ?? null, transcript: r.transcript ?? null, asrError: r.asrError ?? null, scope: r.scope ?? null }
   if (!r.captured) {
     out.line(c.red('\n  No clip arrived before the link expired. Nothing was granted.\n'))
     return { code: EXIT.CONSENT_UNCONFIRMED, summary }
