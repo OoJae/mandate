@@ -562,3 +562,61 @@ never revoked. `src/resolve.mjs` therefore:
 Otherwise the gate refuses with `read-inconsistent` and the verifier answers
 `INCONCLUSIVE`. With four attempts, live reads on both nodes settle within 2–9
 seconds. `test/resolve.test.mjs` replays the fault.
+
+## S6c — forgery from the producer's own node, live (2026-09-13)
+
+The adversarial study showed that v0.1.0 believed self-declared authors. This spike
+runs that attack on Base Sepolia against the 0.2.0 resolver
+([`spikes/s6c-forgery.mjs`](../spikes/s6c-forgery.mjs); full record in
+[`docs/evidence/s6c-forgery.json`](evidence/s6c-forgery.json) and
+[`.txt`](evidence/s6c-forgery.txt)).
+
+**Genuine, from the grantor's node, through the CLI** (subject `0xed1e…0b69:ana-s6c`):
+
+| | UAL | tx |
+|---|---|---|
+| grant G1 (`talking-head`) | `…0b69/27` | `0xaedb52c8…6e44fd2` |
+| grant G2 (`talking-head`) | `…0b69/28` | `0xf1bd5875…fa4b34` |
+| revoke G1 | `…0b69/29` | `0x61636412…c74d39` |
+
+**Forged, from the producer's node, straight to the DKG API.** All three were written
+to name the grantor or its subject, and use the grantor's own id format:
+
+| | What it claims | UAL | tx |
+|---|---|---|---|
+| a | G1 is `active` again, `stateAuthor` = the grantor's DID | `…0cb5/3` | `0xaedeab9c…deebd0` |
+| b | a grant for `ana-s6c`, `grantor` = the grantor's DID, permitting `face-swap-video`, $1000 ceiling | `…0cb5/4` | `0xd18895bd…aa3adf` |
+| c | a grant for `ana-s6c`, `grantor` = the producer, permitting `face-swap-video` | `…0cb5/6` | `0x56411263…a943e0d` |
+
+**Result, from both nodes:**
+
+| Request | Grantor node | Producer node |
+|---|---|---|
+| `talking-head` for `ana-s6c` | PERMITTED under G2 only | PERMITTED under G2 only |
+| `face-swap-video` for `ana-s6c` | REFUSED `capability-permitted` | REFUSED `capability-permitted` |
+| G1 revoked? | yes, despite (a) | yes, despite (a) |
+| forgeries reported | 3, with UAL and publisher | 3, with UAL and publisher |
+
+Three more things this run established:
+
+- **A peer cannot anchor into another party's context graph, even an open one.**
+  The producer's node sealed (a) and (c) into the grantor's graph (`201 wm-sealed`),
+  then failed every share with `A promote prerequisite is temporarily unavailable`,
+  including after retries (`test/fixtures/live/s6c-producer-writes.json`). Its
+  node holds only a stub of that graph. The forgeries therefore went into the
+  producer's own graph, where the resolver reports them as `misplaced-grant` and
+  `misplaced-state`. The resolver would reject them in the grants graph as well
+  (`grant-not-by-subject`, `state-not-by-grantor`; see `test/adversarial.test.mjs`),
+  but that path could not be exercised live from this node.
+- **A subscribed node can silently stop receiving another party's anchors.** After
+  a restart the producer stayed at 9 of the grantor's assets for over ten minutes,
+  with `synced: false`, while the grantor kept receiving the producer's. Its reads
+  were internally consistent, just stale. `POST /api/context-graph/reconcile`
+  confirmed it (`headOrdinal 12`, `watermark 9`, `unresolvedOrdinals 3`) but could
+  not fetch them. `POST /api/context-graph/fetch-assets` with the UALs and the
+  grantor's peer id fetched all three in 13.5 s. A stale node refusing is luck; a
+  stale node missing only a revocation would permit. This is the case for a
+  freshness check against the chain's head ordinal.
+- **Not every confirmed anchor records a transaction.** `…0cb5/4` was confirmed on
+  the `finalized-materialization` lane and its `_meta` has no `transactionHash`,
+  although the publish response returned one.

@@ -1,0 +1,251 @@
+{
+  "startedAt": "2026-09-13T15:40:35.474Z",
+  "grantor": {
+    "G1": {
+      "granted": true,
+      "grant": {
+        "id": "urn:mandate:grant:0xed1eeb64cac09874257f05fd6b51a55695ad0b69:ana-s6c:f5b751b4b13bb895",
+        "grantor": "did:dkg:agent:0xed1eeb64cac09874257f05fd6b51a55695ad0b69",
+        "subject": "0xed1eeb64cac09874257f05fd6b51a55695ad0b69:ana-s6c",
+        "consentClipSha256": null,
+        "permitsCapability": [
+          "talking-head"
+        ],
+        "permitsUseClass": [
+          "advertising"
+        ],
+        "forbidsUseClass": [],
+        "territory": [
+          "GB"
+        ],
+        "validFrom": "2026-09-13T15:40:35.674Z",
+        "validUntil": "2026-12-12T15:40:35.674Z",
+        "maxSpendUsd": "5"
+      },
+      "ual": "did:dkg:base:84532/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/27",
+      "txHash": "0xaedb52c832d7dcf5830cba8464d926f1f23dd1621224b7327156ec7816e44fd2",
+      "name": "grant-ana-s6c-f5b751b4b13bb895",
+      "explorer": "https://sepolia.basescan.org/tx/0xaedb52c832d7dcf5830cba8464d926f1f23dd1621224b7327156ec7816e44fd2"
+    },
+    "G2": {
+      "granted": true,
+      "grant": {
+        "id": "urn:mandate:grant:0xed1eeb64cac09874257f05fd6b51a55695ad0b69:ana-s6c:8d37a4205f8391d7",
+        "grantor": "did:dkg:agent:0xed1eeb64cac09874257f05fd6b51a55695ad0b69",
+        "subject": "0xed1eeb64cac09874257f05fd6b51a55695ad0b69:ana-s6c",
+        "consentClipSha256": null,
+        "permitsCapability": [
+          "talking-head"
+        ],
+        "permitsUseClass": [
+          "advertising"
+        ],
+        "forbidsUseClass": [],
+        "territory": [
+          "GB"
+        ],
+        "validFrom": "2026-09-13T15:42:18.956Z",
+        "validUntil": "2026-12-12T15:42:18.956Z",
+        "maxSpendUsd": "5"
+      },
+      "ual": "did:dkg:base:84532/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/28",
+      "txHash": "0xf1bd587515aa5b22ddf5c534b6f58ad52153f104a5f5522a81ab703719fa4b34",
+      "name": "grant-ana-s6c-8d37a4205f8391d7",
+      "explorer": "https://sepolia.basescan.org/tx/0xf1bd587515aa5b22ddf5c534b6f58ad52153f104a5f5522a81ab703719fa4b34"
+    },
+    "revokeG1": {
+      "revoked": true,
+      "grantId": "urn:mandate:grant:0xed1eeb64cac09874257f05fd6b51a55695ad0b69:ana-s6c:f5b751b4b13bb895",
+      "at": "2026-09-13T15:43:49.219Z",
+      "ual": "did:dkg:base:84532/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/29",
+      "txHash": "0x616364129dd87e6d8dfedbe165832b2f5ed4d04d3d6dd4d0c31e48e492c74d39",
+      "explorer": "https://sepolia.basescan.org/tx/0x616364129dd87e6d8dfedbe165832b2f5ed4d04d3d6dd4d0c31e48e492c74d39"
+    }
+  },
+  "forgeries": [
+    {
+      "key": "a",
+      "what": "\"active\" state for G1 naming the grantor as author",
+      "attempts": [
+        {
+          "contextGraphId": "0xeD1eeB64CaC09874257F05Fd6B51A55695ad0B69/mandate-grants",
+          "ok": false,
+          "stage": "share",
+          "status": 500,
+          "error": "sharing forgery-a-a92cfb76a7b92fa6 failed: mandate-producer POST /api/knowledge-assets/forgery-a-a92cfb76a7b92fa6/swm/share -> 500: A promote prerequisite is temporarily unavailable",
+          "ual": null,
+          "txHash": null
+        },
+        {
+          "contextGraphId": "0x8EaA4857B22dddbfb5ebC476087FEc39336e0CB5/mandate-derivations",
+          "ok": true,
+          "ms": 102274,
+          "ual": "did:dkg:base:84532/0x8eaa4857b22dddbfb5ebc476087fec39336e0cb5/3",
+          "txHash": "0xaedeab9cf4456c117d851c4fa52e7eb6de2af8bd60bab5f8ef7b013720deebd0"
+        }
+      ]
+    },
+    {
+      "key": "b",
+      "what": "grant for the subject naming the grantor, in the producer's own graph",
+      "attempts": [
+        {
+          "contextGraphId": "0x8EaA4857B22dddbfb5ebC476087FEc39336e0CB5/mandate-derivations",
+          "ok": true,
+          "ms": 89671,
+          "ual": "did:dkg:base:84532/0x8eaa4857b22dddbfb5ebc476087fec39336e0cb5/4",
+          "txHash": "0xd18895bdec0f1af1a250db71722a31541f2888f7eb9b97cb118db4f6f6aa3adf"
+        }
+      ]
+    },
+    {
+      "key": "c",
+      "what": "grant for the subject naming the producer as grantor",
+      "attempts": [
+        {
+          "contextGraphId": "0xeD1eeB64CaC09874257F05Fd6B51A55695ad0B69/mandate-grants",
+          "ok": false,
+          "stage": "share",
+          "status": 500,
+          "error": "sharing forgery-c-8665404b845dee95 failed: mandate-producer POST /api/knowledge-assets/forgery-c-8665404b845dee95/swm/share -> 500: A promote prerequisite is temporarily unavailable",
+          "ual": null,
+          "txHash": null
+        },
+        {
+          "contextGraphId": "0x8EaA4857B22dddbfb5ebC476087FEc39336e0CB5/mandate-derivations",
+          "ok": true,
+          "ms": 98676,
+          "ual": "did:dkg:base:84532/0x8eaa4857b22dddbfb5ebc476087fec39336e0cb5/6",
+          "txHash": "0x564112634c5fa49e654c379f80ab339d5e0cdb97c3715760d57492c61a943e0d"
+        }
+      ]
+    }
+  ],
+  "reads": {
+    "producer": {
+      "ms": 9096,
+      "g1Revoked": true,
+      "consistency": {
+        "ok": true,
+        "reason": null,
+        "attempts": 1
+      },
+      "grants": [
+        "urn:mandate:grant:0xed1eeb64cac09874257f05fd6b51a55695ad0b69:ana-s6c:f5b751b4b13bb895",
+        "urn:mandate:grant:0xed1eeb64cac09874257f05fd6b51a55695ad0b69:ana-s6c:8d37a4205f8391d7"
+      ],
+      "states": [
+        {
+          "id": "urn:mandate:state:c3b1b6d13dab51f7",
+          "stateOf": "urn:mandate:grant:0xed1eeb64cac09874257f05fd6b51a55695ad0b69:ana-s6c:f5b751b4b13bb895",
+          "publisher": "0xed1eeb64cac09874257f05fd6b51a55695ad0b69",
+          "ual": "did:dkg:base:84532/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/29"
+        }
+      ],
+      "forgeries": [
+        {
+          "kind": "misplaced-state",
+          "id": "urn:mandate:state:a4fd01c01f7ce0b8",
+          "publisher": "0x8eaa4857b22dddbfb5ebc476087fec39336e0cb5",
+          "ual": "did:dkg:base:84532/0x8eaa4857b22dddbfb5ebc476087fec39336e0cb5/3",
+          "txHash": "0xaedeab9cf4456c117d851c4fa52e7eb6de2af8bd60bab5f8ef7b013720deebd0",
+          "anchored": null,
+          "detail": "a state assertion in a derivations graph is never accepted"
+        },
+        {
+          "kind": "misplaced-grant",
+          "id": "urn:mandate:grant:0xed1eeb64cac09874257f05fd6b51a55695ad0b69:ana-s6c:7f61d7c7afd56459",
+          "publisher": "0x8eaa4857b22dddbfb5ebc476087fec39336e0cb5",
+          "ual": "did:dkg:base:84532/0x8eaa4857b22dddbfb5ebc476087fec39336e0cb5/4",
+          "txHash": null,
+          "anchored": null,
+          "detail": "a grant in a derivations graph is never accepted"
+        },
+        {
+          "kind": "misplaced-grant",
+          "id": "urn:mandate:grant:0xed1eeb64cac09874257f05fd6b51a55695ad0b69:ana-s6c:a509f68bf982c495",
+          "publisher": "0x8eaa4857b22dddbfb5ebc476087fec39336e0cb5",
+          "ual": "did:dkg:base:84532/0x8eaa4857b22dddbfb5ebc476087fec39336e0cb5/6",
+          "txHash": "0x564112634c5fa49e654c379f80ab339d5e0cdb97c3715760d57492c61a943e0d",
+          "anchored": null,
+          "detail": "a grant in a derivations graph is never accepted"
+        }
+      ],
+      "decisions": {
+        "talkingHead": {
+          "permit": true,
+          "clause": null,
+          "grantId": "urn:mandate:grant:0xed1eeb64cac09874257f05fd6b51a55695ad0b69:ana-s6c:8d37a4205f8391d7"
+        },
+        "faceSwap": {
+          "permit": false,
+          "clause": "capability-permitted",
+          "grantId": "urn:mandate:grant:0xed1eeb64cac09874257f05fd6b51a55695ad0b69:ana-s6c:8d37a4205f8391d7"
+        }
+      }
+    },
+    "grantor": {
+      "ms": 7490,
+      "g1Revoked": true,
+      "consistency": {
+        "ok": true,
+        "reason": null,
+        "attempts": 1
+      },
+      "grants": [
+        "urn:mandate:grant:0xed1eeb64cac09874257f05fd6b51a55695ad0b69:ana-s6c:f5b751b4b13bb895",
+        "urn:mandate:grant:0xed1eeb64cac09874257f05fd6b51a55695ad0b69:ana-s6c:8d37a4205f8391d7"
+      ],
+      "states": [
+        {
+          "id": "urn:mandate:state:c3b1b6d13dab51f7",
+          "stateOf": "urn:mandate:grant:0xed1eeb64cac09874257f05fd6b51a55695ad0b69:ana-s6c:f5b751b4b13bb895",
+          "publisher": "0xed1eeb64cac09874257f05fd6b51a55695ad0b69",
+          "ual": "did:dkg:base:84532/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/29"
+        }
+      ],
+      "forgeries": [
+        {
+          "kind": "misplaced-state",
+          "id": "urn:mandate:state:a4fd01c01f7ce0b8",
+          "publisher": "0x8eaa4857b22dddbfb5ebc476087fec39336e0cb5",
+          "ual": "did:dkg:base:84532/0x8eaa4857b22dddbfb5ebc476087fec39336e0cb5/3",
+          "txHash": "0xaedeab9cf4456c117d851c4fa52e7eb6de2af8bd60bab5f8ef7b013720deebd0",
+          "anchored": null,
+          "detail": "a state assertion in a derivations graph is never accepted"
+        },
+        {
+          "kind": "misplaced-grant",
+          "id": "urn:mandate:grant:0xed1eeb64cac09874257f05fd6b51a55695ad0b69:ana-s6c:7f61d7c7afd56459",
+          "publisher": "0x8eaa4857b22dddbfb5ebc476087fec39336e0cb5",
+          "ual": "did:dkg:base:84532/0x8eaa4857b22dddbfb5ebc476087fec39336e0cb5/4",
+          "txHash": null,
+          "anchored": null,
+          "detail": "a grant in a derivations graph is never accepted"
+        },
+        {
+          "kind": "misplaced-grant",
+          "id": "urn:mandate:grant:0xed1eeb64cac09874257f05fd6b51a55695ad0b69:ana-s6c:a509f68bf982c495",
+          "publisher": "0x8eaa4857b22dddbfb5ebc476087fec39336e0cb5",
+          "ual": "did:dkg:base:84532/0x8eaa4857b22dddbfb5ebc476087fec39336e0cb5/6",
+          "txHash": "0x564112634c5fa49e654c379f80ab339d5e0cdb97c3715760d57492c61a943e0d",
+          "anchored": null,
+          "detail": "a grant in a derivations graph is never accepted"
+        }
+      ],
+      "decisions": {
+        "talkingHead": {
+          "permit": true,
+          "clause": null,
+          "grantId": "urn:mandate:grant:0xed1eeb64cac09874257f05fd6b51a55695ad0b69:ana-s6c:8d37a4205f8391d7"
+        },
+        "faceSwap": {
+          "permit": false,
+          "clause": "capability-permitted",
+          "grantId": "urn:mandate:grant:0xed1eeb64cac09874257f05fd6b51a55695ad0b69:ana-s6c:8d37a4205f8391d7"
+        }
+      }
+    }
+  },
+  "finishedAt": "2026-09-13T15:59:20.557Z"
+}

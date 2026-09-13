@@ -139,3 +139,33 @@ test('asset names with path or IRI-breaking characters are refused locally', asy
     await assert.rejects(n.sealShareAnchor({ name: bad, contextGraphId: CG, quads: QUADS }), e => e.stage === 'create', bad)
   }
 })
+
+/* Replays of real v10.0.16 responses recorded by spikes/s6c-forgery.mjs */
+
+import { readFileSync } from 'node:fs'
+const recorded = JSON.parse(readFileSync(new URL('./fixtures/live/s6c-producer-writes.json', import.meta.url), 'utf8'))
+const replay = name => recorded.filter(r => r.path === '/api/knowledge-assets' ? r.request?.name === name : r.path.includes(`/${name}/`))
+const routesFrom = (name, cg) => [
+  { method: 'GET', path: new RegExp(`^/api/knowledge-assets/${name}\\?`), status: 404, body: { error: 'not found' }, times: 1 },
+  ...replay(name).map(r => ({ method: 'POST', path: r.path, status: r.status, body: r.response, times: 1 })),
+]
+
+test('REAL: a peer holding only a stub of another party\'s graph seals but cannot share; the write fails at share', async () => {
+  const name = 'forgery-a-a92cfb76a7b92fa6'
+  const cg = replay(name)[0].request.contextGraphId
+  const { n, calls } = node(routesFrom(name, cg))
+  await assert.rejects(n.sealShareAnchor({ name, contextGraphId: cg, quads: QUADS, sleep: noSleep }),
+    e => e instanceof DkgWriteError && e.stage === 'share' && /temporarily unavailable/.test(e.message))
+  assert.equal(calls.filter(c => c.path.endsWith('/swm/share')).length, 4, 'one attempt plus three retries of the documented transient')
+  assert.ok(!calls.some(c => c.path.endsWith('/vm/publish')))
+})
+
+test('REAL: a confirmed publish returns the UAL and transaction the node reported', async () => {
+  const name = 'forgery-b-00d9be2e29b46234'
+  const rec = replay(name)
+  const cg = rec[0].request.contextGraphId
+  const { n } = node(routesFrom(name, cg))
+  const r = await n.sealShareAnchor({ name, contextGraphId: cg, quads: QUADS, sleep: noSleep, expectAuthor: rec[0].response.authorAddress })
+  assert.equal(r.ual, rec.at(-1).response.ual)
+  assert.equal(r.txHash, rec.at(-1).response.txHash)
+})

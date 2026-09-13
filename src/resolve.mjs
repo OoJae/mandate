@@ -310,6 +310,7 @@ export async function readKnowledge(node, cfg, scope = {}) {
         seen.add(key)
         const owner = grantIriAddress(row.o)
         const path = vmPath(row.cg, row.graph)
+        if (path && forgeries.some(f => f.graph === row.graph && f.id === row.s)) continue
         if (path) {
           if (row.cg === grantsCg && path.publisher === owner) {
             // The grantor's own graph: it must already be in the grantor read.

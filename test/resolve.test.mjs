@@ -194,3 +194,15 @@ test('readPublisher reports the attempts it used', async () => {
   assert.equal(r.consistency.ok, true)
   assert.equal(r.consistency.attempts, 1)
 })
+
+test('a forgery found by both the producer read and discovery is reported once', async () => {
+  const g = grant()
+  const misplaced = ka({ cg: DERIVS_CG, publisher: PRODUCER, quads: [
+    { subject: 'urn:mandate:state:00000000000000cc', predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', object: V.GrantState },
+    { subject: 'urn:mandate:state:00000000000000cc', predicate: V.stateOf, object: g.id },
+    { subject: 'urn:mandate:state:00000000000000cc', predicate: V.state, object: '"active"' },
+    { subject: 'urn:mandate:state:00000000000000cc', predicate: V.stateAuthor, object: `did:dkg:agent:${ANA}` },
+  ] })
+  const k = await readKnowledge(new FakeNode({ world: world([grantKa(g)], [misplaced]) }), cfg(), { subject: SUBJECT })
+  assert.equal(k.forgeries.filter(f => f.id === 'urn:mandate:state:00000000000000cc').length, 1)
+})
