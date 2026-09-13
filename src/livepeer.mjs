@@ -36,7 +36,7 @@ function headers(surface) {
 }
 
 export async function connect(surface = RAW) {
-  const client = new Client({ name: 'mandate', version: '0.1.0' }, { capabilities: {} })
+  const client = new Client({ name: 'mandate', version: '0.2.0' }, { capabilities: {} })
   await client.connect(new StreamableHTTPClientTransport(
     new URL(`${BASE}/${surface}`), { requestInit: { headers: headers(surface) } },
   ))

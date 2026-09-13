@@ -1,7 +1,7 @@
 {
   "name": "mandate-consent",
-  "version": "0.1.0",
-  "description": "A consent rail for generative media: no likeness or voice renders until the depicted person's own agent has published a live, signed grant on the OriginTrail DKG.",
+  "version": "0.2.0",
+  "description": "A consent rail for generative media: a producer running Mandate renders a likeness or voice only under a live grant anchored on the OriginTrail DKG by the depicted person's own agent, and anyone can verify a delivered file.",
   "license": "Apache-2.0",
   "author": "OoJae",
   "type": "module",
@@ -17,17 +17,18 @@
     "url": "https://github.com/OoJae/mandate/issues"
   },
   "keywords": [
+    "ai-agents",
+    "base-sepolia",
     "consent",
-    "likeness",
-    "generative-media",
-    "provenance",
-    "revocation",
-    "origintrail",
     "dkg",
+    "generative-media",
     "knowledge-graph",
-    "rdf",
+    "likeness",
     "livepeer",
-    "ai-agents"
+    "origintrail",
+    "provenance",
+    "rdf",
+    "revocation"
   ],
   "main": "./src/index.mjs",
   "exports": {
@@ -64,14 +65,10 @@
     "nodes:sync": "node scripts/nodes.mjs sync"
   },
   "peerDependencies": {
-    "@modelcontextprotocol/sdk": "^1.30.0",
-    "@origintrail-official/dkg": "^10.0.16"
+    "@modelcontextprotocol/sdk": "^1.30.0"
   },
   "peerDependenciesMeta": {
     "@modelcontextprotocol/sdk": {
-      "optional": true
-    },
-    "@origintrail-official/dkg": {
       "optional": true
     }
   },

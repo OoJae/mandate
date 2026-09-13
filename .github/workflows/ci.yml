@@ -14,15 +14,15 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        node: ['22.13', '24']
+        node: ['22.13', '24', '26']
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      # Actions are pinned to commit SHAs; the comment names the release.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ matrix.node }}
-          cache: npm
       - run: npm ci
-      - name: Unit tests
+      - name: Unit, adversarial and CLI tests (no network)
         run: npm test
       - name: Namespace documents are current
         run: |
@@ -30,5 +30,7 @@ jobs:
           git diff --exit-code -- docs/ns
       - name: Packed tarball works with no peers installed
         run: node scripts/smoke-pack.mjs
-      - name: Production dependency audit
-        run: npm audit --omit=dev
+      # The published package has no runtime dependencies, so this covers the
+      # package alone. Optional peers are audited by whoever installs them.
+      - name: Audit runtime dependencies (none)
+        run: npm audit --omit=dev --omit=peer
