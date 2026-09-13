@@ -37,12 +37,14 @@ export function txLink(ual, txHash) {
 
 /**
  * Collects one command's output. In --json mode human lines are suppressed and
- * a single result object is printed at the end.
+ * a single result object is printed at the end; notices — a link someone must
+ * open, progress on a long wait — still reach the operator, on stderr.
  */
 export function makeOutput({ json = false } = {}) {
   return {
     json,
     line: (...parts) => { if (!json) console.log(...parts) },
+    notice: (...parts) => { if (json) console.error(...parts); else console.log(...parts) },
     result: obj => { if (json) console.log(JSON.stringify(obj, null, 2)) },
   }
 }

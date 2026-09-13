@@ -59,8 +59,9 @@
     "build:vocab-docs": "node scripts/build-vocab-docs.mjs",
     "smoke:pack": "node scripts/smoke-pack.mjs",
     "spike:caps": "node spikes/s1-capabilities.mjs",
-    "nodes:init": "python3 spikes/drive-init.py ~/.dkg-mandate-grantor mandate-grantor 9201 && python3 spikes/drive-init.py ~/.dkg-mandate-producer mandate-producer 9202",
-    "nodes:start": "DKG_HOME=~/.dkg-mandate-grantor npx dkg start && DKG_HOME=~/.dkg-mandate-producer npx dkg start"
+    "nodes:up": "node scripts/nodes.mjs up",
+    "nodes:doctor": "node scripts/nodes.mjs doctor",
+    "nodes:sync": "node scripts/nodes.mjs sync"
   },
   "peerDependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",

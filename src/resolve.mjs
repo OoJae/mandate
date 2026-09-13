@@ -23,6 +23,7 @@ import {
 } from './provenance.mjs'
 import { asIri, asString, asInteger, subjectAddress, normAddress, normSha256 } from './rdf-term.mjs'
 import { remember } from './state-store.mjs'
+import { DkgHttpError } from './dkg.mjs'
 
 export const READ_DEFAULTS = Object.freeze({ attempts: 4, backoffMs: 250, max: 5000 })
 
@@ -205,6 +206,43 @@ async function discoverGrants(node, { contextGraphs, subject, max }) {
 const ualPrefixOf = anchors => anchors[0]?.ual.replace(/\/0x[0-9a-fA-F]{40}\/\d+$/, '') ?? null
 
 /* ------------------------------------------------------------------------- */
+/* Freshness                                                                   */
+/* ------------------------------------------------------------------------- */
+
+/**
+ * Is this node's copy of each context graph as long as the chain's?
+ *
+ * A node can stay subscribed and answer every query consistently while it has
+ * silently stopped receiving another party's anchors (docs/SPIKES.md, S6c). A
+ * stale node that is missing only a revocation would permit, so a node known
+ * to be behind the chain is an inconsistent read. When the check cannot run at
+ * all — an older node, or a token without node-admin rights — that is a warning.
+ */
+export async function checkFreshness(node, contextGraphIds) {
+  const failures = []
+  const warnings = []
+  const graphs = []
+  for (const cg of contextGraphIds) {
+    try {
+      const r = await node.reconcile(cg)
+      const head = Number(r?.headOrdinal)
+      const have = Number(r?.watermarkAfter)
+      graphs.push({ contextGraphId: cg, headOrdinal: Number.isFinite(head) ? head : null, watermark: Number.isFinite(have) ? have : null, status: r?.status ?? null })
+      if (Number.isFinite(head) && Number.isFinite(have)) {
+        if (have < head) failures.push(`stale view: ${node.name ?? 'the node'} holds ${have} of the ${head} assets anchored to ${cg} on-chain`)
+      } else {
+        warnings.push(`freshness of ${cg} not checked: the node did not report its chain head`)
+      }
+    } catch (e) {
+      if (!(e instanceof DkgHttpError)) throw e
+      if (e.status === 0) failures.push(e.message)
+      else warnings.push(`freshness of ${cg} not checked (${e.status}: ${String(e.body?.error ?? e.message).slice(0, 120)})`)
+    }
+  }
+  return { failures, warnings, graphs }
+}
+
+/* ------------------------------------------------------------------------- */
 /* Knowledge                                                                   */
 /* ------------------------------------------------------------------------- */
 
@@ -217,6 +255,7 @@ const ualPrefixOf = anchors => anchors[0]?.ual.replace(/\/0x[0-9a-fA-F]{40}\/\d+
  * @param {string[]} [cfg.derivationsCgs]
  * @param {string[]} [cfg.trustedProducers]  default: the derivations graphs' own addresses
  * @param {{load, save}} [cfg.stateStore]    remembers anchors and revocations between reads
+ * @param {boolean} [cfg.checkFreshness]     compare the node's copy of each graph with the chain first
  * @param {object} scope  exactly one of { subject }, { grantId }, { sha256 }
  */
 export async function readKnowledge(node, cfg, scope = {}) {
@@ -244,6 +283,11 @@ export async function readKnowledge(node, cfg, scope = {}) {
   if (scopes.length !== 1) throw new Error('readKnowledge needs exactly one of subject, grantId or sha256')
   const warnings = []
   const reads = []
+  let freshness = null
+  if (cfg.checkFreshness) {
+    freshness = await checkFreshness(node, [grantsCg, ...derivationsCgs])
+    warnings.push(...freshness.warnings)
+  }
 
   const read = async (cg, publisher, role) => {
     const r = await readPublisher(node, {
@@ -287,7 +331,7 @@ export async function readKnowledge(node, cfg, scope = {}) {
   for (const r of reads) warnings.push(...r.warnings)
   const allAnchors = reads.flatMap(r => r.anchors)
   const ualPrefix = ualPrefixOf(allAnchors)
-  const failures = reads.filter(r => !r.consistency.ok).map(r => `${r.role} of ${r.publisher}: ${r.consistency.reason}`)
+  const failures = [...(freshness?.failures ?? []), ...reads.filter(r => !r.consistency.ok).map(r => `${r.role} of ${r.publisher}: ${r.consistency.reason}`)]
 
   // The grant ids this question turns on.
   const grantIds = scope.subject !== undefined ? grants.filter(g => g.subject === scope.subject).map(g => g.id)
@@ -433,6 +477,7 @@ export async function readKnowledge(node, cfg, scope = {}) {
     forgeries,
     warnings: [...new Set(warnings)],
     trustedProducers,
+    freshness: freshness?.graphs ?? null,
     consistency,
     reads: reads.map(r => ({ contextGraphId: r.contextGraphId, publisher: r.publisher, role: r.role, anchors: r.anchors.length, consistency: r.consistency })),
   }

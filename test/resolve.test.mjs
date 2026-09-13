@@ -206,3 +206,22 @@ test('a forgery found by both the producer read and discovery is reported once',
   const k = await readKnowledge(new FakeNode({ world: world([grantKa(g)], [misplaced]) }), cfg(), { subject: SUBJECT })
   assert.equal(k.forgeries.filter(f => f.id === 'urn:mandate:state:00000000000000cc').length, 1)
 })
+
+test('DKG-3: a node behind the chain is an inconsistent read, however consistent its answers', async () => {
+  const g = grant()
+  const node = new FakeNode({ world: world([grantKa(g)]) })
+  node.reconcile = async cg => ({ status: cg === GRANTS_CG ? 'pending' : 'current', headOrdinal: cg === GRANTS_CG ? 2 : 0, watermarkAfter: cg === GRANTS_CG ? 1 : 0 })
+  const k = await readKnowledge(node, cfg({ checkFreshness: true }), { subject: SUBJECT })
+  assert.equal(k.consistency.ok, false)
+  assert.match(k.consistency.reason, /stale view: fake holds 1 of the 2 assets/)
+  assert.equal(decide(req(), k).clause, 'read-inconsistent')
+})
+
+test('a node that cannot report freshness gives a warning, not a refusal', async () => {
+  const node = new FakeNode({ world: world([grantKa(grant())]) })
+  const { DkgHttpError } = await import('../src/dkg.mjs')
+  node.reconcile = async () => { throw new DkgHttpError('forbidden', { status: 403, body: { error: 'requires a node-level admin token' } }) }
+  const k = await readKnowledge(node, cfg({ checkFreshness: true }), { subject: SUBJECT })
+  assert.equal(k.consistency.ok, true)
+  assert.ok(k.warnings.some(w => /freshness .* not checked \(403/.test(w)))
+})

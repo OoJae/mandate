@@ -96,5 +96,7 @@ export function readConfig() {
     derivationsCgs: [derivationsCg()],
     trustedProducers: trustedProducers(),
     stateStore: fileStateStore(),
+    // Before deciding, compare the node's copy of each graph with the chain.
+    checkFreshness: process.env.MANDATE_CHECK_FRESHNESS !== '0',
   }
 }

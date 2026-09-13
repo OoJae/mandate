@@ -457,17 +457,17 @@ async function captureAndCheck(flags, out, requested, { allowForce = false } = {
   const { captureConsent, consentScript } = await import('../src/consent.mjs')
   const force = allowForce && flags.force
   out.line(c.bold('\nConsent capture\n'))
-  out.line('  Ask the person being depicted to record themselves saying, in their own words, something like:')
-  out.line(c.bold(`\n    "${consentScript(requested)}"\n`))
+  out.notice('  Ask the person being depicted to record themselves saying, in their own words, something like:')
+  out.notice(c.bold(`\n    "${consentScript(requested)}"\n`))
   const kind = flags.consentKind ?? 'video'
   const r = await captureConsent({
     requested, kind,
     onLink: (url, { expiresAt }) => {
-      out.line(`  Open this on their phone (records ${kind}; valid until ${expiresAt}):`)
-      out.line(c.bold(`    ${clean(url, 300)}`))
-      out.line(c.dim('  Waiting for the upload…'))
+      out.notice(`  Open this on their phone (records ${kind}; valid until ${expiresAt}):`)
+      out.notice(c.bold(`    ${clean(url, 300)}`))
+      out.notice(c.dim('  Waiting for the upload…'))
     },
-    onPending: ({ polls, remainingMs }) => { if (polls % 6 === 0) out.line(c.dim(`  still waiting (${Math.round(remainingMs / 60000)} min left)`)) },
+    onPending: ({ polls, remainingMs }) => { if (polls % 6 === 0) out.notice(c.dim(`  still waiting (${Math.round(remainingMs / 60000)} min left)`)) },
   })
   const summary = { captured: r.captured, sha256: r.sha256 ?? null, bytes: r.bytes ?? null, transcript: r.transcript ?? null, asrError: r.asrError ?? null, scope: r.scope ?? null, raw: r.raw ?? null }
   if (!r.captured) {

@@ -30,6 +30,11 @@ export async function startFakeDkg({ address, name = 'fake', token = 'test-token
     if (url.pathname === '/api/agent/identity') return send(res, 200, { agentAddress: address, agentDid: did })
     if (url.pathname === '/api/info') return send(res, 200, { version: '10.0.16', peers: 1, chain: { chainId: 'base:84532' } })
     if (url.pathname === '/api/status') return send(res, 200, { name })
+    if (url.pathname === '/api/context-graph/reconcile') {
+      const n = (world[json.contextGraphId]?.kas ?? []).length
+      const behind = scenario.staleBy ?? 0
+      return send(res, 200, { contextGraphId: json.contextGraphId, status: behind ? 'pending' : 'current', headOrdinal: n + behind, watermarkBefore: n, watermarkAfter: n })
+    }
     if (url.pathname === '/api/query') {
       try {
         const bindings = await node.queryJson(json.sparql, { contextGraphId: json.contextGraphId, includeSharedMemory: json.includeSharedMemory, view: json.view, max: 100000 })

@@ -52,6 +52,12 @@ every attempt agrees. A row limit exceeded (`LIMIT max+1`) fails at once, with n
 retry. After the last attempt, the gate refuses with `read-inconsistent` and the
 verifier returns `INCONCLUSIVE`.
 
+With `checkFreshness` (the CLI's default), each context graph is first compared
+with the chain through `POST /api/context-graph/reconcile`: a node holding fewer
+assets than `headOrdinal` is a stale view and the read is inconsistent, however
+consistent its answers. If the node cannot report (no admin token, older node),
+that is a warning.
+
 Outside the publisher's prefix, `readKnowledge` only discovers things; it never
 reads other graphs in full:
 
@@ -118,6 +124,7 @@ the strict coercions shared by writer and reader:
                 claims: { subject?, stateOf?, state?, outputSha256?, authorizedUnder? } }],
   warnings: [string],
   trustedProducers: [address],
+  freshness: [{ contextGraphId, headOrdinal, watermark, status }] | null,
   consistency: { ok, reason, attempts },
   reads: [{ contextGraphId, publisher, role, anchors, consistency }],
 }

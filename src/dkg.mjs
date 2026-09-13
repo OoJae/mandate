@@ -147,6 +147,24 @@ export class DkgNode {
     return result.bindings
   }
 
+  /**
+   * Compare this node's copy of a context graph with the chain: `headOrdinal`
+   * is how many assets are bound to the graph on-chain, `watermarkAfter` how
+   * many this node holds after trying to catch up. Needs a node-admin token.
+   */
+  async reconcile(contextGraphId, { timeoutMs = 120_000 } = {}) {
+    return (await this.request('POST', '/api/context-graph/reconcile', { contextGraphId }, { timeoutMs })).body
+  }
+
+  /** Fetch specific assets of a context graph from peers. Needs a node-admin token. */
+  async fetchAssets(contextGraphId, uals, { peerIds, timeoutMs = 120_000 } = {}) {
+    const body = { contextGraphId, uals }
+    if (peerIds) body.peerIds = peerIds
+    return (await this.request('POST', '/api/context-graph/fetch-assets', body, { timeoutMs })).body
+  }
+
+  async subscriptions() { return (await this.request('GET', '/api/context-graph/subscriptions')).body }
+
   /** The node's lifecycle record for a named asset, or null if it does not exist. */
   async descriptor(name, contextGraphId) {
     try {

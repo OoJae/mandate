@@ -218,3 +218,14 @@ test('record with nothing pending lists nothing', async () => {
   assert.equal(r.code, 0)
   assert.deepEqual(json(r).pending, [])
 })
+
+test('render refuses with exit 9 on a node that is behind the chain', async () => {
+  const stale = await startFakeDkg({ address: PRODUCER, name: 'producer', world, scenario: { staleBy: 1 } })
+  try {
+    const r = await mandate(renderArgs(), { env: { MANDATE_PRODUCER_PORT: String(stale.port) } })
+    assert.equal(r.code, 9)
+    assert.match(json(r).decision.reason, /stale view/)
+  } finally {
+    await stale.close()
+  }
+})

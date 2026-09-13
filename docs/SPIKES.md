@@ -588,14 +588,15 @@ to name the grantor or its subject, and use the grantor's own id format:
 | b | a grant for `ana-s6c`, `grantor` = the grantor's DID, permitting `face-swap-video`, $1000 ceiling | `…0cb5/4` | `0xd18895bd…aa3adf` |
 | c | a grant for `ana-s6c`, `grantor` = the producer, permitting `face-swap-video` | `…0cb5/6` | `0x56411263…a943e0d` |
 
-**Result, from both nodes:**
+**Result, from all three nodes** (the verifier was added in Phase 8 and has never
+published anything):
 
-| Request | Grantor node | Producer node |
-|---|---|---|
-| `talking-head` for `ana-s6c` | PERMITTED under G2 only | PERMITTED under G2 only |
-| `face-swap-video` for `ana-s6c` | REFUSED `capability-permitted` | REFUSED `capability-permitted` |
-| G1 revoked? | yes, despite (a) | yes, despite (a) |
-| forgeries reported | 3, with UAL and publisher | 3, with UAL and publisher |
+| Request | Grantor node | Producer node | Verifier node |
+|---|---|---|---|
+| `talking-head` for `ana-s6c` | PERMITTED under G2 only | PERMITTED under G2 only | PERMITTED under G2 only |
+| `face-swap-video` for `ana-s6c` | REFUSED `capability-permitted` | REFUSED `capability-permitted` | REFUSED `capability-permitted` |
+| G1 revoked? | yes, despite (a) | yes, despite (a) | yes, despite (a) |
+| forgeries reported | 3, with UAL and publisher | 3, with UAL and publisher | 3, with UAL and publisher |
 
 Three more things this run established:
 
@@ -620,3 +621,34 @@ Three more things this run established:
 - **Not every confirmed anchor records a transaction.** `…0cb5/4` was confirmed on
   the `finalized-materialization` lane and its `_meta` has no `transactionHash`,
   although the publish response returned one.
+
+## A third, read-only verifier node (2026-09-13)
+
+`node scripts/nodes.mjs up verifier` stood up `mandate-verifier` on :9203 from an
+empty home: it wrote a four-line `config.json`, started the daemon, subscribed to
+graphs 430 and 431, dialled the other two nodes, and caught up with the chain. It
+has an agent identity (`0xacD6…C9CA`) and no funded wallet, and it never
+publishes. `mandate verify` now reads from it by default.
+
+What it took, for anyone repeating it:
+
+- **The first boot takes about two minutes** before the API binds; `dkg start`
+  itself gives up waiting after 15 s while the daemon keeps starting.
+- **Public Base Sepolia RPC endpoints time out often.** The new node's context
+  graph authority bootstrap failed on all three default endpoints at first
+  (`getContextGraphAuthoritySnapshot … TIMEOUT`), and until it succeeded,
+  `subscribe` answered `503 … read authority is temporarily unavailable` and
+  `reconcile` answered `404 … does not exist or is not subscribed locally`. Both
+  cleared on their own within minutes.
+- **`reconcile` is the freshness signal.** It reports `headOrdinal` (assets bound
+  to the graph on-chain) and the node's watermark, in about 2 s when current. The
+  resolver now calls it before every CLI decision; a node behind the chain is an
+  inconsistent read.
+- **`fetch-assets` is strict:** 1–10 UALs per request, and one UAL that belongs to
+  another graph (`409 … is not registered to a Context Graph`) or has no coherent
+  version snapshot fails the whole request. In this run the node's own
+  chain-driven reconciliation, not the probes, brought it from 0 to 12/12 and 4/4
+  in about ten minutes.
+
+The verifier then resolved the S6c subject in 16 s with the same verdict as the
+other two nodes (table above).
