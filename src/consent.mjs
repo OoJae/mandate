@@ -14,9 +14,9 @@
  * Declining to do biometric identification is a deliberate product decision,
  * not a gap.
  */
-import { createHash } from 'node:crypto'
 import { connect, requestUpload, getUpload, runCapability, RAW } from './livepeer.mjs'
 import { checkSpokenScope } from './scope.mjs'
+import { sha256OfUrl } from './fetch-bytes.mjs'
 
 export { checkSpokenScope }
 
@@ -37,9 +37,7 @@ export async function awaitCapture(client, token, { attempts = 12 } = {}) {
 }
 
 export async function sha256Of(url) {
-  const res = await fetch(url)
-  if (!res.ok) throw new Error(`could not fetch consent clip: HTTP ${res.status}`)
-  return createHash('sha256').update(Buffer.from(await res.arrayBuffer())).digest('hex')
+  return (await sha256OfUrl(url, { maxBytes: 60 * 1024 * 1024 })).sha256
 }
 
 /** Transcribe the clip so the SPOKEN scope can be checked against the requested scope. */

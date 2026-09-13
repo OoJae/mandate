@@ -45,22 +45,49 @@ export async function connect(surface = RAW) {
 
 export const textOf = r => (r.content || []).map(c => c.text || '').join('\n')
 
-/** Parse the prose `describe_capability` answer into something checkable. */
-export function parseCapability(text) {
-  const head = (text.split('\n')[0] || '')
-  return {
-    availability: (head.split('—')[1] || '').split('·')[0].trim() || 'unknown',
-    kind: (head.split('·')[1] || '').trim() || '',
-    price: (text.match(/price:\s*([^\n]+)/) || [])[1] || null,
-    latency: (text.match(/latency:\s*([^\n]+)/) || [])[1] || null,
-    text,
+/** A tool call the platform answered with isError. */
+export class LivepeerToolError extends Error {
+  constructor(message, { tool, structured = null, text = '' } = {}) {
+    super(message)
+    this.tool = tool
+    this.structured = structured
+    this.text = text
   }
 }
 
+/**
+ * Call a tool and return its structured and text content; throw when the
+ * platform marks the result as an error. Earlier versions read only the text
+ * and treated an error message as a result.
+ */
+export async function callStrict(client, name, args = {}, { timeoutMs } = {}) {
+  const r = await client.callTool({ name, arguments: args }, undefined, timeoutMs ? { timeout: timeoutMs } : undefined)
+  const text = textOf(r)
+  const structured = r.structuredContent ?? null
+  if (r.isError) {
+    const detail = structured?.error ?? text
+    throw new LivepeerToolError(`${name} failed: ${String(detail).slice(0, 500)}`, { tool: name, structured, text })
+  }
+  return { structured, text }
+}
+
+/** The capability's detail card: price, latency SLA, availability. */
 export async function describeCapability(client, name) {
-  return parseCapability(textOf(await client.callTool({
-    name: 'describe_capability', arguments: { name },
-  })))
+  return (await callStrict(client, 'describe_capability', { name })).structured
+}
+
+/** The live rate-card row for one capability, or null if the platform has none. */
+export async function getPricing(client, name) {
+  const { structured } = await callStrict(client, 'get_pricing', { name })
+  return structured?.capabilities?.find(c => c.name === name) ?? null
+}
+
+/**
+ * Read the account's rolling 24h spend cap. Mandate never sets it: the cap is
+ * the operator's, and a grant's ceiling is enforced by the gate instead.
+ */
+export async function readSpendCap(client) {
+  return (await callStrict(client, 'spend_cap', { action: 'read' })).structured
 }
 
 /**
@@ -69,48 +96,41 @@ export async function describeCapability(client, name) {
  * without a key.
  */
 export async function requestUpload(client, kind = 'video') {
-  const text = textOf(await client.callTool({ name: 'request_upload', arguments: { kind } }))
+  const { structured, text } = await callStrict(client, 'request_upload', { kind })
   return {
-    pageUrl: (text.match(/https:\/\/agent\.livepeer\.org\/u\/[a-f0-9]+/) || [])[0] || null,
-    token: (text.match(/\b[a-f0-9]{24}\b/) || [])[0] || null,
+    pageUrl: structured?.page_url ?? (text.match(/https:\/\/agent\.livepeer\.org\/u\/[a-f0-9]+/) || [])[0] ?? null,
+    token: structured?.token ?? (text.match(/\b[a-f0-9]{24}\b/) || [])[0] ?? null,
+    expiresAt: structured?.expires_at ?? null,
     text,
   }
 }
 
 export async function getUpload(client, token, waitSeconds = 20) {
-  const text = textOf(await client.callTool({
-    name: 'get_upload', arguments: { token, wait_seconds: waitSeconds },
-  }))
-  const url = (text.match(/https?:\/\/\S+\.(?:mp4|mov|jpg|jpeg|png|heic|webm|m4a|wav)\b/i) || [])[0] || null
-  return { url, pending: !url, text }
+  const { structured, text } = await callStrict(client, 'get_upload', { token, wait_seconds: waitSeconds })
+  const status = structured?.status ?? (/expired/i.test(text) ? 'expired' : null)
+  let url = structured?.url ?? null
+  if (!url) {
+    const m = text.match(/https:\/\/[^\s<>"')\]]+/g) ?? []
+    url = m.find(u => !u.includes('/u/')) ?? null
+  }
+  return { url, status: status ?? (url ? 'done' : 'pending'), pending: !url, mime: structured?.mime ?? null, text, structured }
 }
 
 /**
- * Dispatch a gated capability.
+ * Dispatch a capability and return its text. Throws on a platform error.
  *
  * Nothing in this module decides whether a dispatch is allowed — that is the
- * gate's job, and it runs before this is ever called. Keeping the two apart is
- * what makes the policy auditable in one file.
+ * gate's job, and it runs before this is ever called.
  */
-export async function runCapability(client, capability, args, { timeout = 700, requestTimeoutMs } = {}) {
-  // Two different clocks, and conflating them wastes money. `timeout` is the
-  // server-side render budget; the MCP SDK imposes its own 60s request timeout,
-  // and when that fires the render keeps going and is still billed. So the
-  // transport timeout is always given room beyond the render budget.
-  return textOf(await client.callTool(
-    { name: 'run_capability', arguments: { capability, timeout, ...args } },
-    undefined,
-    { timeout: requestTimeoutMs ?? (timeout * 1000 + 60000) },
-  ))
-}
-
-/** Second belt beneath our own ceiling check — see the note in gate.mjs. */
-export async function setSpendCap(client, capUsd) {
-  return textOf(await client.callTool({
-    name: 'spend_cap', arguments: { action: 'set', cap_usd: capUsd },
-  }))
+export async function runCapability(client, capability, args, { timeout = 280, requestTimeoutMs } = {}) {
+  // Two different clocks: `timeout` is the server-side render budget; the MCP
+  // SDK has its own request timeout, and when that fires the render keeps going
+  // and is still billed. The transport always gets room beyond the budget.
+  const { text } = await callStrict(client, 'run_capability', { capability, timeout, ...args },
+    { timeoutMs: requestTimeoutMs ?? (timeout * 1000 + 10_000) })
+  return text
 }
 
 export async function costReport(client, scope = 'session') {
-  return textOf(await client.callTool({ name: 'get_cost_report', arguments: { scope } }))
+  return (await callStrict(client, 'get_cost_report', { scope })).text
 }

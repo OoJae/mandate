@@ -23,12 +23,15 @@ import { DkgWriteError, DkgHttpError } from '../src/dkg.mjs'
 import { isProhibitedUseClass, PROHIBITED_USE_CLASSES } from '../src/policy.mjs'
 import { grantIriAddress } from '../src/provenance.mjs'
 import { TermError, makeSubject, subjectAddress, agentAddress, nonce16 } from '../src/rdf-term.mjs'
+import { checkInputs, dispatchMode, estimateFromPricing, STATIC_PRICES } from '../src/capabilities.mjs'
+import { renderKey, pendingStore } from '../src/pending.mjs'
 
 // The Livepeer client needs the optional @modelcontextprotocol/sdk peer. Only
 // commands that talk to Livepeer load it.
 async function livepeer() {
   try {
-    return await import('../src/livepeer.mjs')
+    const [client, execute] = await Promise.all([import('../src/livepeer.mjs'), import('../src/execute.mjs')])
+    return { ...client, ...execute }
   } catch (e) {
     if (e.code === 'ERR_MODULE_NOT_FOUND' && /@modelcontextprotocol\/sdk/.test(e.message)) {
       throw new UsageError('This command talks to Livepeer Agent and needs the optional peer:\n  npm install @modelcontextprotocol/sdk')
@@ -37,17 +40,30 @@ async function livepeer() {
   }
 }
 
-// List prices verified via describe_capability. Estimates, labelled as such
-// everywhere they are shown.
-const PRICE_PER_SEC = {
-  'talking-head': 0.168, 'face-swap-video': 0.024, lipsync: 0.14, 'sync-lipsync-v3': 0.13997, 'heygen-twin': 0.105,
+/**
+ * A list-price estimate: live from get_pricing when the Livepeer client is
+ * available, otherwise from the static table. Always an estimate, and labelled.
+ */
+async function priceEstimate(capability, seconds, client) {
+  let row = null
+  let source = 'static list price'
+  if (client) {
+    try {
+      row = await (await livepeer()).getPricing(client, capability)
+      if (row) source = 'live list price'
+    } catch { /* fall back to the static table */ }
+  }
+  row ??= STATIC_PRICES[capability] ?? null
+  if (!row) return { usd: null, source: 'no list price', unit: null }
+  return { usd: estimateFromPricing(row, { seconds }), source, unit: row.unit_kind, perUnit: row.display_price_usd }
 }
-const PRICE_FLAT = { 'face-swap-image': 0.009, 'flux-lora-training': 2.10 }
 
-function estimate(capability, seconds) {
-  if (capability in PRICE_FLAT) return PRICE_FLAT[capability]
-  const perSec = PRICE_PER_SEC[capability]
-  return perSec == null ? null : perSec * seconds
+function renderInputs(flags) {
+  const inputs = { ...(flags.inputs ?? {}) }
+  if (flags.imageUrl) inputs.image_url = flags.imageUrl
+  if (flags.audioUrl) inputs.audio_url = flags.audioUrl
+  if (flags.videoUrl) inputs.video_url = flags.videoUrl
+  return inputs
 }
 
 const shortAddr = a => (a ? `${a.slice(0, 6)}…${a.slice(-4)}` : 'unknown')
@@ -262,95 +278,188 @@ async function cmdRender(flags, out) {
   const territory = flags.territory
   if (flags.execute && flags.at) throw new UsageError('--at decides as of another time and is for dry runs only; it cannot be combined with --execute')
   const at = flags.at ?? new Date().toISOString()
-  const seconds = flags.seconds === undefined ? 6 : Number(flags.seconds)
-  const estimatedUsd = estimate(capability, seconds)
+  const seconds = flags.seconds === undefined ? undefined : Number(flags.seconds)
+  const inputs = renderInputs(flags)
 
-  out.line(c.bold('\nMandate — consent gate\n'))
-  out.line(`  subject     ${subject}`)
-  out.line(`  capability  ${capability}`)
-  out.line(`  use class   ${useClass}`)
-  out.line(`  territory   ${territory ?? c.yellow('not given')}`)
-  out.line(`  estimate    ${estimatedUsd == null ? c.yellow('unknown (no list price)') : `~$${estimatedUsd.toFixed(4)}`} ${c.dim('(list price, not an invoice)')}`)
-
-  // The producer resolves from its own node: the party that must not be able to vouch for itself.
-  const resolver = PRODUCER()
-  out.line(c.dim(`\n  resolving from ${resolver.name}…`))
-  const k = await readKnowledge(resolver, readConfig(), { subject })
-  out.line(c.dim(`  ${k.grants.length} grant(s), ${k.states.length} revocation(s), ${k.derivations.length} trusted derivation(s), read in ${k.consistency.attempts} attempt(s)`))
-
-  const d = decide({ subject, capability, useClass, territory, at, estimatedUsd }, k)
-  printForgeries(out, d.forgeries)
-  printWarnings(out, d.warnings)
-
-  if (!d.permit) {
-    out.line(c.red(`\n  REFUSED — clause: ${d.clause}`))
-    out.line(`  ${clean(d.reason, 400)}`)
-    out.line(c.green(`\n  not spent: ${d.spend.estimateUsd == null ? 'unknown' : `~$${d.spend.estimateUsd.toFixed(4)} at list price`}`) + c.dim(' (the capability was never invoked)'))
-    out.line(c.dim('  No Livepeer call was made.\n'))
-    out.result({ decision: d })
-    return d.clause === 'read-inconsistent' ? EXIT.INCONCLUSIVE : d.clause === 'malformed-request' ? EXIT.USAGE : EXIT.REFUSED
+  if (flags.execute) {
+    const check = checkInputs(capability, inputs, { prompt: flags.prompt })
+    if (!check.ok) {
+      throw new UsageError(check.verified
+        ? `${capability} needs ${check.missing.join(' and ')} (pass --${check.missing[0].replace('_', '-')} or --inputs)`
+        : `${capability} has no verified input schema; pass its inputs explicitly with --inputs '{…}' or --prompt`)
+    }
   }
 
-  out.line(c.green(`\n  PERMITTED under ${d.grantId}`))
-  out.line(c.dim(`  published by ${d.publisher}${d.grantUal ? ` as ${d.grantUal}` : ''}`))
-  if (!flags.execute) {
-    out.line(c.dim('\n  --execute not set; stopping before dispatch (no spend).\n'))
-    out.result({ decision: d, executed: false })
-    return EXIT.OK
+  // Executing needs Livepeer anyway. A dry run uses it for live prices when the
+  // client is installed, unless MANDATE_LIVE_PRICES=0 asks for static prices.
+  let LP = null
+  let client = null
+  if (flags.execute || process.env.MANDATE_LIVE_PRICES !== '0') {
+    try {
+      LP = await livepeer()
+      client = await LP.connect(LP.RAW)
+    } catch (e) {
+      if (flags.execute) throw e
+    }
   }
-
-  const LP = await livepeer()
-  out.line(c.dim('\n  dispatching via run_capability on /api/mcp/raw (no model substitution)…'))
-  const client = await LP.connect(LP.RAW)
-  let text
   try {
-    const inputs = { ...(flags.inputs ?? {}) }
-    if (flags.imageUrl) inputs.image_url = flags.imageUrl
-    if (flags.audioUrl) inputs.audio_url = flags.audioUrl
-    if (flags.videoUrl) inputs.video_url = flags.videoUrl
-    text = await LP.runCapability(client, capability, {
-      source_url: flags.sourceUrl,
-      inputs: Object.keys(inputs).length ? inputs : undefined,
-      prompt: flags.prompt,
-      idempotency_key: flags.idempotencyKey,
-    }, { timeout: 280 })
-  } catch (e) {
-    out.line(c.red(`\n  RENDER FAILED — ${clean(e.message, 400)}\n`))
-    out.result({ decision: d, executed: true, rendered: false, error: clean(e.message, 400) })
-    return EXIT.RENDER_FAILED
+    const price = await priceEstimate(capability, seconds, client)
+    const estimatedUsd = price.usd
+
+    out.line(c.bold('\nMandate — consent gate\n'))
+    out.line(`  subject     ${subject}`)
+    out.line(`  capability  ${capability}`)
+    out.line(`  use class   ${useClass}`)
+    out.line(`  territory   ${territory ?? c.yellow('not given')}`)
+    out.line(`  estimate    ${estimatedUsd == null ? c.yellow(`unknown${price.unit === 'second' && seconds === undefined ? ' (pass --seconds)' : ''}`) : `~$${estimatedUsd.toFixed(4)}`} ${c.dim(`(${price.source}${price.unit === 'second' && seconds ? ` × ${seconds}s` : ''}; not an invoice)`)}`)
+
+    // The producer resolves from its own node: the party that must not be able to vouch for itself.
+    const resolver = PRODUCER()
+    out.line(c.dim(`\n  resolving from ${resolver.name}…`))
+    const k = await readKnowledge(resolver, readConfig(), { subject })
+    out.line(c.dim(`  ${k.grants.length} grant(s), ${k.states.length} revocation(s), ${k.derivations.length} trusted derivation(s), read in ${k.consistency.attempts} attempt(s)`))
+
+    const d = decide({ subject, capability, useClass, territory, at, estimatedUsd }, k)
+    printForgeries(out, d.forgeries)
+    printWarnings(out, d.warnings)
+
+    if (!d.permit) {
+      out.line(c.red(`\n  REFUSED — clause: ${d.clause}`))
+      out.line(`  ${clean(d.reason, 400)}`)
+      out.line(c.green(`\n  $0 spent${d.spend.estimateUsd == null ? '' : `; ~$${d.spend.estimateUsd.toFixed(4)} not spent (${price.source})`}`) + c.dim(' — the capability was never invoked'))
+      out.line(c.dim('  No render was dispatched.\n'))
+      out.result({ decision: d, price })
+      return d.clause === 'read-inconsistent' ? EXIT.INCONCLUSIVE : d.clause === 'malformed-request' ? EXIT.USAGE : EXIT.REFUSED
+    }
+
+    out.line(c.green(`\n  PERMITTED under ${d.grantId}`))
+    out.line(c.dim(`  published by ${d.publisher}${d.grantUal ? ` as ${d.grantUal}` : ''}`))
+    if (!flags.execute) {
+      out.line(c.dim('\n  --execute not set; stopping before dispatch (no spend).\n'))
+      out.result({ decision: d, price, executed: false })
+      return EXIT.OK
+    }
+
+    // The account's own 24h cap is read, never changed.
+    try {
+      const cap = await LP.readSpendCap(client)
+      if (estimatedUsd != null && typeof cap?.remaining_usd === 'number' && estimatedUsd > cap.remaining_usd) {
+        out.line(c.red(`\n  NOT DISPATCHED — ~$${estimatedUsd.toFixed(4)} exceeds the account's remaining 24h budget of $${cap.remaining_usd.toFixed(2)}.\n`))
+        out.result({ decision: d, price, executed: false, spendCap: cap })
+        return EXIT.PAYMENT
+      }
+    } catch (e) {
+      out.line(c.dim(`  note: could not read the account spend cap (${clean(e.message, 120)})`))
+    }
+
+    const describe = await LP.describeCapability(client, capability).catch(() => null)
+    const mode = dispatchMode(describe)
+    const key = renderKey({ grantId: d.grantId, capability, inputs, prompt: flags.prompt, sourceUrl: flags.sourceUrl, seconds })
+    const idempotencyKey = flags.idempotencyKey ?? key
+    const pending = pendingStore()
+    const record = {
+      key, idempotencyKey, status: 'dispatching', createdAt: new Date().toISOString(),
+      subject, capability, useClass, territory, seconds: seconds ?? null, inputs, prompt: flags.prompt ?? null, sourceUrl: flags.sourceUrl ?? null,
+      grantId: d.grantId, grantUal: d.grantUal, estimateUsd: estimatedUsd, mode,
+    }
+    pending.save(record)
+    out.line(c.dim(`\n  pending render ${key}`))
+    out.line(c.dim(`  dispatching ${capability} via run_capability on /api/mcp/raw (${mode}, no model substitution)…`))
+
+    const t0 = Date.now()
+    let rendered
+    try {
+      rendered = await LP.dispatchRender(client, {
+        capability, inputs, prompt: flags.prompt, sourceUrl: flags.sourceUrl, idempotencyKey, mode,
+        onJob: jobId => { pending.save({ ...record, status: 'submitted', jobId }); out.line(c.dim(`  job ${jobId} queued; polling`)) },
+      })
+    } catch (e) {
+      const saved = pending.load(key) ?? record
+      pending.save({ ...saved, status: e.kind === 'timeout' && e.jobId ? 'submitted' : 'failed', jobId: e.jobId ?? saved.jobId ?? null, error: clean(e.message, 600) })
+      out.line(c.red(`\n  RENDER FAILED — ${clean(e.message, 400)}`))
+      if (e.jobId) out.line(c.dim(`  job ${e.jobId}${e.kind === 'timeout' ? ` is still running; run \`mandate record --pending ${key}\` once it finishes` : ''}`))
+      out.line(c.dim(`  Re-running the same command reuses idempotency key ${idempotencyKey}, so a completed render is returned rather than billed again.\n`))
+      out.result({ decision: d, price, executed: true, rendered: false, pending: key, error: clean(e.message, 600), kind: e.kind ?? null, jobId: e.jobId ?? null })
+      return e.kind === 'payment' ? EXIT.PAYMENT : EXIT.RENDER_FAILED
+    }
+    const renderMs = Date.now() - t0
+    pending.save({ ...record, status: 'rendered', jobId: rendered.jobId, mediaUrl: rendered.url, servedCapability: rendered.servedCapability, costUsdEstimated: rendered.costUsdEstimated, replay: rendered.replay, renderMs })
+    out.line(c.dim(`  rendered in ${Math.round(renderMs / 1000)}s${rendered.replay ? ' (idempotent replay: not billed again)' : ''}; recording the derivation before releasing the media…`))
+    if (rendered.servedCapability !== capability) {
+      out.line(c.yellow(`  ⚠ the platform reports ${clean(rendered.servedCapability, 60)} served this render, not ${capability}; it is recorded as served`))
+    }
+    return await commitDerivation(out, pending, pending.load(key), { decision: d, price })
   } finally {
-    await client.close()
+    await client?.close().catch(() => {})
   }
-  const mediaUrl = (text.match(/https?:\/\/\S+?\.(?:mp4|webm|mov|png|jpg|jpeg|webp|wav|mp3)\b/i) || [])[0]
-  if (!mediaUrl) {
-    out.line(c.red('\n  RENDER FAILED — the result carried no media URL.\n'))
-    out.line(c.dim(`  ${clean(text, 600)}`))
-    out.result({ decision: d, executed: true, rendered: false, error: 'no media URL' })
-    return EXIT.RENDER_FAILED
-  }
+}
 
-  // The media is released only once its derivation is anchored.
-  const producer = PRODUCER()
+/** Anchor a rendered file's derivation, then — and only then — print its URL. */
+async function commitDerivation(out, pending, rec, extra = {}) {
   try {
-    const rec = await recordDerivation(producer, derivationsCg(), {
-      outputUrl: mediaUrl, servedCapability: capability, authorizedUnder: d.grantId,
-      billedUsd: estimatedUsd, jobId: (text.match(/mjob_[a-f0-9]+/) || [])[0] ?? null,
+    const r = await recordDerivation(PRODUCER(), derivationsCg(), {
+      outputUrl: rec.mediaUrl, servedCapability: rec.servedCapability ?? rec.capability, authorizedUnder: rec.grantId,
+      billedUsd: rec.costUsdEstimated ?? rec.estimateUsd ?? null, jobId: rec.jobId ?? null,
     })
-    out.line(c.green(`\n  RENDERED  ${clean(mediaUrl, 400)}`))
-    out.line(`  derivation  ${rec.id}`)
-    out.line(`  sha256      ${rec.outputSha256}`)
-    anchoredLines(out, rec)
+    pending.save({ ...rec, status: 'recorded', derivation: { id: r.id, ual: r.ual, txHash: r.txHash, outputSha256: r.outputSha256 } })
+    out.line(c.green(`\n  RENDERED  ${clean(rec.mediaUrl, 400)}`))
+    out.line(`  derivation  ${r.id}`)
+    out.line(`  sha256      ${r.outputSha256}`)
+    anchoredLines(out, r)
     out.line('')
-    out.result({ decision: d, executed: true, rendered: true, mediaUrl, derivation: rec })
+    out.result({ ...extra, executed: true, rendered: true, pending: rec.key, mediaUrl: rec.mediaUrl, jobId: rec.jobId ?? null, derivation: { id: r.id, ual: r.ual, txHash: r.txHash, outputSha256: r.outputSha256, explorer: txLink(r.ual, r.txHash) } })
     return EXIT.OK
   } catch (e) {
+    pending.save({ ...rec, status: 'rendered', error: clean(e.message, 600), stage: e.stage ?? null })
     out.line(c.red('\n  DERIVATION FAILED TO COMMIT — treating this render as failed.'))
     out.line(c.red(`  ${clean(e.message, 400)}`))
     if (e.ual) out.line(c.dim(`  minted but unbound: ${e.ual}${e.txHash ? ` tx ${e.txHash}` : ''}`))
-    out.line(c.dim('  The render was billed but is not accounted for, so its URL is withheld.\n'))
-    out.result({ decision: d, executed: true, rendered: true, derivation: null, error: clean(e.message, 400), stage: e.stage ?? null })
+    out.line(c.dim(`  The render exists and was billed, so its URL is withheld until it is recorded.`))
+    out.line(c.dim(`  Retry with: mandate record --pending ${rec.key}\n`))
+    out.result({ ...extra, executed: true, rendered: true, derivation: null, pending: rec.key, error: clean(e.message, 600), stage: e.stage ?? null })
     return EXIT.DERIVATION_FAILED
   }
+}
+
+/** Finish a render whose derivation did not commit, or list the ones waiting. */
+async function cmdRecord(flags, out) {
+  const pending = pendingStore()
+  if (!flags.pending) {
+    const open = pending.list().filter(r => r.status !== 'recorded')
+    out.line(c.bold(`\n${open.length} pending render(s)\n`))
+    for (const r of open) out.line(`  ${r.key}  ${r.status.padEnd(11)} ${r.capability}  ${r.jobId ?? ''}  ${c.dim(r.createdAt)}`)
+    out.line('')
+    out.result({ pending: open })
+    return EXIT.OK
+  }
+  const rec = pending.load(flags.pending)
+  if (!rec) throw new UsageError(`no pending render ${flags.pending} in ${pending.dir}`)
+  if (rec.status === 'recorded') {
+    out.line(c.dim(`\n  already recorded: ${rec.derivation?.ual}\n`))
+    out.result({ ...rec })
+    return EXIT.OK
+  }
+  if (!rec.mediaUrl) {
+    if (!rec.jobId) {
+      out.line(c.red(`\n  ${rec.key} never produced a job or media (${clean(rec.error ?? rec.status, 200)}); nothing to record.\n`))
+      out.result({ ...rec })
+      return EXIT.RENDER_FAILED
+    }
+    const LP = await livepeer()
+    const client = await LP.connect(LP.RAW)
+    try {
+      const done = await LP.pollJob(client, rec.jobId, { maxWaitMs: 10 * 60_000 })
+      pending.save({ ...rec, status: 'rendered', mediaUrl: done.url, costUsdEstimated: done.structured.cost_usd_estimated ?? null })
+    } catch (e) {
+      pending.save({ ...rec, error: clean(e.message, 600) })
+      out.line(c.red(`\n  job ${rec.jobId}: ${clean(e.message, 300)}\n`))
+      out.result({ ...rec, error: clean(e.message, 600) })
+      return e.kind === 'timeout' ? EXIT.INCONCLUSIVE : EXIT.RENDER_FAILED
+    } finally {
+      await client.close().catch(() => {})
+    }
+  }
+  return commitDerivation(out, pending, pending.load(rec.key))
 }
 
 async function cmdConsent(flags, out) {
@@ -423,7 +532,7 @@ async function cmdBlastRadius(flags, out) {
 
 const COMMAND_FNS = {
   status: cmdStatus, grant: cmdGrant, revoke: cmdRevoke, render: cmdRender,
-  consent: cmdConsent, verify: cmdVerify, 'blast-radius': cmdBlastRadius,
+  consent: cmdConsent, verify: cmdVerify, 'blast-radius': cmdBlastRadius, record: cmdRecord,
 }
 
 function exitFor(e) {

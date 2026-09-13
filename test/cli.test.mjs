@@ -38,7 +38,7 @@ async function mandate(args, { env = {} } = {}) {
     const { stdout, stderr } = await run(process.execPath, [BIN, ...args], {
       cwd: work,
       env: {
-        PATH: process.env.PATH, HOME: work, NO_COLOR: '1',
+        PATH: process.env.PATH, HOME: work, NO_COLOR: '1', MANDATE_LIVE_PRICES: '0',
         MANDATE_HOME: join(work, '.mandate'),
         MANDATE_GRANTOR_HOME: homes.grantor, MANDATE_GRANTOR_PORT: String(grantor.port),
         MANDATE_PRODUCER_HOME: homes.producer, MANDATE_PRODUCER_PORT: String(producer.port),
@@ -58,7 +58,7 @@ function argv(command, defaults, over = {}) {
   return [command, ...Object.entries(flags).filter(([, v]) => v !== null).flatMap(([k, v]) => (v === true ? [`--${k}`] : [`--${k}`, v]))]
 }
 const grantArgs = over => argv('grant', { subject: 'ana', capability: 'talking-head', 'use-class': 'advertising', territory: 'GB', 'max-spend': '5', yes: true, json: true }, over)
-const renderArgs = over => argv('render', { subject: `${ANA}:ana`, capability: 'talking-head', 'use-class': 'advertising', territory: 'GB', json: true }, over)
+const renderArgs = over => argv('render', { subject: `${ANA}:ana`, capability: 'talking-head', 'use-class': 'advertising', territory: 'GB', seconds: '5', json: true }, over)
 
 test('help exits 0; usage errors exit 1', async () => {
   assert.equal((await mandate([])).code, 0)
@@ -198,4 +198,23 @@ test('local state is private to the user', () => {
   const dir = join(work, '.mandate', 'state')
   assert.equal(statSync(dir).mode & 0o777, 0o700)
   for (const f of readdirSync(dir)) assert.equal(statSync(join(dir, f)).mode & 0o777, 0o600)
+})
+
+test('under a ceiling, a per-second capability with no --seconds refuses and says why', async () => {
+  const r = await mandate(renderArgs({ subject: `${ANA}:ana`, seconds: null }))
+  assert.equal(r.code, 2)
+  assert.equal(json(r).decision.clause, 'spend-ceiling')
+  assert.equal(json(r).price.source, 'static list price')
+})
+
+test('render --execute checks required inputs before anything is dispatched', async () => {
+  const r = await mandate(renderArgs({ capability: 'sync-lipsync-v3', 'image-url': 'https://x.test/a.jpg', execute: true }))
+  assert.equal(r.code, 1)
+  assert.match(json(r).error, /needs audio_url/)
+})
+
+test('record with nothing pending lists nothing', async () => {
+  const r = await mandate(['record', '--json'])
+  assert.equal(r.code, 0)
+  assert.deepEqual(json(r).pending, [])
 })
