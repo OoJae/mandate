@@ -24,17 +24,18 @@ export const EXIT = Object.freeze({
   PAYMENT: 10,
 })
 
+/** One line per exit code, kept in the same words as the exit-code tables in README.md and docs/CONTRACTS.md. */
 export const EXIT_HELP = [
-  [EXIT.OK, 'success, permitted, CLEAR'],
-  [EXIT.USAGE, 'usage error'],
+  [EXIT.OK, 'success, permitted, CLEAR; help and --version'],
+  [EXIT.USAGE, 'usage or configuration error (a bad flag, a malformed MANDATE_* graph id, a publish confirmation needed off a terminal or with --json and no --yes, an --idempotency-key that differs from the one a possibly billed render was sent with)'],
   [EXIT.REFUSED, 'refused by the gate; TAINTED or UNKNOWN'],
-  [EXIT.CONSENT_UNCONFIRMED, 'consent not confirmed (transcription failed or terms missing)'],
-  [EXIT.DERIVATION_FAILED, 'render succeeded but its derivation failed to commit'],
-  [EXIT.RENDER_FAILED, 'render failed'],
+  [EXIT.CONSENT_UNCONFIRMED, 'consent not confirmed: transcription failed, no first-person consent, terms not heard, not a reading of the consent script with no typed confirmation given, or a typed confirmation impossible (off a terminal, or --json)'],
+  [EXIT.DERIVATION_FAILED, 'rendered, but its derivation failed to commit (any stage, including unbound, resume-refused and the retryable resume-unverified; run mandate record --pending <key>)'],
+  [EXIT.RENDER_FAILED, 'render failed, or a rerun found the render already submitted with a job id, rendered, or being dispatched by another process'],
   [EXIT.DKG_WRITE_FAILED, 'DKG write failed before anchoring'],
-  [EXIT.DKG_ANCHOR_FAILED, 'DKG anchor not confirmed'],
+  [EXIT.DKG_ANCHOR_FAILED, 'grant or revocation anchor not confirmed: minted but unbound, refused at publish, or unknown after send (the result names the grant or state id and asset to check)'],
   [EXIT.CONSENT_CONTRADICTED, 'consent contradicted; never overridable'],
-  [EXIT.INCONCLUSIVE, 'node unreachable or read inconsistent'],
+  [EXIT.INCONCLUSIVE, 'INCONCLUSIVE: node unreachable, stale or read incomplete; a media download, node token or ~/.mandate state or pending file that could not be read; a Livepeer failure that is not about credentials; a render whose outcome is unknown'],
   [EXIT.PAYMENT, 'Livepeer payment or credential problem'],
 ]
 
@@ -137,14 +138,14 @@ export const FLAGS = [
   ['use-class', 'string', ['render'], 'the use class of this render', { required: ['render'] }],
   ['territory', 'territories', ['grant', 'consent'], 'ISO country codes the grant covers, in capitals; omit for unrestricted (anywhere)'],
   ['territory', 'territory', ['render'], 'the ISO country code this render is for, in capitals'],
-  ['forbid', 'useClasses', ['grant'], `use classes to forbid explicitly. These declared labels are always refused, whatever a grant says: ${PROHIBITED_USE_CLASSES.join(', ')} (and any label containing one as a hyphenated word). Only the label is checked, never the prompt or media`],
+  ['forbid', 'useClasses', ['grant'], `use classes to forbid explicitly. These declared labels are always refused, whatever a grant says: ${PROHIBITED_USE_CLASSES.join(', ')} (and their inflections, or any label containing one as a word, including joined or digit-split words). Only the label is checked, never the prompt or media`],
   ['max-spend', 'decimal', ['grant'], 'lifetime spend ceiling in USD across renders under this grant'],
   ['valid-from', 'iso', ['grant'], 'grant start time (default now)'],
   ['valid-until', 'iso', ['grant'], 'grant end time (default 90 days)'],
   ['with-consent', 'bool', ['grant'], 'capture a consent clip on a phone before granting'],
   ['consent-kind', enumOf(['video', 'audio']), ['grant', 'consent'], 'what the phone link records (default video)'],
-  ['force', 'bool', ['grant'], 'grant even if the spoken consent does not mention every requested term. Never overrides a failed transcription, a missing first-person consent or a contradiction; a forced grant is published without the clip hash'],
-  ['yes', 'bool', ['grant', 'revoke'], 'publish without the typed "publish" confirmation (required when not on a terminal). Never skips confirming a consent clip\'s transcript and unchecked terms'],
+  ['force', 'bool', ['grant'], 'go on to a typed confirmation even if the requested terms were not all heard in a clip that is not a reading of the consent script. Never overrides a failed transcription, a missing first-person consent or a contradiction; only a reading of the script is published with the clip hash'],
+  ['yes', 'bool', ['grant', 'revoke'], 'publish without the typed "publish" confirmation (required when not on a terminal). Never skips confirming a consent clip that is not a reading of the consent script, or terms the script does not state'],
 
   ['seconds', 'decimal', ['render'], 'expected output duration in seconds; required for a cost estimate on per-second capabilities'],
   ['at', 'iso', ['render'], 'decide as of this time (dry runs only; refused with --execute)'],

@@ -254,3 +254,86 @@ test('blast radius counts unreadable trusted records and totals exactly', () => 
   assert.equal(blastRadius('urn:g', [d(0.1), d(0.2)]).totalBilledUsd, 0.3)
   assert.equal(blastRadius('urn:g', [d(0.1)]).unreadable, 0)
 })
+
+/* Round two: what was read is judged first, and hand-built knowledge fails closed. */
+
+test('a grant read with its owner\'s revocation is TAINTED / REVOKED, even when listed as unresolved', async () => {
+  // Sam publishes his grant and his own revocation into a graph this verifier reads, but not his own grants graph.
+  const sam = grant({ owner: STRANGER, local: 'sam', permitsCapability: ['talking-head'] })
+  const k = await knowledgeOf([grantKa(sam, { publisher: STRANGER }), revocationKa(sam.id, { publisher: STRANGER }), edge({ authorizedUnder: sam.id })])
+  assert.equal(k.grants.length, 1)
+  const r = verifyKnowledge({ ...k, unresolvedGrants: [sam.id] }, SHA, { now: NOW })
+  assert.equal(r.verdict, TAINTED)
+  assert.equal(r.subStatus, 'REVOKED')
+  assert.doesNotMatch(r.reason, /does not read/)
+  const dup = await knowledgeOf([grantKa(sam, { publisher: STRANGER }), grantKa(sam, { publisher: STRANGER }), edge({ authorizedUnder: sam.id })])
+  assert.equal(verifyKnowledge({ ...dup, unresolvedGrants: [sam.id] }, SHA, { now: NOW }).subStatus, 'MALFORMED', 'a duplicate that was read taints too')
+  const live = await knowledgeOf([grantKa(sam, { publisher: STRANGER }), edge({ authorizedUnder: sam.id })])
+  assert.equal(verifyKnowledge(live, SHA, { now: NOW }).verdict, CLEAR)
+  const unread = verifyKnowledge({ ...live, unresolvedGrants: [sam.id] }, SHA, { now: NOW })
+  assert.equal(unread.verdict, UNKNOWN, 'a live grant whose owner\'s graph is unread is never CLEAR')
+  assert.match(unread.reason, /revocation published there would not be seen/)
+  assert.equal(unread.grantor, STRANGER)
+})
+
+test('NOT_YET_VALID when now is before validFrom, even if the producer records a render inside the window', async () => {
+  const future = grant({ permitsCapability: ['talking-head'], validFrom: '2030-01-01T00:00:00Z', validUntil: '2031-01-01T00:00:00Z' })
+  const k = await knowledgeOf([grantKa(future), edge({ authorizedUnder: future.id, derivedAt: '2030-06-01T00:00:00Z' })])
+  const r = verifyKnowledge(k, SHA, { now: NOW })
+  assert.equal(r.verdict, TAINTED)
+  assert.equal(r.subStatus, 'NOT_YET_VALID')
+  assert.equal(verifyKnowledge(k, SHA, { now: '2030-07-01T00:00:00Z' }).verdict, CLEAR)
+})
+
+test('the headline is the most serious sub-status, whichever edge sorts first', async () => {
+  const g2 = grant({ permitsCapability: ['talking-head'], validUntil: '2027-06-01T00:00:00Z' })
+  const k = await knowledgeOf([grantKa(g), grantKa(g2), revocationKa(g2.id), edge(), edge({ authorizedUnder: g2.id })])
+  // UALs set so the EXPIRED edge (under g) sorts before the REVOKED one (under g2).
+  const derivations = k.derivations.map(d => ({ ...d, ual: d.authorizedUnder === g.id ? 'did:dkg:base:84532/a/1' : 'did:dkg:base:84532/b/1' }))
+  const r = verifyKnowledge({ ...k, derivations }, SHA, { now: '2027-01-01T00:00:00Z' })
+  assert.deepEqual(r.judgements.map(j => j.subStatus), ['EXPIRED', 'REVOKED'])
+  assert.equal(r.subStatus, 'REVOKED')
+  assert.equal(r.grantId, g2.id)
+  assert.match(r.reason, /revoked/)
+})
+
+test('a malformed record from a trusted producer taints the file even without a trusted flag (older knowledge)', async () => {
+  const k = await knowledgeOf([grantKa(g), edge()])
+  const older = { kind: 'malformed', detail: 'missing derivedAt', id: 'urn:mandate:derivation:x', ual: 'did:dkg:base:84532/x/1',
+    publisher: PRODUCER, claims: { outputSha256: [SHA], authorizedUnder: [g.id] } }
+  const r = verifyKnowledge({ ...k, forgeries: [older] }, SHA, { now: NOW })
+  assert.equal(r.verdict, TAINTED)
+  assert.equal(r.subStatus, 'MALFORMED')
+  assert.equal(verifyKnowledge({ ...k, forgeries: [{ ...older, publisher: STRANGER }] }, SHA, { now: NOW }).verdict, CLEAR)
+  assert.equal(verifyKnowledge({ ...k, forgeries: [{ ...older, trusted: false }] }, SHA, { now: NOW }).verdict, CLEAR)
+})
+
+test('hand-built knowledge without a forgeries list is INCONCLUSIVE', async () => {
+  const k = await knowledgeOf([grantKa(g), edge()])
+  for (const forgeries of [undefined, null, 'none']) {
+    const r = verifyKnowledge({ ...k, forgeries }, SHA, { now: NOW })
+    assert.equal(r.verdict, INCONCLUSIVE, String(forgeries))
+    assert.match(r.reason, /knowledge\.forgeries is not a list/)
+  }
+})
+
+test('the grantor\'s untiered or malformed state revokes in verify too', async () => {
+  const k = await knowledgeOf([grantKa(g), edge()])
+  const st = over => ({ id: 'urn:mandate:state:1', stateOf: g.id, state: 'revoked', publisher: ANA, ...over })
+  for (const s of [st({}), st({ state: 'active' }), st({ state: 'active', tier: 'vm', malformed: true })]) {
+    const r = verifyKnowledge({ ...k, states: [s] }, SHA, { now: NOW })
+    assert.equal(r.verdict, TAINTED, JSON.stringify(s))
+    assert.equal(r.subStatus, 'REVOKED', JSON.stringify(s))
+  }
+  assert.equal(verifyKnowledge({ ...k, states: [st({ publisher: STRANGER })] }, SHA, { now: NOW }).verdict, CLEAR)
+})
+
+test('an edge hash in uppercase hex is the same file', async () => {
+  const g2 = grant({ permitsCapability: ['talking-head'] })
+  const k = await knowledgeOf([grantKa(g), grantKa(g2), revocationKa(g2.id), edge(), edge({ authorizedUnder: g2.id })])
+  const derivations = k.derivations.map(d => (d.authorizedUnder === g2.id ? { ...d, outputSha256: SHA.toUpperCase() } : d))
+  const r = verifyKnowledge({ ...k, derivations }, SHA, { now: NOW })
+  assert.equal(r.judgements.length, 2)
+  assert.equal(r.verdict, TAINTED)
+  assert.equal(r.subStatus, 'REVOKED')
+})

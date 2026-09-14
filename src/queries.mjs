@@ -70,13 +70,20 @@ export function metaQuery(contextGraphId, { limit, publisher, offset = 0 }) {
 
 const UAL_IRI = /^did:dkg:[a-z0-9]+:\d+\/0x[0-9a-fA-F]{40}\/\d+$/
 
-/** Anchor rows for specific UALs — to attach transactions to reported forgeries. */
-export function metaForUalsQuery(contextGraphId, uals, { limit }) {
+/**
+ * Anchor rows for specific UALs — to attach transactions to reported forgeries.
+ * `merkleRoot: true` also asks for `dkg:merkleRoot`, which the writer compares
+ * with the root it sealed. The resolver does not ask for it: it has no sealed
+ * root to compare, and an extra row per asset would only use up its row limits.
+ * (A live v10.0.16 node writes it on the UAL as bare hex, checked 2026-09-14.)
+ */
+export function metaForUalsQuery(contextGraphId, uals, { limit, merkleRoot = false }) {
   if (!uals.length || uals.some(u => !UAL_IRI.test(u))) throw new Error('metaForUalsQuery needs valid UALs')
+  const predicates = merkleRoot ? `${metaPredicates()}, <${DKG}merkleRoot>` : metaPredicates()
   return `SELECT ?s ?p ?o WHERE {
   GRAPH <${cgIri(contextGraphId)}/_meta> { ?s ?p ?o }
   FILTER(?s IN (${uals.map(u => `<${u}>`).join(', ')}))
-  FILTER(?p IN (${metaPredicates()}))
+  FILTER(?p IN (${predicates}))
 } LIMIT ${limit + 1}`
 }
 

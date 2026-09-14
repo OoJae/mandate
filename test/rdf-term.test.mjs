@@ -107,3 +107,26 @@ test('the decimal writer never writes a positive amount as 0, and never rounds o
   assert.equal(asDecimal(3.36e-7), 3.36e-7, 'a number read as a decimal is not rounded')
   assert.throws(() => decimalTerm(1e21), TermError)
 })
+
+test('a positive amount too small for any micro-dollar digit is written as one micro-dollar, never 0', () => {
+  for (const v of [1e-12, 1e-13, 9.9e-13, Number.MIN_VALUE]) {
+    assert.equal(decimalTerm(v), `"0.000001"^^<${XSD}decimal>`, String(v))
+  }
+  assert.equal(decimalTerm(0), `"0"^^<${XSD}decimal>`)
+})
+
+test('writer and reader agree on years 0000-9999 in UTC and on real offsets', () => {
+  for (const bad of ['9999-12-31T23:00:00-05:00', '0000-01-01T00:30:00+01:00', '2026-01-01T10:00:00+14:30', '2026-01-01T10:00:00-14:01']) {
+    assert.ok(Number.isNaN(asDateTime(bad)), bad)
+    assert.throws(() => dateTimeTerm(bad), TermError, bad)
+  }
+  for (const bad of [new Date('+010000-01-01T00:00:00Z'), new Date('-000001-12-31T23:59:59Z'), new Date(NaN)]) {
+    assert.throws(() => dateTimeTerm(bad), TermError, String(bad))
+  }
+  for (const ok of ['0000-01-01T00:00:00Z', '9999-12-31T23:59:59.999Z', '9999-12-31T09:00:00-14:00', '2026-01-01T10:00:00+14:00',
+    new Date('9999-12-31T23:59:59.999Z')]) {
+    const term = dateTimeTerm(ok)
+    const ms = ok instanceof Date ? ok.getTime() : Date.parse(ok)
+    assert.equal(asDateTime(term), ms, String(ok))
+  }
+})

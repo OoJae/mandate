@@ -17,6 +17,12 @@
  * or the replacement does not parse. A refactor must update the list rather
  * than quietly drop a guard from it.
  *
+ * A timeout is not a kill. A run that is still going at --timeout-ms, or that
+ * ends with no failing test but with tests cancelled (node's per-test timeout),
+ * only shows that something hung, which proves nothing about the guard: an
+ * unrelated hang would look the same. Such a mutant is reported as TIMEOUT and
+ * fails the check, so its test must be made to fail on its own deadline.
+ *
  * Test selection follows relative imports and path strings from each test file
  * (including `${SRC}gate.mjs` style dynamic imports and spawned bin scripts) to
  * every module it can reach. An entry may name its own `tests` instead. Files
@@ -170,12 +176,50 @@ function testEnv() {
   return env
 }
 
+/** node --test summary lines, spec (`ℹ fail 2`) or TAP (`# fail 2`). */
+function countLine(line, counts) {
+  const m = /^(?:ℹ|#) (tests|pass|fail|cancelled) (\d+)\s*$/.exec(line)
+  if (m) counts[m[1]] = Number(m[2])
+}
+
+/**
+ * How a finished test run judged a mutant. Only a failing test is a kill. A run
+ * cut off by our timeout, or one whose only non-passing tests were cancelled
+ * (timed out inside node), is a timeout. A non-zero exit with no summary at all
+ * (the runner itself crashed) is still a kill, as before: node reports a test
+ * file that throws while loading as a failing test, so this is rare.
+ */
+export function judgeRun(r, timeoutMs) {
+  if (r.timedOut) return { status: 'timeout', detail: `the tests did not finish within ${timeoutMs}ms` }
+  if (r.code === 0) return null
+  const { fail, cancelled } = r.counts ?? {}
+  if (fail === 0 && cancelled > 0) return { status: 'timeout', detail: `${cancelled} test(s) timed out and none failed` }
+  return { status: 'killed' }
+}
+
+/**
+ * The check's exit code from its tallies. Anything that is not a kill fails it:
+ * a survivor, a hang, an entry that no longer applies, or one that does not parse.
+ */
+export function exitCodeFor({ survived = 0, timedOut = 0, stale = 0, invalid = 0 }) {
+  return survived || timedOut || stale || invalid ? 1 : 0
+}
+
 function run(cmd, args, { cwd, timeoutMs }) {
   return new Promise(done => {
     const started = Date.now()
     const child = spawn(cmd, args, { cwd, env: testEnv(), stdio: ['ignore', 'pipe', 'pipe'], detached: process.platform !== 'win32' })
     let output = ''
-    const keep = d => { output = (output + d).slice(-20_000) }
+    // The summary counts are read line by line as they arrive: the tail kept for
+    // display can be pushed past them by long failure traces.
+    const counts = {}
+    let partial = ''
+    const keep = d => {
+      output = (output + d).slice(-20_000)
+      const lines = (partial + d).split('\n')
+      partial = lines.pop()
+      for (const line of lines) countLine(line, counts)
+    }
     child.stdout.on('data', keep)
     child.stderr.on('data', keep)
     let timedOut = false
@@ -185,7 +229,8 @@ function run(cmd, args, { cwd, timeoutMs }) {
     }, timeoutMs)
     child.on('close', code => {
       clearTimeout(timer)
-      done({ code, timedOut, output, ms: Date.now() - started })
+      countLine(partial, counts)
+      done({ code, timedOut, output, counts, ms: Date.now() - started })
     })
   })
 }
@@ -198,16 +243,22 @@ async function runMutant(m, copy, tests, timeoutMs, slow) {
   writeFileSync(path, mutated)
   try {
     // A mutant that does not parse would be "killed" by any test; that says nothing about the guard.
-    const check = await run(process.execPath, ['--check', m.file], { cwd: copy, timeoutMs: 30_000 })
-    if (check.code !== 0) return { status: 'invalid', ms: check.ms, detail: check.output.trim().split('\n').slice(0, 4).join(' | ') }
+    // Only JavaScript can be checked this way: a guard in a workflow file is text
+    // its test reads, and node --check would call any YAML invalid.
+    let ms = 0
+    if (/\.[cm]?js$/.test(m.file)) {
+      const check = await run(process.execPath, ['--check', m.file], { cwd: copy, timeoutMs: 30_000 })
+      if (check.code !== 0) return { status: 'invalid', ms: check.ms, detail: check.output.trim().split('\n').slice(0, 4).join(' | ') }
+      ms = check.ms
+    }
     // Fast files first; slow ones only for a mutant the fast ones did not kill.
     const phases = [tests.filter(t => !slow.has(t)), tests.filter(t => slow.has(t))].filter(p => p.length)
-    let ms = check.ms
     for (const files of phases) {
       const r = await run(process.execPath, ['--test', ...files], { cwd: copy, timeoutMs })
       ms += r.ms
-      if (r.timedOut) return { status: 'killed', ms, detail: `the tests did not finish within ${timeoutMs}ms` }
-      if (r.code !== 0) {
+      const verdict = judgeRun(r, timeoutMs)
+      if (verdict?.status === 'timeout') return { ...verdict, ms, files }
+      if (verdict) {
         const fails = r.output.match(/ℹ fail (\d+)/)?.[1]
         const failing = [...r.output.matchAll(/^not ok \d+ - (.+)$/gm)].map(m => m[1]).slice(0, 3)
         return { status: 'killed', ms, detail: `${fails ? `${fails} failing test(s)` : `exit ${r.code}`}${failing.length ? `: ${failing.join('; ').slice(0, 160)}` : ''}`, files }
@@ -260,7 +311,7 @@ async function main() {
         for (let p = queue.shift(); p; p = queue.shift()) {
           const r = await runMutant(p.m, copy, p.tests, o.timeoutMs, slow)
           results.push({ id: p.m.id, file: p.m.file, guard: p.m.guard, tests: p.tests, ...r })
-          const label = { killed: 'killed   ', survived: 'SURVIVED ', invalid: 'INVALID  ' }[r.status]
+          const label = { killed: 'killed   ', survived: 'SURVIVED ', invalid: 'INVALID  ', timeout: 'TIMEOUT  ' }[r.status]
           console.log(`${label} ${p.m.id} (${(r.ms / 1000).toFixed(1)}s${r.detail ? `, ${r.detail}` : ''})${r.status === 'killed' ? '' : `\n          ${p.m.file}: ${p.m.guard}`}`)
         }
       }))
@@ -272,6 +323,7 @@ async function main() {
 
   const survived = results.filter(r => r.status === 'survived')
   const invalid = results.filter(r => r.status === 'invalid')
+  const timedOut = results.filter(r => r.status === 'timeout')
   if (o.json) {
     writeFileSync(o.json, `${JSON.stringify({
       baselineFailed: Boolean(baselineFailed), stale: stale.map(p => ({ id: p.m.id, file: p.m.file, reason: p.stale })),
@@ -282,13 +334,16 @@ async function main() {
     console.log(`\nThe unmutated test suite fails in the copy, so no mutant can be judged:\n${baselineFailed}`)
     return 2
   }
-  console.log(`\n${results.length - survived.length - invalid.length} killed, ${survived.length} survived, ${invalid.length} invalid, ${stale.length} stale`)
+  const killed = results.filter(r => r.status === 'killed')
+  console.log(`\n${killed.length} killed, ${survived.length} survived, ${timedOut.length} timed out, ${invalid.length} invalid, ${stale.length} stale`)
   if (survived.length) console.log(`A guard can be removed without any test failing: ${survived.map(r => r.id).join(', ')}`)
+  if (timedOut.length) console.log(`A guard's removal only made the tests hang, which is not a kill: ${timedOut.map(r => r.id).join(', ')}. Give its test a deadline of its own that fails.`)
   if (stale.length || invalid.length) console.log('Update scripts/mutations.json so every entry applies once and still parses.')
-  return survived.length || stale.length || invalid.length ? 1 : 0
+  return exitCodeFor({ survived: survived.length, timedOut: timedOut.length, stale: stale.length, invalid: invalid.length })
 }
 
-main().then(code => { process.exitCode = code }, e => {
+// Run only as a script, so a test can import judgeRun without starting a check.
+if (process.argv[1] && resolve(process.argv[1]) === resolve(import.meta.filename)) main().then(code => { process.exitCode = code }, e => {
   console.error(`mutation check could not run: ${e.message}`)
   process.exitCode = 2
 })

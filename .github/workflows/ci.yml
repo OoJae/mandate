@@ -21,13 +21,25 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ matrix.node }}
-      - run: npm ci
+      # No dependency install script runs in CI: the suite needs none (it imports
+      # only n3 and the MCP SDK, both plain JavaScript), and a compromised
+      # dependency's install script would otherwise run with the checkout.
+      - run: npm ci --ignore-scripts
       - name: Unit, adversarial and CLI tests (no network)
         run: npm test
       - name: Namespace documents are current
         run: |
           node scripts/build-vocab-docs.mjs
-          git diff --exit-code -- docs/ns
+          # git diff alone ignores untracked files, so a new version directory
+          # nobody committed (the ontology's versionIRI) would pass. Porcelain
+          # status lists modified and untracked paths alike.
+          changes="$(git status --porcelain --untracked-files=all -- docs/ns)"
+          if [ -n "$changes" ]; then
+            echo "docs/ns is not what scripts/build-vocab-docs.mjs generates; run it and commit:"
+            echo "$changes"
+            git diff -- docs/ns
+            exit 1
+          fi
       - name: Packed tarball works with no peers installed
         run: node scripts/smoke-pack.mjs
       # The published package has no runtime dependencies, so this covers the
@@ -41,12 +53,15 @@ jobs:
   mutation:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    # About 300 mutants; most runs take seconds.
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: '24'
-      - run: npm ci
+      - run: npm ci --ignore-scripts
       - name: Every security guard is protected by a failing test
-        run: npm run test:mutation
+        # A hang is reported as TIMEOUT and fails the job, never counted as a kill,
+        # so there is no reason to wait the default five minutes for one.
+        run: npm run test:mutation -- --timeout-ms 120000

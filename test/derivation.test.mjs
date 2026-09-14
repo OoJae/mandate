@@ -70,7 +70,8 @@ test('a caller-supplied id or name is validated before anything is fetched or wr
 })
 
 test('billedUsd must be finite and non-negative, or null, and is checked before the media is downloaded', async () => {
-  for (const billedUsd of [-1, NaN, Infinity, '-0.5', '1e3', ' 5', true, {}]) {
+  // 1e21 and Number.MAX_VALUE are finite but cannot be written as a plain decimal.
+  for (const billedUsd of [-1, NaN, Infinity, 1e21, Number.MAX_VALUE, '-0.5', '1e3', ' 5', '00.5', true, {}]) {
     let fetched = 0
     const n = fakeNode()
     const fetch = async () => { fetched++; return new Response('bytes') }
@@ -79,7 +80,7 @@ test('billedUsd must be finite and non-negative, or null, and is checked before 
     assert.equal(fetched, 0, `${String(billedUsd)}: nothing downloaded`)
     assert.equal(n.calls.length, 0)
   }
-  for (const billedUsd of [0, 0.25, '4.50', null, undefined]) {
+  for (const billedUsd of [0, 0.25, 999999999999999.9, '4.50', null, undefined]) {
     const n = fakeNode()
     await recordDerivation(n, CG, { ...base, billedUsd })
     const amount = n.calls.at(-1).quads.find(q => q.predicate.endsWith('billedUsd'))
@@ -100,6 +101,18 @@ test('fetchOptions reach the hashing of outputUrl', async () => {
   await assert.rejects(recordDerivation(fakeNode(), CG, { ...base, outputSha256: undefined, outputUrl: 'https://media.example/out.mp4', fetchOptions: { fetch: tooSmall, maxBytes: 8 } }), /limit/)
 })
 
+test('lastPublishUnknown reaches the node and must be a boolean', async () => {
+  const n = fakeNode()
+  await recordDerivation(n, CG, { ...base, id: ID, resume: true, lastPublishUnknown: true })
+  assert.equal(n.calls[0].lastPublishUnknown, true)
+  const n2 = fakeNode()
+  await recordDerivation(n2, CG, base)
+  assert.equal(n2.calls[0].lastPublishUnknown, false, 'defaults to false')
+  const n3 = fakeNode()
+  await assert.rejects(recordDerivation(n3, CG, { ...base, lastPublishUnknown: 'yes' }), /lastPublishUnknown must be true or false/)
+  assert.equal(n3.calls.length, 0)
+})
+
 test('a failed anchor carries the derivation id and asset name so a retry can resume the same asset', async () => {
   const fail = new DkgWriteError('publishing did not confirm', { name: NAME, stage: 'publish-transport', mayHaveSent: true })
   const n = fakeNode({ fail })
@@ -116,6 +129,10 @@ test('reconcile counts only trusted derivation edges', () => {
 
   const unmarked = reconcile({ billedJobs: [{ jobId: 'mjob_a' }], derivations: [{ jobId: 'mjob_a' }] })
   assert.equal(unmarked.complete, false, 'an edge not marked trusted is not counted')
+  for (const trusted of ['true', 1]) {
+    const loose = reconcile({ billedJobs: [{ jobId: 'mjob_a' }], derivations: [{ jobId: 'mjob_a', trusted }] })
+    assert.equal(loose.complete, false, `trusted: ${JSON.stringify(trusted)} is not trusted === true`)
+  }
 
   const ok = reconcile({ billedJobs, derivations: [{ jobId: 'mjob_a', trusted: true }, { jobId: 'mjob_b', trusted: true }] })
   assert.equal(ok.complete, true)

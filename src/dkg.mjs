@@ -15,6 +15,7 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { asIri, asString } from './rdf-term.mjs'
 import { DKG, metaForUalsQuery, vmPrefix } from './queries.mjs'
+import { anchorsFromMeta } from './provenance.mjs'
 
 export class DkgHttpError extends Error {
   constructor(message, { status, path, body } = {}) {
@@ -30,6 +31,9 @@ export class NodeTokenError extends Error {}
 
 /** A read returned more rows than the caller allowed; the result is incomplete, so nothing may be concluded from it. */
 export class ReadTruncatedError extends Error {}
+
+/** An anchor could not be read at all, as opposed to read and found wanting. */
+class AnchorUnreadableError extends Error {}
 
 /**
  * A response body was larger than the client allows. It extends
@@ -49,8 +53,10 @@ export class ResponseTooLargeError extends ReadTruncatedError {
  * A write stopped before its asset was confirmed on-chain.
  *
  * `stage` says where: create, share, author, publish, unbound (minted on-chain
- * but not bound to the context graph), or publish-transport (the node lost its
- * chain connection after a transaction may already have been sent). When a UAL
+ * but not bound to the context graph), publish-transport (the publish answer
+ * could not be trusted and a transaction may already have been sent),
+ * resume-refused (the node's record of an existing asset rules out continuing
+ * it) or resume-unverified (it could not be judged now; retry later). When a UAL
  * or transaction exists it is carried here, so the operator can see what was
  * spent instead of retrying blind and paying twice.
  */
@@ -82,7 +88,13 @@ export function readToken(home) {
 
 const ASSET_NAME = /^[^\s/<>"{}|^`\\]{1,256}$/
 
-/** A chain-confirmed UAL. A tentative, local-only publish gets a `/t<opId>` suffix and never matches. */
+/**
+ * The shape of a chain-confirmed UAL. Only an unscoped tentative publish gets a
+ * `/t<opId>` suffix, which never matches. A named (graph-scoped) asset keeps its
+ * reserved plain UAL while still tentative (dkg-publisher.js sets
+ * `ual = graphPublish?.scope.ual ?? .../t<opId>`), so this shape alone proves
+ * nothing: the _meta anchor's "confirmed" status is what rejects those.
+ */
 const CONFIRMED_UAL = /^did:dkg:[a-z0-9]+:\d+\/(0x[0-9a-fA-F]{40})\/(\d+)$/
 
 /** Largest response body read by default. Real query answers are a few MiB at the 5000-row limit. */
@@ -90,14 +102,29 @@ export const MAX_RESPONSE_BYTES = 32 * 1024 * 1024
 
 const bareHex = v => typeof v === 'string' ? v.trim().toLowerCase().replace(/^0x/, '') : ''
 
-/** Read a response body, stopping at `limit` bytes. Returns null when the body is larger. */
+/** Statuses whose responses carry no body by definition (Fetch spec), so a null body is not an unknown size. */
+const NULL_BODY_STATUSES = new Set([101, 103, 204, 205, 304])
+
+/**
+ * Read a response body, stopping at `limit` bytes. Returns null when the body is
+ * larger, or when its size cannot be bounded without buffering all of it.
+ */
 async function readCapped(res, limit) {
-  const declared = Number(res.headers?.get?.('content-length'))
+  // headers.get returns null for a missing header and Number(null) is 0, so a
+  // missing length must not read as a declared empty body.
+  const raw = res.headers?.get?.('content-length')
+  const declared = typeof raw === 'string' && /^\s*\d+\s*$/.test(raw) ? Number(raw) : NaN
   if (Number.isFinite(declared) && declared > limit) {
     await res.body?.cancel?.().catch(() => {})
     return null
   }
   if (!res.body?.getReader) {
+    // Only an injected fetch gets here: undici always gives a stream. text()
+    // buffers everything before its size is known, so it is called only when a
+    // declared length already bounds it. Fail closed otherwise: an injected
+    // fetch must return a streaming body or a content-length.
+    if (!res.body && NULL_BODY_STATUSES.has(res.status)) return ''
+    if (!Number.isFinite(declared)) return null
     const text = await res.text()
     return Buffer.byteLength(text) > limit ? null : text
   }
@@ -180,7 +207,7 @@ export class DkgNode {
       throw new DkgHttpError(`${this.name} ${method} ${path}: the response was cut off (${code ?? e.message})`, { status: 0, path })
     }
     if (text === null) {
-      throw new ResponseTooLargeError(`${this.name} ${method} ${path} -> ${res.status}: the response is larger than ${maxBytes} bytes; refusing to read it`,
+      throw new ResponseTooLargeError(`${this.name} ${method} ${path} -> ${res.status}: the response is larger than ${maxBytes} bytes, or its size cannot be bounded; refusing to read it`,
         { status: res.status, path, limit: maxBytes })
     }
     let parsed
@@ -263,16 +290,23 @@ export class DkgNode {
    * vm-confirmed: verified, never published again). Resuming continues the
    * content already sealed under that name, not `quads`: a retry is meant to
    * finish the earlier write, and the seal cannot be changed anyway.
+   *
+   * `lastPublishUnknown` says an earlier publish of this asset may have sent a
+   * transaction (its outcome was never learned). Resume then never publishes:
+   * a shared asset is left for the node to show confirmed, and the call throws
+   * the retryable `resume-unverified`.
    */
-  async sealShareAnchor({ name, contextGraphId, quads, expectAuthor, resume = false, shareRetries = 3, sleep = ms => new Promise(r => setTimeout(r, ms)) }) {
+  async sealShareAnchor({ name, contextGraphId, quads, expectAuthor, resume = false, lastPublishUnknown = false, shareRetries = 3, sleep = ms => new Promise(r => setTimeout(r, ms)) }) {
     if (typeof name !== 'string' || !ASSET_NAME.test(name)) throw new DkgWriteError(`invalid asset name: ${JSON.stringify(name)}`, { name, stage: 'create' })
     if (!Array.isArray(quads) || quads.length === 0) throw new DkgWriteError('no quads to write', { name, stage: 'create' })
+    // A truthy string must not quietly mean "safe to publish again", nor a typo mean the opposite.
+    if (typeof lastPublishUnknown !== 'boolean') throw new DkgWriteError('lastPublishUnknown must be true or false', { name, stage: 'create' })
 
     const existing = await this.descriptor(name, contextGraphId)
     if (existing && !resume) {
       throw new DkgWriteError(`asset ${name} already exists in ${contextGraphId}; names must be unique`, { name, stage: 'create' })
     }
-    if (existing) return this.#resume(existing, { name, contextGraphId, expectAuthor, shareRetries, sleep })
+    if (existing) return this.#resume(existing, { name, contextGraphId, expectAuthor, lastPublishUnknown, shareRetries, sleep })
 
     const created = await this.#stage('create', name, () =>
       this.request('POST', '/api/knowledge-assets', { contextGraphId, name, quads, finalize: true }, { okStatuses: [201] }))
@@ -289,9 +323,15 @@ export class DkgNode {
   }
 
   /** Continue an existing asset, or refuse when its state cannot be trusted. */
-  async #resume(d, { name, contextGraphId, expectAuthor, shareRetries, sleep }) {
+  async #resume(d, { name, contextGraphId, expectAuthor, lastPublishUnknown, shareRetries, sleep }) {
     const refuse = reason => {
       throw new DkgWriteError(`asset ${name} cannot be resumed: ${reason}; it will not be published again`, { name, stage: 'resume-refused', body: d, ual: d?.publishedUal ?? null })
+    }
+    // Not a verdict on the asset: something needed to judge it could not be
+    // learned now, so a later retry may succeed. It never publishes.
+    const unverified = (reason, { mayHaveSent = false } = {}) => {
+      throw new DkgWriteError(`asset ${name} could not be verified yet: ${reason}; it was not published again — retry later`,
+        { name, stage: 'resume-unverified', body: d, ual: d?.publishedUal ?? null, mayHaveSent })
     }
     const authorAddress = String(d.agentAddress ?? '').toLowerCase()
     if (expectAuthor && authorAddress !== String(expectAuthor).toLowerCase()) {
@@ -304,9 +344,15 @@ export class DkgNode {
       // publish the node recorded inconsistently.
       if (d.publishedUal || d.vmCurrentAssertion) refuse(`the node reports ${d.status} but also a published assertion`)
       const sealed = { merkleRoot: `0x${bareHex(pointer)}`, authorAddress, assertionUri: d.assertionGraph ?? null }
-      // swm-shared goes straight to publish. If an earlier publish may have
-      // sent a transaction the node has not yet recorded, publishing again
-      // could mint twice; the caller must not ask to resume such an asset.
+      // A publish needs the asset shared first (the node answers 409 otherwise),
+      // so a wm-sealed asset was never published and is safe to continue. A
+      // shared one whose last publish may have sent a transaction is not: the
+      // node records a mint only once it confirms, so publishing it again could
+      // mint twice. Deliberate trade-off: if that publish in fact sent nothing,
+      // the asset stays unpublished until an operator checks the chain.
+      if (d.status === 'swm-shared' && lastPublishUnknown) {
+        unverified('an earlier publish may have sent a transaction and the node still reports swm-shared', { mayHaveSent: true })
+      }
       if (d.status === 'wm-sealed') await this.#share(name, contextGraphId, { shareRetries, sleep })
       return { ...(await this.#publish(name, contextGraphId, sealed)), resumed: true }
     }
@@ -316,8 +362,14 @@ export class DkgNode {
       if (vm && wm && vm !== wm) refuse('its working copy has changed since it was published')
       let anchor
       try {
-        anchor = await this.#confirmAnchor(contextGraphId, { ual: d.publishedUal, merkleRoot: null, descriptor: d, author: expectAuthor ?? authorAddress })
+        // The sealed root is whatever the node's pointers name; with neither
+        // exposed there is nothing to compare, as on the lost-publish path.
+        const root = vm || wm
+        anchor = await this.#confirmAnchor(contextGraphId, { ual: d.publishedUal, merkleRoot: root ? `0x${root}` : null, descriptor: d, author: expectAuthor ?? authorAddress })
       } catch (e) {
+        // A read that failed says nothing about the asset; refusing for good
+        // would strand a derivation that is really anchored.
+        if (e instanceof AnchorUnreadableError) unverified(e.message)
         refuse(e.message)
       }
       return { name, ual: anchor.ual, txHash: null, resumed: true }
@@ -349,40 +401,34 @@ export class DkgNode {
 
   async #publish(name, contextGraphId, { merkleRoot, authorAddress, assertionUri }) {
     const publishPath = `/api/knowledge-assets/${encodeURIComponent(name)}/vm/publish`
+    const sealed = { merkleRoot, authorAddress, assertionUri }
     let published
     try {
       published = await this.request('POST', publishPath, { contextGraphId }, { okStatuses: [200, 207], timeoutMs: Math.max(this.timeoutMs, 480000) })
     } catch (e) {
-      const lost = (e instanceof DkgHttpError && (e.status === 503 || e.status === 504 || e.status === 0)) || e instanceof ResponseTooLargeError
-      if (lost) {
-        // The node may have sent a transaction before losing its chain
-        // connection. Retrying could mint twice, so reconcile from the node's
-        // own records instead. The lifecycle descriptor alone is not proof: the
-        // node writes the same vm-confirmed descriptor for a tentative,
-        // local-only publish. So success also needs a confirmed UAL, the
-        // sealed merkle root, and a confirmed anchor in the graph's _meta.
-        let d = null
-        let why
-        try {
-          d = await this.descriptor(name, contextGraphId)
-          if (d?.status !== 'vm-confirmed') throw new Error(`the node reports status ${d?.status ?? 'unknown'}`)
-          const anchor = await this.#confirmAnchor(contextGraphId, { ual: d.publishedUal, merkleRoot, descriptor: d, author: authorAddress })
-          return { name, ual: anchor.ual, txHash: anchor.txHash, merkleRoot, authorAddress, assertionUri, reconciled: true }
-        } catch (err) {
-          why = err.message
-        }
-        throw new DkgWriteError(`publishing ${name} did not confirm (${e.message}; ${why}); a transaction may have been sent — check the node before retrying`,
-          { name, stage: 'publish-transport', status: e.status, body: e.body, ual: d?.publishedUal ?? null, mayHaveSent: true })
-      }
+      // The node's vm/publish route answers 4xx only for caller preconditions
+      // it checks before any chain interaction (unshared or unsealed asset,
+      // author selection, pricing policy, no funded wallet). Everything else —
+      // a plain 500 for reverts and errors thrown after createKnowledgeAssets
+      // returned, 502 for a publish that did not confirm, 503/504 for a lost
+      // chain connection, status 0 or an unreadable body — can follow a
+      // broadcast transaction, so it is reconciled, never reported as unsent.
+      const beforeChain = e instanceof DkgHttpError && e.status >= 400 && e.status < 500
+      if (!beforeChain) return this.#reconcileLost(name, contextGraphId, sealed, e)
       throw new DkgWriteError(`publishing ${name} failed: ${e.message}`, { name, stage: 'publish', status: e.status, body: e.body })
     }
-    const b = published.body ?? {}
+    const b = published.body !== null && typeof published.body === 'object' ? published.body : {}
     if (published.status === 207) {
       throw new DkgWriteError(`asset ${name} was minted on-chain but not bound to ${contextGraphId}: ${b.contextGraphError ?? b.error ?? 'unknown error'}`,
-        { name, stage: 'unbound', status: 207, body: b, ual: b.ual ?? null, txHash: b.txHash ?? null })
+        { name, stage: 'unbound', status: 207, body: b, ual: b.ual ?? null, txHash: b.txHash ?? null, mayHaveSent: true })
     }
     if (b.status !== 'confirmed' || !b.ual) {
-      throw new DkgWriteError(`asset ${name} publish returned status ${b.status ?? 'unknown'}`, { name, stage: 'publish', status: published.status, body: b, ual: b.ual ?? null, txHash: b.txHash ?? null })
+      // The node sends 200 only for a confirmed publish, so a 200 saying
+      // anything else (or nothing parseable) is an answer nobody can read:
+      // treat it like a lost response rather than as proof nothing was sent.
+      const e = new DkgHttpError(`${this.name} POST ${publishPath} -> ${published.status}: publish returned status ${b.status ?? 'unknown'}`,
+        { status: published.status, path: publishPath, body: published.body })
+      return this.#reconcileLost(name, contextGraphId, sealed, e)
     }
     return {
       name,
@@ -396,12 +442,40 @@ export class DkgNode {
   }
 
   /**
+   * After a publish whose answer cannot be trusted, learn the outcome from the
+   * node's own records instead of retrying, which could mint twice. The
+   * lifecycle descriptor alone is not proof: the node writes the same
+   * vm-confirmed descriptor for a tentative, local-only publish. So success
+   * also needs a confirmed UAL, the sealed merkle root, and a confirmed anchor
+   * in the graph's _meta. Otherwise throw publish-transport, mayHaveSent true,
+   * carrying any UAL or transaction the node reported.
+   */
+  async #reconcileLost(name, contextGraphId, { merkleRoot, authorAddress, assertionUri }, e) {
+    const body = e?.body !== null && typeof e?.body === 'object' ? e.body : {}
+    let d = null
+    let why
+    try {
+      d = await this.descriptor(name, contextGraphId)
+      if (d?.status !== 'vm-confirmed') throw new Error(`the node reports status ${d?.status ?? 'unknown'}`)
+      const anchor = await this.#confirmAnchor(contextGraphId, { ual: d.publishedUal, merkleRoot, descriptor: d, author: authorAddress })
+      return { name, ual: anchor.ual, txHash: anchor.txHash, merkleRoot, authorAddress, assertionUri, reconciled: true }
+    } catch (err) {
+      why = err.message
+    }
+    const reported = v => typeof v === 'string' && v ? v : null
+    throw new DkgWriteError(`publishing ${name} did not confirm (${e?.message ?? e}; ${why}); a transaction may have been sent — check the node before retrying`,
+      { name, stage: 'publish-transport', status: e?.status, body: e?.body, ual: reported(d?.publishedUal) ?? reported(body.ual), txHash: reported(body.txHash), mayHaveSent: true })
+  }
+
+  /**
    * Prove a published UAL from the node's own records, or throw saying why.
    *
-   * The UAL must be chain-confirmed (not tentative) and published by `author`;
-   * the descriptor's VM pointer must equal the sealed merkle root when both are
-   * known; and `<cg>/_meta` must hold exactly one confirmed status for it with
-   * the assertion graph the UAL derives.
+   * The UAL must be chain-confirmed in shape and published by `author`; the
+   * descriptor's VM pointer must equal the sealed merkle root when both are
+   * known; and `<cg>/_meta` must hold an anchor for it that the resolver would
+   * accept — the same anchorsFromMeta rules, so a write never succeeds on an
+   * anchor readers then refuse to count. A failed read throws
+   * AnchorUnreadableError, which says nothing about the asset itself.
    */
   async #confirmAnchor(contextGraphId, { ual, merkleRoot, descriptor, author }) {
     const m = typeof ual === 'string' ? ual.match(CONFIRMED_UAL) : null
@@ -413,19 +487,29 @@ export class DkgNode {
 
     let rows
     try {
-      rows = await this.queryJson(metaForUalsQuery(contextGraphId, [ual], { limit: 50 }), { contextGraphId, max: 50 })
+      rows = await this.queryJson(metaForUalsQuery(contextGraphId, [ual], { limit: 50, merkleRoot: true }), { contextGraphId, max: 50 })
     } catch (e) {
-      throw new Error(`its anchor could not be read (${e.message})`)
+      throw new AnchorUnreadableError(`its anchor could not be read (${e.message})`)
     }
-    const values = p => rows.filter(r => asIri(r.s) === ual && asIri(r.p) === p).map(r => r.o)
-    if (!values(`${DKG}kaUal`).map(asIri).includes(ual)) throw new Error(`no anchor for ${ual} in the graph's _meta`)
-    const statuses = values(`${DKG}status`).map(asString)
-    if (statuses.length !== 1 || statuses[0] !== 'confirmed') throw new Error(`the anchor for ${ual} has status ${statuses.join(',') || 'missing'}`)
+    // Only rows about this exact UAL. anchorsFromMeta keys anchors by the graph
+    // a UAL derives, and a UAL naming another chain with the same address and
+    // number derives the same graph, so its rows must not stand in for ours.
+    const own = rows.filter(r => asIri(r.s) === ual)
     const expectedGraph = `${vmPrefix(contextGraphId)}${publisher}/${m[2]}`
-    const graphs = values(`${DKG}assertionGraph`).map(asIri)
-    if (graphs.length !== 1 || graphs[0] !== expectedGraph) throw new Error(`the anchor for ${ual} names assertion graph ${graphs.join(',') || 'missing'}, expected ${expectedGraph}`)
-    const tx = values(`${DKG}transactionHash`).map(asString)
-    return { ual, txHash: tx.length === 1 ? tx[0] : null }
+    const { anchors, problems } = anchorsFromMeta(own, contextGraphId)
+    const anchor = anchors.get(expectedGraph)
+    if (!anchor) {
+      const problem = problems.find(p => p.ual === ual)
+      throw new Error(problem ? `the anchor for ${ual} is not acceptable: ${problem.reason}` : `no anchor for ${ual} in the graph's _meta`)
+    }
+    // _meta also records the root that was minted, and the query above asks for
+    // it. A node that does not write it (none seen live) leaves the check out;
+    // where rows carry it, it must be exactly one value equal to the sealed root.
+    const roots = own.filter(r => asIri(r.p) === `${DKG}merkleRoot`).map(r => bareHex(asString(r.o)))
+    if (merkleRoot && roots.length && (roots.length !== 1 || roots[0] !== bareHex(merkleRoot))) {
+      throw new Error(`the anchor for ${ual} records merkle root ${roots.join(',')}, not the one sealed (${bareHex(merkleRoot)})`)
+    }
+    return { ual, txHash: anchor.txHash }
   }
 
   async #stage(stage, name, fn) {

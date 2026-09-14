@@ -339,7 +339,7 @@ test('a merged-view probe that never answers fails closed', async () => {
   const node = wrap(inner, async sparql => { if (/\/context\/"\)\)\s*\} LIMIT 1$/.test(sparql)) throw new Error('timeout') })
   const k = await readKnowledge(node, cfg({ attempts: 2 }), { subject: SUBJECT })
   assert.equal(k.consistency.ok, false)
-  assert.match(k.consistency.reason, /merged-view check for .* never answered/)
+  assert.match(k.consistency.reason, /merged-view check for .* answered on 0 of 2 attempts/)
 })
 
 test('a discovery query past the row limit fails closed', async () => {
@@ -622,4 +622,184 @@ test('a local state file that cannot be parsed throws StateReadError rather than
   writeFileSync(join(dir, 'g.json'), '{ not json')
   assert.throws(() => fileStateStore(dir).load('g'), e => e instanceof StateReadError && /cannot read local state/.test(e.message))
   assert.deepEqual(fileStateStore(dir).load('absent').knownUals, {})
+})
+
+/* ------------------------------ second-round residuals ------------------------------ */
+
+const DT = '^^<http://www.w3.org/2001/XMLSchema#dateTime>'
+const ownActive = (grantId, id = 'urn:mandate:state:00000000000000a1') => ka({ cg: GRANTS_CG, publisher: ANA, quads: [
+  { subject: id, predicate: RDF_TYPE, object: V.GrantState }, { subject: id, predicate: V.stateOf, object: grantId },
+  { subject: id, predicate: V.state, object: '"active"' }, { subject: id, predicate: V.stateAuthor, object: `did:dkg:agent:${ANA}` },
+  { subject: id, predicate: V.stateAt, object: `"2026-09-13T08:00:00Z"${DT}` },
+] })
+
+test('D6: a probe and merged view both left out on the first attempt only do not settle "no merged view"', async () => {
+  const g = grant()
+  const s = 'urn:mandate:state:0000000000000078'
+  const view = { graph: `${cgIri(GRANTS_CG)}/context/9`, rows: [{ s, p: V.stateOf, o: g.id }, { s, p: V.state, o: '"revoked"' }] }
+  const inner = new FakeNode({ world: world([grantKa(g), ownActive(g.id)], [], { grantGraphs: [view] }) })
+  let probes = 0
+  let states = 0
+  const node = wrap(inner, async (sparql, o) => {
+    const isProbe = /\/context\/"\)\)\s*\} LIMIT 1$/.test(sparql)
+    const isStates = sparql.includes(V.stateOf) && o.view === 'verifiable-memory'
+    if (!(isProbe && ++probes === 1) && !(isStates && ++states === 1)) return null
+    return (await inner.queryJson(sparql, o)).filter(r => !String(r.g).includes('/context/'))
+  })
+  const k = await readKnowledge(node, cfg(), { subject: SUBJECT })
+  assert.equal(k.consistency.ok, true, k.consistency.reason)
+  assert.equal(k.states.filter(x => x.tier === 'context').length, 1)
+  assert.equal(decide(req(), k).clause, 'not-revoked')
+})
+
+test('D6: on a node with no merged view, "no view" is believed only after the probe answers empty on every attempt', async () => {
+  const g = grant()
+  const node = new FakeNode({ world: world([grantKa(g), ownActive(g.id)]), mergedView: false })
+  const k = await readKnowledge(node, cfg({ attempts: 3 }), { subject: SUBJECT })
+  assert.equal(k.consistency.ok, true, k.consistency.reason)
+  assert.equal(node.calls.filter(c => c.kind === 'content' && c.prefix?.endsWith('/context/')).length, 3)
+  // A probe that fails on one of those attempts leaves it unsettled.
+  let n = 0
+  const inner = new FakeNode({ world: world([grantKa(g), ownActive(g.id)]), mergedView: false })
+  const flaky = wrap(inner, async sparql => { if (/\/context\/"\)\)\s*\} LIMIT 1$/.test(sparql) && ++n === 2) throw new Error('timeout') })
+  const f = await readKnowledge(flaky, cfg({ attempts: 3 }), { subject: SUBJECT })
+  assert.equal(f.consistency.ok, false)
+  assert.match(f.consistency.reason, /merged-view check for .* answered on 2 of 3 attempts/)
+})
+
+test('a merged-view-only revocation whose "active" row comes first is still a revocation', async () => {
+  const g = grant()
+  const s = 'urn:mandate:state:0000000000000077'
+  for (const values of [['"active"', '"revoked"'], ['"revoked"', '"active"']]) {
+    const view = { graph: `${cgIri(GRANTS_CG)}/context/9`, rows: [{ s, p: V.stateOf, o: g.id }, ...values.map(o => ({ s, p: V.state, o }))] }
+    const k = await readKnowledge(new FakeNode({ world: world([grantKa(g)], [], { grantGraphs: [view] }) }), cfg(), { subject: SUBJECT })
+    assert.equal(k.consistency.ok, true)
+    assert.equal(decide(req(), k).clause, 'not-revoked', values.join())
+  }
+})
+
+test('a shared-memory state whose "active" row comes first still warns of the unanchored revocation', async () => {
+  const g = grant()
+  const s = 'urn:mandate:state:00000000000000ab'
+  const swm = { graph: `${cgIri(GRANTS_CG)}/_shared_memory/${ANA}/0`, rows: [{ s, p: V.stateOf, o: g.id }, { s, p: V.state, o: '"active"' }, { s, p: V.state, o: '"revoked"' }] }
+  const k = await readKnowledge(new FakeNode({ world: world([grantKa(g)], [], { grantGraphs: [swm] }) }), cfg(), { subject: SUBJECT })
+  assert.ok(k.warnings.some(w => /unanchored revocation .* shared memory/.test(w)))
+})
+
+for (const [name, subscriptions, pattern] of [
+  ['a transport error', async () => { throw new DkgHttpError('unreachable', { status: 0 }) }, /could not confirm the node holds .*unreachable/],
+  ['a 500', async () => { throw new DkgHttpError('boom', { status: 500 }) }, /could not confirm the node holds .*500/],
+  ['a 404', async () => { throw new DkgHttpError('not found', { status: 404 }) }, /could not confirm the node holds .*404/],
+  ['an unexpected answer', async () => ({ graphs: [] }), /unexpected subscriptions answer/],
+]) {
+  test(`R19: when listing subscriptions gives ${name}, an empty graph under a mis-cased id is not believed`, async () => {
+    const g = grant({ maxSpendUsd: 2 })
+    const node = new FakeNode({ world: world([grantKa(g)], [derivationKa(derivation({ authorizedUnder: g.id, billedUsd: 1.9 }))]) })
+    node.subscriptions = subscriptions
+    const k = await readKnowledge(node, cfg({ derivationsCgs: [DERIVS_CG.toLowerCase()], trustedProducers: [PRODUCER] }), { subject: SUBJECT })
+    assert.equal(k.consistency.ok, false)
+    assert.match(k.consistency.reason, pattern)
+    assert.equal(decide(req(), k).clause, 'read-inconsistent')
+  })
+}
+
+test('R19: a node with no subscriptions call warns that an empty graph was not confirmed', async () => {
+  const k = await readKnowledge(new FakeNode({ world: world([grantKa(grant())]) }), cfg(), { subject: SUBJECT })
+  assert.equal(k.consistency.ok, true)
+  assert.ok(k.warnings.some(w => /could not confirm the node holds .*no subscriptions call/.test(w)))
+})
+
+test('R19: a graph the freshness check found current is not asked about again', async () => {
+  const node = new FakeNode({ world: world([grantKa(grant())]) })
+  node.reconcile = async () => ({ status: 'current', headOrdinal: 0, watermarkAfter: 0 })
+  node.subscriptions = async () => { throw new DkgHttpError('boom', { status: 500 }) }
+  const k = await readKnowledge(node, cfg({ checkFreshness: true }), { subject: SUBJECT })
+  assert.equal(k.consistency.ok, true, k.consistency.reason)
+})
+
+test('D7: a grant read from a configured graph named under another address is not unresolved, and its revocation is judged', async () => {
+  const sam = grant({ owner: STRANGER, local: 'sam' })
+  const sha = 'e'.repeat(64)
+  const { grantToQuads } = await import('../src/rdf.mjs')
+  const node = new FakeNode({ world: world(
+    [ka({ cg: GRANTS_CG, publisher: STRANGER, quads: grantToQuads(sam) }), revocationKa(sam.id, { publisher: STRANGER })],
+    [derivationKa(derivation({ outputSha256: sha, authorizedUnder: sam.id, servedCapability: 'talking-head' }))],
+  ) })
+  const k = await readKnowledge(node, cfg(), { sha256: sha })
+  assert.equal(k.consistency.ok, true, k.consistency.reason)
+  assert.equal(k.grants.length, 1)
+  assert.deepEqual(k.states.map(s => s.state), ['revoked'])
+  assert.deepEqual(k.unresolvedGrants, [])
+  const v = verifyKnowledge(k, sha, { now: '2026-09-13T12:00:00Z' })
+  assert.equal(v.verdict, 'TAINTED')
+  assert.equal(v.subStatus, 'REVOKED')
+})
+
+test('the graph count guard end to end: a revocation left out of _meta and content but still counted is inconsistent', async () => {
+  const g = grant()
+  const gk = grantKa(g)
+  const rk = revocationKa(g.id)
+  const inner = new FakeNode({ world: world([gk, rk]), mergedView: false })
+  const node = wrap(inner, async (sparql, o) => (/COUNT/.test(sparql) ? null
+    : (await inner.queryJson(sparql, o)).filter(r => r.s !== rk.ual && r.g !== rk.graph)))
+  const k = await readKnowledge(node, cfg({ attempts: 2 }), { subject: SUBJECT })
+  assert.equal(k.consistency.ok, false)
+  assert.match(k.consistency.reason, /node shows 2 graphs .* but 1 are anchored/)
+  assert.equal(decide(req(), k).clause, 'read-inconsistent')
+})
+
+test('a node that answers a second spelling of a graph id with the same assets does not double spend', async () => {
+  const g = grant({ maxSpendUsd: 2 })
+  const inner = new FakeNode({ world: world([grantKa(g)], [derivationKa(derivation({ authorizedUnder: g.id, billedUsd: 0.8 }))]) })
+  const alias = DERIVS_CG.toLowerCase()
+  // Rewrites the alias to the real id in each query and back in each answer, as a node resolving ids case-insensitively would.
+  const swapText = (v, from, to) => (typeof v === 'string' ? v.split(from).join(to) : v)
+  const node = {
+    name: 'alias', calls: inner.calls,
+    subscriptions: async () => [{ contextGraphId: DERIVS_CG }, { contextGraphId: alias }, { contextGraphId: GRANTS_CG }],
+    queryJson: async (sparql, o) => {
+      if (o.contextGraphId !== alias) return inner.queryJson(sparql, o)
+      const rows = await inner.queryJson(swapText(sparql, alias, DERIVS_CG), { ...o, contextGraphId: DERIVS_CG })
+      return rows.map(r => Object.fromEntries(Object.entries(r).map(([key, v]) => [key, swapText(v, DERIVS_CG, alias)])))
+    },
+  }
+  const k = await readKnowledge(node, cfg({ derivationsCgs: [DERIVS_CG, alias], trustedProducers: [PRODUCER] }), { subject: SUBJECT })
+  assert.equal(k.consistency.ok, true, k.consistency.reason)
+  assert.equal(k.reads.filter(r => r.role === 'derivations').length, 2)
+  assert.equal(k.derivations.length, 1)
+  assert.equal(decide(req({ estimatedUsd: 1 }), k).spend.priorUsd, 0.8)
+})
+
+test('a misplaced state that only discovery sees is a trusted forgery under a trusted producer, untrusted under a stranger', async () => {
+  const g = grant()
+  const misplaced = publisher => ka({ cg: DERIVS_CG, publisher, quads: [
+    { subject: 'urn:mandate:state:00000000000000cd', predicate: RDF_TYPE, object: V.GrantState },
+    { subject: 'urn:mandate:state:00000000000000cd', predicate: V.stateOf, object: g.id },
+    { subject: 'urn:mandate:state:00000000000000cd', predicate: V.state, object: '"active"' },
+  ] })
+  for (const [publisher, trusted] of [[PRODUCER, true], [STRANGER, false]]) {
+    const full = new FakeNode({ world: world([grantKa(g)], [misplaced(publisher)]) })
+    const partial = new FakeNode({ world: world([grantKa(g)]) })
+    const node = { name: 'split', queryJson: (sparql, o) => (isPrefixRead(sparql) ? partial : full).queryJson(sparql, o) }
+    const k = await readKnowledge(node, cfg(), { subject: SUBJECT })
+    const f = k.forgeries.find(x => x.id === 'urn:mandate:state:00000000000000cd')
+    assert.equal(f?.kind, 'misplaced-state')
+    assert.equal(f.trusted, trusted)
+  }
+})
+
+test('contract 3 end to end: the grantor\'s own revocation also typed LikenessGrant refuses, with or without a merged view', async () => {
+  const g = grant()
+  const id = `urn:mandate:grant:${ANA}:ana:00000000000000c9`
+  const rev = ka({ cg: GRANTS_CG, publisher: ANA, quads: [
+    { subject: id, predicate: RDF_TYPE, object: V.GrantState }, { subject: id, predicate: RDF_TYPE, object: V.LikenessGrant },
+    { subject: id, predicate: V.stateOf, object: g.id }, { subject: id, predicate: V.state, object: '"revoked"' },
+    { subject: id, predicate: V.stateAuthor, object: `did:dkg:agent:${ANA}` }, { subject: id, predicate: V.stateAt, object: `"2026-09-13T09:00:00Z"${DT}` },
+  ] })
+  for (const mergedView of [true, false]) {
+    const k = await readKnowledge(new FakeNode({ world: world([grantKa(g), rev]), mergedView }), cfg({ attempts: 2 }), { subject: SUBJECT })
+    assert.equal(k.consistency.ok, true, k.consistency.reason)
+    assert.equal(k.states.length, 1)
+    assert.equal(decide(req(), k).clause, 'not-revoked')
+  }
 })

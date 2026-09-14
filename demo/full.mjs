@@ -14,8 +14,9 @@
  * media) are redacted before they are written; block explorer links stay.
  * demo/runs/ is git-ignored all the same: check a run before committing it.
  *
- * With --consent the grant step asks the operator to confirm the clip at this
- * terminal; the CLI never lets --yes skip that.
+ * With --consent the grant step captures a clip. A reading of the consent
+ * script is accepted as it is; anything else needs a typed confirmation, which
+ * this demo cannot give (it runs the CLI with --json), so the step exits 3.
  *
  *   node demo/full.mjs --image-url <url> --audio-url <url> --seconds 5 [--consent] [--subject ana]
  *
@@ -67,6 +68,18 @@ export const clearFor = (step, grantId) => step.result?.verdict === 'CLEAR' && s
 
 /** Verify said TAINTED because this grant was revoked. */
 export const taintedFor = (step, grantId) => step.result?.verdict === 'TAINTED' && step.result?.subStatus === 'REVOKED' && step.result?.grantId === grantId
+
+/**
+ * The blast-radius log line, in the CLI's own words: billedUsd is what
+ * producers recorded (the platform's cost when it gave one), not a list price
+ * or an invoice, and a trusted record that could not be read is never left out.
+ */
+export function blastLine(step) {
+  const r = step.result ?? {}
+  const billed = r.billedUnknown ? 'billed amount unknown' : `~$${Number(r.totalBilledUsd ?? 0).toFixed(4)} billed (as recorded by producers; not an invoice)`
+  const unreadable = r.unreadable ? `; ${r.unreadable} trusted record(s) under the grant UNREADABLE (their files are unknown)` : ''
+  return `BLAST    ${r.assets?.length ?? 0} asset(s) under the revoked grant, ${billed}${unreadable}`
+}
 
 async function main() {
   const { values: opt } = parseArgs({
@@ -177,6 +190,7 @@ async function main() {
   if (opt.consent) {
     const c = g.consent ?? {}
     log(`consent clip sha256 ${c.sha256 ?? 'none'}${c.bytes ? ` (${c.bytes} bytes${c.mime ? `, ${c.mime}` : ''})` : ''}; ${g.grant.consentClipSha256 ? 'attached to the grant' : 'NOT attached (forced)'}`)
+    log(`consent words: ${c.confirmedBy === 'script' ? 'a reading of the consent script (confirmed without a person)' : 'NOT a reading of the consent script; confirmed by the operator'}`)
     if (c.scope) log(`spoken scope: ${c.scope.checks.map(k => `${k.term} ${k.matched ? 'said' : k.contradicted ? 'CONTRADICTED' : 'not said'}`).join(', ')}`)
     if (c.scope?.unchecked?.length) log(`confirmed by the operator, not checked against the words: ${c.scope.unchecked.join(', ')}`)
   }
@@ -228,7 +242,8 @@ async function main() {
 
   /* 9. Blast radius */
   const blast = await mandate(['blast-radius', '--grant', g.grant.id], 'blast-radius')
-  log(`BLAST    ${blast.result.assets?.length ?? 0} asset(s) under the revoked grant, ${blast.result.billedUnknown ? 'billed amount unknown' : `~$${blast.result.totalBilledUsd?.toFixed(4)} billed at list price`}`)
+  if (blast.exitCode !== 0) fail('blast radius', blast)
+  log(blastLine(blast))
 
   run.finishedAt = new Date().toISOString()
   run.ok = true

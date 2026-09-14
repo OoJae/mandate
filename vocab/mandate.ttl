@@ -61,7 +61,7 @@ mandate:subject
 mandate:consentClipSha256
     a rdf:Property ;
     rdfs:label "consent clip SHA-256"@en ;
-    rdfs:comment "Hex SHA-256 of the recorded consent clip. The clip itself is never published to the graph. The reference CLI writes it only when the spoken words were checked against the grant’s terms and confirmed by the operator; a grant published past a missing term with --force carries no clip hash."@en ;
+    rdfs:comment "Hex SHA-256 of the recorded consent clip. The clip itself is never published to the graph. The reference CLI writes it only when the transcript is a reading of the consent script it generated from the grant’s own terms, with nothing contradicted. A grant whose clip an operator confirmed by hand, with or without --force, carries no clip hash, and so does a grant made without a clip."@en ;
     rdfs:domain mandate:LikenessGrant ;
     rdfs:range xsd:string .
 
@@ -128,7 +128,7 @@ mandate:maxSpendUsd
 mandate:stateOf
     a rdf:Property ;
     rdfs:label "state of"@en ;
-    rdfs:comment "The grant this state assertion is about. Exactly one grant IRI. Once it names a grant anchored by the same address that anchored this assertion, the assertion counts as a revocation even if its other values are malformed."@en ;
+    rdfs:comment "The grant this state assertion is about. Exactly one grant IRI. Once it names a grant anchored by the same address that anchored this assertion, the assertion counts as a revocation even if its other values are malformed, and even if the same object is also typed as a grant or a derivation."@en ;
     rdfs:domain mandate:GrantState ;
     rdfs:range mandate:LikenessGrant .
 

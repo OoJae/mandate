@@ -217,9 +217,17 @@ const chunks = (list, size = 50) => Array.from({ length: Math.ceil(list.length /
  * Live v10.0.16 nodes materialise merged views only for data they published
  * themselves, so on any other node the view is legitimately empty. A one-row
  * probe decides whether the node holds any merged view for the graph; a node
- * that holds none can hold no merged-view-only revocation either. Deliberate
- * trade-off: a node that also leaves the probe's graph out of every attempt is
- * not caught by this check.
+ * that holds none can hold no merged-view-only revocation either.
+ *
+ * An empty probe looks exactly like a probe whose view graph was omitted, so
+ * it settles nothing on its own: "no merged view" is accepted only when the
+ * probe answered, empty, on every attempt, and discovery keeps retrying until
+ * then. Deliberate trade-offs, both named in docs/CONTRACTS.md: a node that
+ * never materialises views (a producer or verifier node) always spends every
+ * attempt here (about 1.75 s of backoff with the defaults) whenever the grantor
+ * has published states for the grants in question; and a node that leaves the
+ * view out of the probe on every single attempt is still not caught, because
+ * nothing else distinguishes it from a node that holds no view.
  */
 async function discoverStates(node, { grantsCgs, derivationsCgs, grantIds, grantorReads, attempts, backoffMs, max, sleep }) {
   const rows = new Map()
@@ -239,14 +247,15 @@ async function discoverStates(node, { grantsCgs, derivationsCgs, grantIds, grant
   const expectView = new Set(grantorReads.filter(r => r.states.some(st => ids.has(st.stateOf) && st.tier === 'vm')).map(r => r.contextGraphId))
   const viewShown = cg => [...rows.values()].some(r => r.cg === cg && r.graph.startsWith(`${Q.cgIri(cg)}/context/`))
   const materialised = new Set()
-  const probeAnswered = new Set()
+  // How many attempts each probe answered on; "no merged view" needs all of them.
+  const probeAnswers = new Map()
   for (let i = 0; i < attempts; i++) {
     if (i > 0) await sleep(backoffMs * 2 ** (i - 1))
     for (const cg of expectView) {
       if (materialised.has(cg)) continue
       const got = await tryQuery(node, Q.mergedViewProbeQuery(cg), { contextGraphId: cg, max, view: 'verifiable-memory' })
       if (!got) continue
-      probeAnswered.add(cg)
+      probeAnswers.set(cg, (probeAnswers.get(cg) ?? 0) + 1)
       if (got.some(r => asIri(r.g)?.startsWith(`${Q.cgIri(cg)}/context/`))) materialised.add(cg)
     }
     for (const q of queries) {
@@ -266,11 +275,14 @@ async function discoverStates(node, { grantsCgs, derivationsCgs, grantIds, grant
     // A view that shows a row proves the node materialises it, whatever the probe said.
     for (const cg of expectView) if (viewShown(cg)) materialised.add(cg)
     const viewMissing = [...materialised].filter(cg => !viewShown(cg))
-    const probesUnanswered = [...expectView].filter(cg => !probeAnswered.has(cg) && !materialised.has(cg))
-    if (answeredOnce.size === queries.length && unexplained.length === 0 && viewMissing.length === 0 && probesUnanswered.length === 0) break
+    // Not yet shown to hold a view: only every remaining attempt answering empty settles it.
+    const viewUnsettled = [...expectView].filter(cg => !materialised.has(cg))
+    if (answeredOnce.size === queries.length && unexplained.length === 0 && viewMissing.length === 0 && viewUnsettled.length === 0) break
     if (i === attempts - 1) {
       if (answeredOnce.size !== queries.length) failures.push(`state discovery: ${queries.length - answeredOnce.size} of ${queries.length} queries never answered`)
-      for (const cg of probesUnanswered) failures.push(`state discovery: the merged-view check for ${cg} never answered`)
+      for (const cg of viewUnsettled.filter(c => probeAnswers.get(c) !== attempts)) {
+        failures.push(`state discovery: the merged-view check for ${cg} answered on ${probeAnswers.get(cg) ?? 0} of ${attempts} attempts; "no merged view" is believed only when every attempt answers`)
+      }
       for (const cg of viewMissing) failures.push(`state discovery: the merged view of ${cg} was left out of every answer, though the grantor has published states for these grants`)
     }
   }
@@ -321,6 +333,8 @@ export async function checkFreshness(node, contextGraphIds) {
   const failures = []
   const warnings = []
   const graphs = []
+  // Graphs the node answered for, under exactly this id, as current with the chain.
+  const current = []
   const who = node.name ?? 'the node'
   for (const cg of contextGraphIds) {
     if (typeof node.reconcile !== 'function') {
@@ -338,6 +352,8 @@ export async function checkFreshness(node, contextGraphIds) {
         failures.push(`stale view: ${who} holds ${have} of the ${head} assets anchored to ${cg} on-chain`)
       } else if (have > head || r?.status === 'watermark-ahead') {
         failures.push(`freshness of ${cg} unknown: ${who} holds ${have} assets but the chain reports ${head} (${r?.status ?? 'no status'})`)
+      } else {
+        current.push(cg)
       }
     } catch (e) {
       if (!(e instanceof DkgHttpError)) throw e
@@ -346,36 +362,54 @@ export async function checkFreshness(node, contextGraphIds) {
       else failures.push(`freshness of ${cg} could not be established (${e.status || 'unreachable'}: ${detail})`)
     }
   }
-  return { failures, warnings, graphs }
+  return { failures, warnings, graphs, current }
 }
 
 /**
  * Does the node hold these context graphs under exactly these ids? A graph id
  * whose address is written in another case, or a graph the node is not
  * subscribed to, reads as a consistent empty graph, which would say "no
- * revocations" and "no prior spend". Only asked about graphs that read empty.
- * A node that cannot list its subscriptions gives a warning.
+ * revocations" and "no prior spend". Only asked about graphs that read empty,
+ * and not about graphs the freshness check already found current under that id
+ * (reconcile answers 404 for an id the node does not hold).
+ *
+ * When the subscriptions cannot be listed, the empty read is not believed: an
+ * error, a 404, or an answer of an unexpected shape is an inconsistent read.
+ * Deliberate trade-off (fail-open, named in docs/CONTRACTS.md): a 403, or a
+ * node with no subscriptions call, is only a warning. A token without
+ * node-admin rights gets 403 here and from reconcile, and refusing would block
+ * every decision against a graph that is legitimately empty, such as a
+ * derivations graph before its first render. On such a node a mis-typed or
+ * unsubscribed graph id still reads as empty; the warning says so.
  */
-async function checkHeld(node, contextGraphIds) {
+async function checkHeld(node, contextGraphIds, { current = [] } = {}) {
   const failures = []
   const warnings = []
-  if (!contextGraphIds.length || typeof node.subscriptions !== 'function') return { failures, warnings }
+  const ids = contextGraphIds.filter(cg => !current.includes(cg))
+  if (!ids.length) return { failures, warnings }
+  const unconfirmed = why => `could not confirm the node holds ${ids.join(', ')} (${why}); an empty read of an id the node may not hold proves nothing`
+  if (typeof node.subscriptions !== 'function') {
+    warnings.push(unconfirmed('the node has no subscriptions call'))
+    return { failures, warnings }
+  }
   let list
   try {
     const body = await node.subscriptions()
     list = Array.isArray(body) ? body : body?.subscriptions
   } catch (e) {
-    warnings.push(`could not confirm the node holds ${contextGraphIds.join(', ')}: ${String(e?.message ?? e).slice(0, 120)}`)
+    const why = `${e?.status === undefined ? '' : `${e.status || 'unreachable'}: `}${String(e?.body?.error ?? e?.message ?? e).slice(0, 120)}`
+    if (e instanceof DkgHttpError && e.status === 403) warnings.push(unconfirmed(why))
+    else failures.push(unconfirmed(why))
     return { failures, warnings }
   }
   if (!Array.isArray(list)) {
-    warnings.push(`could not confirm the node holds ${contextGraphIds.join(', ')}: unexpected subscriptions answer`)
+    failures.push(unconfirmed('unexpected subscriptions answer'))
     return { failures, warnings }
   }
-  for (const cg of contextGraphIds) {
-    const ids = list.filter(x => x && x.subscribed !== false).map(x => x.contextGraphId)
-    if (ids.includes(cg)) continue
-    const other = ids.find(id => typeof id === 'string' && id.toLowerCase() === cg.toLowerCase())
+  for (const cg of ids) {
+    const held = list.filter(x => x && x.subscribed !== false).map(x => x.contextGraphId)
+    if (held.includes(cg)) continue
+    const other = held.find(id => typeof id === 'string' && id.toLowerCase() === cg.toLowerCase())
     failures.push(other
       ? `context graph ${cg} is held by the node as ${other}; ids are case-sensitive, so this read would be empty`
       : `the node is not subscribed to context graph ${cg}, so its empty read proves nothing`)
@@ -415,9 +449,10 @@ function dedupeByUal(list) {
  * @param {object} scope  exactly one of { subject }, { grantId }, { sha256 }
  *
  * `unresolvedGrants` lists grant ids cited by trusted derivations whose owner
- * has no configured grants graph namespaced under its address: whether they
- * stand cannot be decided from here. A grant missing from a configured graph
- * that was read consistently is not unresolved; it does not exist.
+ * has no configured grants graph namespaced under its address, and which no
+ * read found: whether they stand cannot be decided from here. A grant missing
+ * from a configured graph that was read consistently is not unresolved; it does
+ * not exist. A grant found in any configured graph is not unresolved either.
  */
 export async function readKnowledge(node, cfg, scope = {}) {
   const grantsCgs = uniq([...(cfg.grantsCg === undefined ? [] : [cfg.grantsCg]), ...(cfg.grantsCgs ?? [])].map(Q.assertContextGraphId))
@@ -500,7 +535,7 @@ export async function readKnowledge(node, cfg, scope = {}) {
 
   // Graphs that read empty everywhere: make sure the node really holds them.
   const emptyCgs = uniq(reads.map(r => r.contextGraphId)).filter(cg => reads.filter(r => r.contextGraphId === cg).every(r => r.consistency.ok && r.anchors.length === 0))
-  const held = await checkHeld(node, emptyCgs)
+  const held = await checkHeld(node, emptyCgs, { current: freshness?.current ?? [] })
   failures.push(...held.failures)
   warnings.push(...held.warnings)
 
@@ -518,23 +553,29 @@ export async function readKnowledge(node, cfg, scope = {}) {
       failures.push(...f)
       const vmIds = new Set([...states, ...forgeries].map(x => x.id))
       for (const row of rows) if (row.graph.includes('/_verifiable_memory/')) vmIds.add(row.s)
+      // One row per state value, so a subject can come back as several rows. It is
+      // judged on all of them: any value other than exactly "active", or none, is a
+      // revocation, whichever row the node happens to return first.
+      const nonActive = new Set(rows.filter(r => r.value !== 'active').map(r => `${r.graph} ${r.s} ${r.o}`))
       const seen = new Set()
       for (const row of rows) {
-        const key = `${row.graph} ${row.s}`
+        const key = `${row.graph} ${row.s} ${row.o}`
         if (seen.has(key)) continue
         seen.add(key)
         const owner = grantIriAddress(row.o)
         const path = vmPath(row.cg, row.graph)
         const inGrants = grantsCgs.includes(row.cg)
+        if (path && inGrants && path.publisher === owner) {
+          // The grantor's own graph: it must already be in the grantor read, as a
+          // state. A forgery with the same id does not excuse it: the reducer makes
+          // every grantor statement about its own grant a state (contract 3).
+          const inRead = states.some(x => x.id === row.s && x.graph === row.graph)
+            || grantorReads.some(r => r.pendingGraphs.includes(row.graph))
+          if (!inRead) failures.push(`state ${row.s} is visible in ${row.graph} but missing from the grantor read`)
+          continue
+        }
         if (path && forgeries.some(f => f.graph === row.graph && f.id === row.s)) continue
         if (path) {
-          if (inGrants && path.publisher === owner) {
-            // The grantor's own graph: it must already be in the grantor read.
-            const inRead = states.some(x => x.id === row.s && x.graph === row.graph)
-              || grantorReads.some(r => r.pendingGraphs.includes(row.graph))
-            if (!inRead) failures.push(`state ${row.s} is visible in ${row.graph} but missing from the grantor read`)
-            continue
-          }
           discovered.push({
             kind: inGrants ? 'state-not-by-grantor' : 'misplaced-state',
             detail: inGrants
@@ -546,10 +587,10 @@ export async function readKnowledge(node, cfg, scope = {}) {
             claims: { stateOf: [row.o], state: row.value === null ? [] : [row.value], subject: [], outputSha256: [], authorizedUnder: [], billedUsd: [] },
           })
         } else if (row.graph.startsWith(`${Q.cgIri(row.cg)}/_shared_memory/`)) {
-          if (row.value !== 'active') {
+          if (nonActive.has(key)) {
             warnings.push(`an unanchored revocation of ${row.o} is in shared memory (${row.graph}); it takes effect only once anchored`)
           }
-        } else if (inGrants && row.value !== 'active' && !vmIds.has(row.s)) {
+        } else if (inGrants && nonActive.has(key) && !vmIds.has(row.s)) {
           states.push({
             id: row.s, ual: null, txHash: null, graph: row.graph, publisher: null, stateOf: row.o,
             state: 'revoked', stateAuthor: null, stateAt: null, materializedVersion: null, tier: 'context',
@@ -638,10 +679,17 @@ export async function readKnowledge(node, cfg, scope = {}) {
     }
   }
 
-  // Grants cited by trusted edges whose owner's grants graph is not configured here.
+  // Grants cited by trusted edges whose owner's grants graph is not configured
+  // here, and which no read found (D7). A grant accepted from any configured
+  // graph was read, with its publisher's revocations, so it is judged, not
+  // set aside as unknown: its owner may have published it into a graph named
+  // under someone else's address. Deliberate trade-off (D7, documented in
+  // CONTRACTS): a revocation the owner put in their own, unconfigured grants
+  // graph is then not seen, and nothing here marks the grant unknown.
   const grantsOwners = new Set(grantsCgs.map(contextGraphAddress))
+  const readGrantIds = new Set(grants.map(g => g.id))
   const unresolvedGrants = uniq(derivations.filter(d => d.trusted === true).map(d => d.authorizedUnder))
-    .filter(id => { const o = grantIriAddress(id); return Boolean(o) && !grantsOwners.has(o) })
+    .filter(id => { const o = grantIriAddress(id); return Boolean(o) && !grantsOwners.has(o) && !readGrantIds.has(id) })
     .sort()
 
   const consistency = {

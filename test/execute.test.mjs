@@ -2,14 +2,15 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { createServer } from 'node:http'
 import { createHash } from 'node:crypto'
-import { mkdtempSync, rmSync, statSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { spawn } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { dispatchRender, extractMediaUrl, pollJob, RenderError, collectInputUrls, served, classifyFailure } from '../src/execute.mjs'
 import { callStrict, LivepeerToolError } from '../src/livepeer.mjs'
 import { checkInputs, dispatchMode, estimateFromPricing } from '../src/capabilities.mjs'
 import { sha256OfUrl, FetchBytesError } from '../src/fetch-bytes.mjs'
-import { renderKey, pendingStore, PendingConflictError, mergeDerivationAttempt } from '../src/pending.mjs'
+import { renderKey, pendingStore, PendingConflictError, PendingInvariantError, PendingReadError, mergeDerivationAttempt, mayBeBilled } from '../src/pending.mjs'
 import { verifyMedia, hashUrl } from '../src/verify.mjs'
 
 const IMG = 'https://agent.livepeer.org/a/img.jpg'
@@ -92,7 +93,9 @@ test('media URLs: structured first, never an echoed input, query strings kept, a
   assert.equal(extractMediaUrl({ url: OUT }, '', [IMG]), OUT)
   assert.equal(extractMediaUrl(null, `input ${IMG} → output https://v3b.fal.media/files/x.wav.`, [IMG]), 'https://v3b.fal.media/files/x.wav')
   assert.equal(extractMediaUrl(null, `input ${IMG}`, [IMG]), null)
-  assert.equal(extractMediaUrl({ url: 'javascript:alert(1)' }, 'https://h.test/a.webp?x=1'), 'https://h.test/a.webp?x=1')
+  // A structured URL that is present but unusable is not replaced by a guess from the text.
+  assert.equal(extractMediaUrl({ url: 'javascript:alert(1)' }, 'https://h.test/a.webp?x=1'), null)
+  assert.equal(extractMediaUrl({ url: '' }, 'https://h.test/a.webp?x=1'), 'https://h.test/a.webp?x=1')
 })
 
 test('required inputs are checked before any dispatch', () => {
@@ -173,6 +176,17 @@ const LOGGED_QUEUED = 'Job mjob_93244be79885 is NOT done — poll get_create_med
 const LOGGED_FAILED = 'Media job mjob_640913486506: failed (129s)\nCapability: talking-head\nError: The background worker running this job stopped responding (no heartbeat for 128s after it started). No media was produced.'
 const TH = { capability: 'talking-head', inputs: { image_url: IMG, audio_url: AUD }, idempotencyKey: 'mandate-k' }
 const noSleep = { sleep: async () => {} }
+/**
+ * Settles `promise` or fails after `ms`. A guard whose removal only makes a test
+ * hang proves nothing (the mutation check counts a timeout as a failure, not a
+ * kill), so a test that could hang when its guard is gone gets its own deadline.
+ * The timer only fires while the code under test yields to real timers.
+ */
+function within(promise, ms, what) {
+  let timer
+  const late = new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(`${what}: still pending after ${ms}ms`)), ms) })
+  return Promise.race([promise, late]).finally(() => clearTimeout(timer))
+}
 const ESC = String.fromCharCode(27)
 
 test('an inline call that times out on the client with no job id may still be rendering', async () => {
@@ -220,9 +234,14 @@ test('an unrecognised status stops the render instead of polling to a timeout', 
     e => e.kind === 'unknown-status' && e.jobId === 'mjob_aaaaaaaaaaaa' && e.mayHaveStarted)
   assert.equal(client.calls.length, 1)
   const first = stubClient({ run_capability: [ok({ status: 'on_hold', job_id: 'mjob_aaaaaaaaaaaa' })] })
-  await assert.rejects(dispatchRender(first, TH), e => e.kind === 'unknown-status')
+  // A no-op sleep and no wait: if the first reply's status were not refused, this fails at once instead of polling for minutes.
+  await assert.rejects(dispatchRender(first, { ...TH, poll: { sleep: async () => {}, maxWaitMs: 0 } }), e => e.kind === 'unknown-status')
+  assert.equal(first.calls.length, 1)
   const none = stubClient({ get_create_media: [ok({}, 'nothing useful')] })
-  await assert.rejects(pollJob(none, 'mjob_aaaaaaaaaaaa', noSleep), e => e.kind === 'unknown-status')
+  // A fake clock with no wait: were the empty status polled instead of refused, this
+  // ends at once as kind timeout rather than spinning a no-op sleep forever.
+  let u = 0
+  await assert.rejects(pollJob(none, 'mjob_aaaaaaaaaaaa', { sleep: async ms => { u += ms }, now: () => u, maxWaitMs: 0 }), e => e.kind === 'unknown-status')
 })
 
 test('a dropped poll is retried, not treated as the end of a billed render', async () => {
@@ -382,5 +401,375 @@ test('a derivation attempt keeps its asset name, ual, tx hash and mayHaveSent ac
     assert.throws(() => mergeDerivationAttempt(null, { name: '../x' }), /asset name/)
   } finally {
     rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+// --- round two: render lifecycle ------------------------------------------------------
+
+test('a reply with a job id and no done status is polled, even when it carries a structured url', async () => {
+  for (const url of [`${IMG}?w=512`, 'about:blank', 'https://agent.livepeer.org/jobs/mjob_abcdef123456', 'https://cdn.test/preview.png']) {
+    const client = stubClient({
+      run_capability: [ok({ job_id: 'mjob_abcdef123456', url }, 'Job mjob_abcdef123456 is NOT done. Preview https://cdn.test/preview.png')],
+      get_create_media: [ok({ status: 'done', url: 'https://cdn.test/out.mp4' })],
+    })
+    const r = await dispatchRender(client, { ...TH, poll: noSleep })
+    assert.equal(r.url, 'https://cdn.test/out.mp4', url)
+    assert.equal(r.mode, 'async', url)
+    assert.equal(client.calls.filter(c => c.name === 'get_create_media').length, 1, url)
+  }
+  // Done, with a job id and a usable structured url: that is the result, no poll.
+  const inline = stubClient({ run_capability: [ok({ status: 'done', job_id: 'mjob_abcdef123456', url: OUT })] })
+  assert.equal((await dispatchRender(inline, TH)).mode, 'inline')
+  // Done, with a job id, but the structured url is an echoed input: polled, not scanned.
+  const echoed = stubClient({
+    run_capability: [ok({ status: 'done', job_id: 'mjob_abcdef123456', url: IMG }, 'thumb https://cdn.test/thumb.jpg')],
+    get_create_media: [ok({ status: 'done', url: 'https://cdn.test/out.mp4' })],
+  })
+  assert.equal((await dispatchRender(echoed, { ...TH, poll: noSleep })).url, 'https://cdn.test/out.mp4')
+})
+
+test('a queued reply whose job id is not in the accepted shape stops instead of scanning the text', async () => {
+  const long = stubClient({ run_capability: [text('Job mjob_0123456789abcdef0123456789abcdef01 is NOT done — poll get_create_media. Source: https://cdn.test/src.png')] })
+  await assert.rejects(dispatchRender(long, TH), e => e instanceof RenderError && e.kind === 'tool' && e.mayHaveStarted === true && e.jobId === null)
+  assert.equal(long.calls.length, 1)
+})
+
+test('an echoed input is recognised across scheme, percent-encoding, repeated slashes, host case and default port', () => {
+  const img = 'https://agent.livepeer.org/a/xx.a9/pHj.jpg'
+  for (const echo of [img.replace('https:', 'http:'), 'https://agent.livepeer.org/a/xx.a9/%70Hj.jpg', 'https://agent.livepeer.org/a//xx.a9/pHj.jpg', 'https://AGENT.livepeer.org:443/a/xx.a9/pHj.jpg#x']) {
+    assert.equal(extractMediaUrl(null, `output ${echo}`, [{ cfg: { image: { url: img } } }]), null, echo)
+    assert.equal(extractMediaUrl({ url: echo }, 'https://cdn.test/thumb.jpg', [img]), null, echo)
+  }
+  assert.equal(extractMediaUrl(null, 'output https://agent.livepeer.org/a/xx.a9/pHj2.jpg', [img]), 'https://agent.livepeer.org/a/xx.a9/pHj2.jpg')
+})
+
+test('a finished job whose structured url is an input is no-media, even with another media link in its text', async () => {
+  const client = stubClient({ get_create_media: [ok({ status: 'done', url: IMG }, 'Media job mjob_abcdef123456: done\nsee https://cdn.test/thumb.jpg')] })
+  await assert.rejects(pollJob(client, 'mjob_abcdef123456', { ...noSleep, inputUrls: [IMG] }), e => e.kind === 'no-media')
+})
+
+test('pollJob never takes a reply marked isError as a result', async () => {
+  const structured = stubClient({ get_create_media: [{ isError: true, structuredContent: { status: 'done', url: 'https://cdn.test/o.mp4' }, content: [] }] })
+  await assert.rejects(pollJob(structured, 'mjob_abcdef123456', noSleep), e => e instanceof RenderError && e.kind === 'tool' && e.jobId === 'mjob_abcdef123456' && e.mayHaveStarted)
+  const header = stubClient({ get_create_media: [{ isError: true, content: [{ type: 'text', text: 'Media job mjob_abcdef123456: done\nhttps://cdn.test/o.mp4' }] }] })
+  await assert.rejects(pollJob(header, 'mjob_abcdef123456', noSleep), e => e.kind === 'tool')
+  const bare = stubClient({ get_create_media: [err(null, 'worker lost')] })
+  await assert.rejects(pollJob(bare, 'mjob_abcdef123456', noSleep), e => e.kind === 'tool' && /worker lost/.test(e.message))
+  const running = stubClient({ get_create_media: [err({ status: 'running' }, 'upstream hiccup'), ok({ status: 'done', url: OUT })] })
+  await assert.rejects(pollJob(running, 'mjob_abcdef123456', noSleep), e => e.kind === 'tool')
+})
+
+test('pollJob refuses a reply about another job, and reads multi-word text statuses', async () => {
+  const other = stubClient({ get_create_media: [text('Media job mjob_zzzzzz999999: done\nOutput: https://cdn.test/other.mp4')] })
+  await assert.rejects(pollJob(other, 'mjob_abcdef123456', noSleep), e => e.kind === 'tool' && /another job/.test(e.message))
+  const structured = stubClient({ get_create_media: [ok({ status: 'done', job_id: 'mjob_zzzzzz999999', url: 'https://cdn.test/other.mp4' })] })
+  await assert.rejects(pollJob(structured, 'mjob_abcdef123456', noSleep), e => /another job/.test(e.message))
+  const same = stubClient({ get_create_media: [ok({ status: 'done', job_id: 'MJOB_ABCDEF123456', url: OUT })] })
+  assert.equal((await pollJob(same, 'mjob_abcdef123456', noSleep)).url, OUT)
+  const words = stubClient({ get_create_media: [text('Media job mjob_abcdef123456: in progress (20s)'), text('Media job mjob_abcdef123456: In-Progress'), text('Media job mjob_abcdef123456: done\nOutput: https://cdn.test/out.mp4')] })
+  assert.equal((await pollJob(words, 'mjob_abcdef123456', noSleep)).url, 'https://cdn.test/out.mp4')
+  assert.equal(words.calls.length, 3)
+  // "until status=done" in a queued reply is not the header, so it is not a finished job.
+  const queuedText = stubClient({ get_create_media: [text(`${LOGGED_QUEUED}\nOutput: https://cdn.test/out.mp4`)] })
+  // No wait on a fake clock, so polling the queued text instead of refusing it ends as a timeout, not a hang.
+  let t = 0
+  await assert.rejects(pollJob(queuedText, 'mjob_93244be79885', { sleep: async ms => { t += ms }, now: () => t, maxWaitMs: 0 }), e => e.kind === 'unknown-status')
+})
+
+test('the served capability and cost are always writable: anything else is null with a warning', async () => {
+  for (const bad of ['', 5, 'Talking Head', 'x'.repeat(80)]) {
+    const client = stubClient({ run_capability: [ok({ ok: true, url: OUT, capability_used: bad })] })
+    const r = await dispatchRender(client, TH)
+    assert.equal(r.servedCapability, null, String(bad))
+    assert.ok(r.warnings.some(w => /not a capability name/.test(w)), String(bad))
+    assert.equal(served({ capability_used: bad }, 'talking-head'), null)
+  }
+  const good = await dispatchRender(stubClient({ run_capability: [ok({ ok: true, url: OUT, capability_used: 'lipsync' })] }), TH)
+  assert.equal(good.servedCapability, 'lipsync')
+  assert.deepEqual(good.warnings, [])
+  for (const huge of [1e21, 1e300]) {
+    const r = await dispatchRender(stubClient({ run_capability: [ok({ ok: true, url: OUT, cost_usd_estimated: huge })] }), TH)
+    assert.equal(r.costUsdEstimated, null, String(huge))
+    assert.ok(r.warnings.some(w => /cannot be recorded/.test(w)))
+  }
+  const polled = await pollJob(stubClient({ get_create_media: [ok({ status: 'done', url: OUT, capability_used: '', cost_usd_estimated: 1e21 })] }), 'mjob_abcdef123456', { ...noSleep, capability: 'talking-head' })
+  assert.equal(polled.servedCapability, null)
+  assert.equal(polled.costUsdEstimated, null)
+  assert.equal(polled.warnings.length, 2)
+  const byText = await pollJob(stubClient({ get_create_media: [text('Media job mjob_abcdef123456: done\nOutput: https://cdn.test/out.mp4')] }), 'mjob_abcdef123456', { ...noSleep, capability: 'talking-head' })
+  assert.equal(byText.servedCapability, 'talking-head')
+})
+
+test('payment classification ignores URLs, input-fetch credential errors and token allowances', () => {
+  assert.equal(classifyFailure(null, 'HTTP 401 Unauthorized fetching image_url'), 'tool')
+  assert.equal(classifyFailure(null, 'HTTP 401 Unauthorized fetching audio_url'), 'tool')
+  assert.equal(classifyFailure({ status_code: 401 }, 'fetching image_url failed'), 'tool')
+  assert.equal(classifyFailure({ status_code: 401 }, 'bad bearer token'), 'payment')
+  assert.equal(classifyFailure({ status_code: 403 }, 'unauthorized'), 'tool')
+  assert.equal(classifyFailure({ http_status: 500 }, 'insufficient credits'), 'tool')
+  assert.equal(classifyFailure(null, 'fetch failed for https://x.example/payment/receipt.jpg'), 'tool')
+  assert.equal(classifyFailure(null, 'prompt exceeds the token allowance'), 'tool')
+  assert.equal(classifyFailure(null, 'monthly credit allowance used up'), 'payment')
+  assert.equal(classifyFailure(null, 'Unauthorized: bad bearer token'), 'payment')
+  assert.equal(classifyFailure({ code: 'upstream_error' }, 'insufficient credits'), 'payment')
+  assert.equal(classifyFailure({ code: -32602 }, 'insufficient funds'), 'payment')
+  assert.equal(classifyFailure({ code: 'unauthorized' }, 'while fetching source_url'), 'tool')
+  assert.equal(classifyFailure({ code: 'unauthorized' }, 'bad key'), 'payment')
+})
+
+test('a platform error that says the render timed out or continues is kept recoverable; other errors are not', async () => {
+  for (const said of ['Render exceeded the 280s inline budget and timed out. It may still complete; check get_create_media.', 'run_capability stopped waiting; the render continues in the background']) {
+    const client = stubClient({ run_capability: [err(null, said)] })
+    await assert.rejects(dispatchRender(client, TH), e => e.kind === 'timeout' && e.jobId === null && e.mayHaveStarted === true, said)
+  }
+  const plain = stubClient({ run_capability: [err({ error: 'provider stream ended' }, 'no media produced')] })
+  await assert.rejects(dispatchRender(plain, TH), e => e.kind === 'tool' && e.mayHaveStarted === false)
+  const body = Object.assign(new TypeError('terminated'), { cause: Object.assign(new Error('Body Timeout Error'), { code: 'UND_ERR_BODY_TIMEOUT', name: 'BodyTimeoutError' }) })
+  await assert.rejects(dispatchRender(stubClient({ run_capability: [body] }), TH), e => e.kind === 'timeout' && e.mayHaveStarted === true)
+})
+
+test('a malformed job id on an error reply does not hide a payment refusal, and keeps it recoverable', async () => {
+  const okFalse = stubClient({ run_capability: [ok({ ok: false, error: 'insufficient credits', job_id: 'bad id' })] })
+  await assert.rejects(dispatchRender(okFalse, TH), e => e.kind === 'payment' && e.jobId === null && e.mayHaveStarted === true)
+  const isError = stubClient({ run_capability: [err({ error: 'insufficient credits', job_id: 'nope!' }, 'x')] })
+  await assert.rejects(dispatchRender(isError, TH), e => e.kind === 'payment' && e.jobId === null && e.mayHaveStarted === true)
+})
+
+test('invalid poll options fail before anything is dispatched', async () => {
+  // The job answers 'failed' at once, so options that slipped through would end in a
+  // RenderError after a dispatch (failing the assertions) instead of polling forever.
+  const failing = () => stubClient({
+    run_capability: [ok({ status: 'submitted', job_id: 'mjob_abcdef123456' })],
+    get_create_media: [ok({ status: 'failed', error: 'no' })],
+  })
+  for (const poll of [{ maxWaitMs: Number.NaN }, { pollIntervalMs: -1 }, { maxWaitMs: 3e9 }, { sleep: 'soon' }]) {
+    const client = failing()
+    let job = null
+    await within(assert.rejects(dispatchRender(client, { ...TH, onJob: j => { job = j }, poll }), e => e instanceof RangeError || e instanceof TypeError, JSON.stringify(poll)), 2000, JSON.stringify(poll))
+    assert.equal(client.calls.length, 0)
+    assert.equal(job, null)
+  }
+  await within(assert.rejects(pollJob(failing(), 'mjob_abcdef123456', { maxWaitMs: Number.NaN }), RangeError), 2000, 'pollJob NaN')
+})
+
+test('the poll wait ends at maxWaitMs, not later', async () => {
+  let t = 0
+  const client = stubClient({ get_create_media: [ok({ status: 'running' })] })
+  await assert.rejects(pollJob(client, 'mjob_aaaaaaaaaaaa', { sleep: async ms => { t += ms }, now: () => t, pollIntervalMs: 10_000, maxWaitMs: 30_000 }), e => e.kind === 'timeout')
+  assert.equal(client.calls.length, 4)
+})
+
+// --- round two: fetch-bytes ------------------------------------------------------------
+
+const iterBody = (items, { hang = false } = {}) => ({
+  async *[Symbol.asyncIterator]() {
+    for (const i of items) yield i
+    if (hang) await new Promise(() => {})
+  },
+  cancel: async () => {},
+})
+
+test('string chunks from a custom fetch are counted by their byte length', async () => {
+  const fetch = async () => fakeRes(iterBody(['a'.repeat(1000)]))
+  await assert.rejects(sha256OfUrl('https://h.test/a.mp4', { maxBytes: 10, fetch }), /limit/)
+  const small = await sha256OfUrl('https://h.test/a.mp4', { fetch: async () => fakeRes(iterBody(['héllo'])) })
+  assert.equal(small.sha256, createHash('sha256').update(Buffer.from('héllo', 'utf8')).digest('hex'))
+  assert.equal(small.bytes, 6)
+  await assert.rejects(sha256OfUrl('https://h.test/a.mp4', { fetch: async () => fakeRes(iterBody([{ length: 3 }])) }), /body chunk/)
+})
+
+test('the deadline holds even when a custom fetch ignores the abort signal', async () => {
+  const t0 = Date.now()
+  // Each wait has its own deadline, so a missing guard fails here instead of hanging.
+  await within(assert.rejects(sha256OfUrl('https://h.test/a.mp4', { timeoutMs: 150, attempts: 1, fetch: async () => fakeRes(iterBody([new Uint8Array(4)], { hang: true })) }), /timed out/), 800, 'hanging body read')
+  await within(assert.rejects(sha256OfUrl('https://h.test/a.mp4', { timeoutMs: 150, attempts: 1, fetch: () => new Promise(() => {}) }), /timed out/), 800, 'hanging fetch')
+  assert.ok(Date.now() - t0 < 900, `took ${Date.now() - t0}ms`)
+  await assert.rejects(sha256OfUrl('https://h.test/a.mp4', { timeoutMs: 3e9 }), e => e instanceof FetchBytesError && /timeoutMs/.test(e.message))
+  await assert.rejects(sha256OfUrl('https://h.test/a.mp4', { attempts: Number.NaN }), e => e instanceof FetchBytesError && /attempts must be/.test(e.message))
+})
+
+test('one deadline: a connection that drops late is retried only for what is left of it', async () => {
+  let n = 0
+  const fetch = (_u, { signal }) => {
+    n++
+    if (n === 1) {
+      return Promise.resolve(fakeRes(new ReadableStream({ pull: c => new Promise(r => setTimeout(r, 180)).then(() => c.error(new TypeError('terminated'))) })))
+    }
+    return new Promise((_, reject) => signal.addEventListener('abort', () => reject(signal.reason)))
+  }
+  const t0 = Date.now()
+  await assert.rejects(sha256OfUrl('https://h.test/a.mp4', { timeoutMs: 200, attempts: 4, backoffMs: 0, fetch }), /timed out fetching media after \d+ attempts? within 200ms/)
+  assert.ok(Date.now() - t0 < 380, `took ${Date.now() - t0}ms`)
+})
+
+test('a retry whose declared size is more than the budget left is refused before reading', async () => {
+  let n = 0
+  let read = false
+  const fetch = async () => {
+    n++
+    if (n === 1) return fakeRes(stream([new Uint8Array(600)], { failAfter: true }))
+    return fakeRes(new ReadableStream({ pull(c) { read = true; c.enqueue(new Uint8Array(600)); c.close() } }, { highWaterMark: 0 }), { 'content-length': '600' })
+  }
+  await assert.rejects(sha256OfUrl('https://h.test/a.mp4', { maxBytes: 1000, attempts: 2, fetch, sleep: async () => {} }), /more than is left/)
+  assert.equal(read, false)
+})
+
+// --- round two: pending records ----------------------------------------------------------
+
+const tmpStore = (opts) => {
+  const dir = join(mkdtempSync(join(tmpdir(), 'mandate-pending-')), 'pending')
+  return { dir, store: pendingStore(dir, opts), done: () => rmSync(dirname(dir), { recursive: true, force: true }) }
+}
+const dirname = p => p.slice(0, p.lastIndexOf('/'))
+const ID = 'urn:mandate:derivation:0123456789abcdef:fedcba9876543210'
+
+test('a derivation attempt refuses a changed id and invalid id, stage or mayHaveSent', () => {
+  assert.throws(() => mergeDerivationAttempt({ id: ID }, { id: 'urn:mandate:derivation:0123456789abcdef:0000000000000000' }), /must reuse/)
+  assert.throws(() => mergeDerivationAttempt(null, { id: 'urn:other:1' }), /invalid derivation id/)
+  assert.throws(() => mergeDerivationAttempt(null, { stage: 'Publish Now' }), /invalid derivation stage/)
+  assert.throws(() => mergeDerivationAttempt(null, { mayHaveSent: 'yes' }), /mayHaveSent/)
+})
+
+test('D3: a possibly-billed render keeps its key, its attempts and its place in pending spend', () => {
+  const { store, done } = tmpStore({ isAlive: () => false })
+  try {
+    const key = renderKey({ grantId: 'urn:g', capability: 'd3' })
+    const first = store.beginAttempt({ key, idempotencyKey: key, capability: 'talking-head' })
+    assert.equal(first.resumed, false)
+    assert.equal(first.record.attempts.length, 1)
+    store.markSent(key)
+    // An inline timeout: no job id, may have started.
+    store.finishAttempt(key, { status: 'submitted', jobId: null, mayHaveStarted: true, errorKind: 'timeout' })
+    assert.equal(mayBeBilled(store.load(key)), true)
+    // A rerun under another key would bill again.
+    assert.throws(() => store.beginAttempt({ key, idempotencyKey: `mandate-${'f'.repeat(32)}`, capability: 'talking-head' }), PendingInvariantError)
+    assert.throws(() => store.save({ ...store.load(key), idempotencyKey: `mandate-${'f'.repeat(32)}` }), PendingInvariantError)
+    const again = store.beginAttempt({ key, idempotencyKey: key, capability: 'talking-head' })
+    assert.equal(again.resumed, true)
+    assert.equal(again.record.idempotencyKey, key)
+    assert.equal(again.record.attempts.length, 2)
+    store.markSent(key)
+    // The retry fails cleanly (payment refused). The first attempt may still be billed.
+    const after = store.finishAttempt(key, { status: 'failed', mayHaveStarted: false, errorKind: 'payment' })
+    assert.equal(after.status, 'submitted')
+    assert.equal(after.mayHaveStarted, true)
+    assert.equal(after.attempts[1].status, 'failed')
+    assert.equal(after.attempts[0].status, 'submitted')
+    assert.equal(mayBeBilled(store.load(key)), true)
+    // A plain save cannot downgrade it or drop its history either.
+    assert.equal(store.save({ ...store.load(key), status: 'failed', mayHaveStarted: false }).status, 'submitted')
+    assert.equal(store.load(key).mayHaveStarted, true)
+    assert.throws(() => store.save({ ...store.load(key), attempts: [] }), PendingInvariantError)
+    // mandate record may resolve it explicitly.
+    assert.equal(store.save({ ...store.load(key), status: 'rendered', mediaUrl: OUT }).status, 'rendered')
+  } finally {
+    done()
+  }
+})
+
+test('a clean failure is not billed, so a rerun may start afresh with a new key', () => {
+  const { store, done } = tmpStore({ isAlive: () => false })
+  try {
+    const key = renderKey({ grantId: 'urn:g', capability: 'clean' })
+    store.beginAttempt({ key, idempotencyKey: key })
+    store.markSent(key)
+    assert.equal(store.finishAttempt(key, { status: 'failed', mayHaveStarted: false, errorKind: 'payment' }).status, 'failed')
+    assert.equal(mayBeBilled(store.load(key)), false)
+    const next = store.beginAttempt({ key, idempotencyKey: `mandate-${'e'.repeat(32)}` })
+    assert.equal(next.resumed, false)
+    assert.equal(next.record.idempotencyKey, `mandate-${'e'.repeat(32)}`)
+    assert.equal(next.record.attempts.length, 2)
+    // A record created but never sent (crash before dispatch) is not billed.
+    const k2 = renderKey({ grantId: 'urn:g', capability: 'unsent' })
+    store.create({ key: k2, idempotencyKey: k2, status: 'dispatching' })
+    assert.equal(mayBeBilled(store.load(k2)), false)
+    assert.equal(store.save({ ...store.load(k2), status: 'failed' }).status, 'failed')
+  } finally {
+    done()
+  }
+})
+
+test('a dispatching record is protected: a crashed one is resumed, a live one is refused, a legacy one is not overwritten', () => {
+  let alive = true
+  const { store, done } = tmpStore({ isAlive: () => alive })
+  try {
+    const key = renderKey({ grantId: 'urn:g', capability: 'crash' })
+    store.save({ key, idempotencyKey: key, status: 'dispatching', attempts: [{ n: 1, pid: 999_999_001, startedAt: '2026-09-14T00:00:00Z', idempotencyKey: key, sentAt: '2026-09-14T00:00:01Z' }] })
+    assert.throws(() => store.beginAttempt({ key, idempotencyKey: key }), e => e instanceof PendingConflictError && e.inFlight === true)
+    assert.throws(() => store.create({ key, idempotencyKey: key, status: 'dispatching' }), PendingConflictError)
+    alive = false
+    const r = store.beginAttempt({ key, idempotencyKey: key })
+    assert.equal(r.resumed, true)
+    assert.equal(r.record.attempts.length, 2)
+    const legacy = renderKey({ grantId: 'urn:g', capability: 'legacy' })
+    store.save({ key: legacy, idempotencyKey: legacy, status: 'dispatching' })
+    assert.throws(() => store.create({ key: legacy, idempotencyKey: legacy, status: 'dispatching' }), PendingConflictError)
+    const resumed = store.beginAttempt({ key: legacy, idempotencyKey: legacy })
+    assert.equal(resumed.resumed, true)
+    assert.equal(resumed.record.attempts[0].legacy, true)
+    const withJob = renderKey({ grantId: 'urn:g', capability: 'job' })
+    store.save({ key: withJob, idempotencyKey: withJob, status: 'submitted', jobId: 'mjob_aaaaaaaaaaaa' })
+    assert.throws(() => store.beginAttempt({ key: withJob, idempotencyKey: withJob }), e => e instanceof PendingConflictError && !e.inFlight)
+  } finally {
+    done()
+  }
+})
+
+test('a held lock is waited on and then refused; a stale one is cleared', () => {
+  let alive = true
+  const { dir, store, done } = tmpStore({ isAlive: () => alive })
+  try {
+    const key = renderKey({ grantId: 'urn:g', capability: 'lock' })
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(join(dir, `${key}.json.lock`), JSON.stringify({ pid: 999_999_002 }))
+    assert.throws(() => store.beginAttempt({ key, idempotencyKey: key }), e => e instanceof PendingConflictError && e.inFlight)
+    assert.equal(store.load(key), null)
+    alive = false
+    assert.equal(store.beginAttempt({ key, idempotencyKey: key }).resumed, false)
+  } finally {
+    done()
+  }
+})
+
+test('two processes starting the same render at once: exactly one dispatches', async () => {
+  const { dir, done } = tmpStore()
+  try {
+    const key = renderKey({ grantId: 'urn:g', capability: 'race' })
+    const src = new URL('../src/pending.mjs', import.meta.url).href
+    const script = `
+      const { pendingStore } = await import(${JSON.stringify(src)})
+      const store = pendingStore(${JSON.stringify(dir)})
+      await new Promise(r => setTimeout(r, Math.max(0, ${Date.now() + 400} - Date.now())))
+      try {
+        const r = store.beginAttempt({ key: ${JSON.stringify(key)}, idempotencyKey: ${JSON.stringify(key)} })
+        console.log(r.resumed ? 'resumed' : 'created')
+        await new Promise(r => setTimeout(r, 800))
+      } catch (e) { console.log(e.name) }
+    `
+    const run = () => new Promise(resolve => {
+      const child = spawn(process.execPath, ['--input-type=module', '-e', script])
+      let out = ''
+      child.stdout.on('data', d => { out += d })
+      child.on('close', () => resolve(out.trim()))
+    })
+    const results = await Promise.all([run(), run(), run(), run()])
+    assert.equal(results.filter(r => r === 'created').length, 1, results.join(','))
+    assert.equal(results.filter(r => r === 'resumed').length, 0, results.join(','))
+    assert.equal(results.filter(r => r === 'PendingConflictError').length, 3, results.join(','))
+  } finally {
+    done()
+  }
+})
+
+test('an unreadable pending record is a PendingReadError naming the file', () => {
+  const { dir, store, done } = tmpStore()
+  try {
+    const key = renderKey({ grantId: 'urn:g', capability: 'corrupt' })
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(join(dir, `${key}.json`), '{ not json')
+    assert.throws(() => store.load(key), e => e instanceof PendingReadError && e.file.endsWith(`${key}.json`))
+    assert.throws(() => store.list(), PendingReadError)
+  } finally {
+    done()
   }
 })

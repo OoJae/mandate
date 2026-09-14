@@ -8,9 +8,12 @@ import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { startFakeDkg } from './fixtures/fake-dkg-server.mjs'
 import { loadEnvFile } from '../bin/config.mjs'
+import { createHash } from 'node:crypto'
 import { renderKey, pendingStore } from '../src/pending.mjs'
+import { consentScript } from '../src/scope.mjs'
+import { EXIT_HELP } from '../bin/args.mjs'
 import { GRANTS_CG, DERIVS_CG, ANA, PRODUCER, STRANGER, derivation, derivationKa } from './fixtures/build.mjs'
-import { redact, waitMs, clearFor, taintedFor } from '../demo/full.mjs'
+import { redact, waitMs, clearFor, taintedFor, blastLine } from '../demo/full.mjs'
 
 const BIN = new URL('../bin/mandate.mjs', import.meta.url).pathname
 const NODES = new URL('../scripts/nodes.mjs', import.meta.url).pathname
@@ -42,6 +45,8 @@ export async function fakeClient() {
       counts[key] = (counts[key] ?? -1) + 1
       const r = replies[Math.min(counts[key], replies.length - 1)]
       if (r.throw) throw new Error(r.throw)
+      // Never answers: with nothing else pending, the CLI process ends mid-call, like a crash.
+      if (r.hang) await new Promise(() => {})
       return { structuredContent: r.structured, content: r.text ? [{ type: 'text', text: r.text }] : [], isError: r.isError === true }
     },
     async close() {},
@@ -338,12 +343,23 @@ function consentLp(transcript, { tag = String(++lpSeq), asr } = {}) {
 const consentGrant = over => grantArgs({ 'with-consent': true, territory: null, ...over })
 
 test('R9: a grant that cannot be published fails before any consent clip is requested or transcribed', async () => {
+  const before = publishes(grantor)
   const lp = consentLp('I consent to a talking head video of me for advertising.')
   // Off a terminal, the clip could never be confirmed: exit 3 before capture, even with --yes.
   const noTty = await mandate(consentGrant(), { lp })
   assert.equal(noTty.code, 3, noTty.stdout)
   assert.equal(json(noTty).reason, 'consent confirmation impossible')
   assert.deepEqual(noTty.calls, [])
+  // Without --yes too: still exit 3, not a usage error, and still nothing requested.
+  const noTtyNoYes = await mandate(consentGrant({ yes: null }), { lp })
+  assert.equal(noTtyNoYes.code, 3, noTtyNoYes.stdout)
+  assert.equal(json(noTtyNoYes).reason, 'consent confirmation impossible')
+  assert.deepEqual(noTtyNoYes.calls, [])
+  // On a terminal but in --json mode without --yes, the publish confirmation cannot be asked: exit 1 before capture.
+  const jsonNoYes = await mandate(consentGrant({ yes: null }), { lp, tty: true })
+  assert.equal(jsonNoYes.code, 1, jsonNoYes.stdout)
+  assert.match(json(jsonNoYes).error, /pass --yes/)
+  assert.deepEqual(jsonNoYes.calls, [])
   // Lowercase territory, a grants graph this node does not own, a past end date: exit 1, nothing requested.
   const cases = [
     [consentGrant({ territory: 'gb' }), {}],
@@ -357,32 +373,84 @@ test('R9: a grant that cannot be published fails before any consent clip is requ
     assert.equal(r.code, 1, `${args.join(' ')}\n${r.stdout}${r.stderr}`)
     assert.deepEqual(r.calls, [], args.join(' '))
   }
-  assert.equal(grantor.calls.filter(x => x.method === 'POST' && x.path === '/api/knowledge-assets' && x.body.name?.startsWith('grant-ana-')).length >= 0, true)
+  assert.equal(publishes(grantor), before)
 })
 
-test('R12: a captured clip needs typed confirmation of its transcript and every unchecked term, which --yes does not skip', async () => {
-  const lp = consentLp('I consent to a talking head video of me for advertising.')
-  const before = publishes(grantor)
-  // The typed answers are wrong: nothing is published, exit 3.
-  const wrong = await mandate(consentGrant({ subject: 'cara' }), { lp, tty: true, input: 'matches\nyes\nyes\nyes\n' })
-  assert.equal(wrong.code, 3, wrong.stderr)
-  assert.equal(json(wrong).reason, 'consent not confirmed')
-  assert.equal(publishes(grantor), before)
-  // No answers at all (end of input): not confirmed.
-  assert.equal((await mandate(consentGrant({ subject: 'cara' }), { lp, tty: true })).code, 3)
+const until = '2026-12-01T00:00:00.000Z'
+const scriptFor = (over = {}) => consentScript({ capability: ['talking-head'], useClass: ['advertising'], territory: [], validUntil: until, maxSpendUsd: '5', ...over })
+const lastGrantQuads = () => grantor.calls.findLast(x => x.method === 'POST' && x.path === '/api/knowledge-assets').body.quads
 
-  const until = '2026-12-01T00:00:00.000Z'
-  const ok = await mandate(consentGrant({ subject: 'cara', 'valid-until': until }), { lp, tty: true, input: `matches\n2026-12-01\n5\nanywhere\n` })
+test('D1/D2: a reading of the consent script is accepted without a typed answer, and carries the clip hash', async () => {
+  const before = publishes(grantor)
+  const lp = consentLp(scriptFor({ territory: ['GB'] }))
+  const ok = await mandate(consentGrant({ subject: 'cara', territory: 'GB', 'valid-until': until }), { lp, tty: true })
   assert.equal(ok.code, 0, ok.stderr)
   const out = json(ok)
   assert.equal(out.granted, true)
+  assert.equal(out.consent.confirmedBy, 'script')
+  assert.equal(out.consent.scope.scriptMatch.matched, true)
   assert.match(out.grant.consentClipSha256, /^[0-9a-f]{64}$/)
-  assert.equal(out.consent.forced, false)
-  assert.deepEqual(out.consent.scope.unchecked.sort(), ['ceiling', 'territory-unrestricted', 'validity'])
-  assert.match(ok.stderr, /NOT CHECKED against the words — valid until 2026-12-01/)
-  assert.match(ok.stderr, /spend ceiling \$5/)
-  assert.match(ok.stderr, /territory ANYWHERE/)
+  assert.doesNotMatch(ok.stderr, /Type /)
   assert.equal(publishes(grantor), before + 1)
+})
+
+test('D2: a reading of the script still needs a typed answer for what the script never says, and --json cannot give it', async () => {
+  const before = publishes(grantor)
+  const lp = consentLp(scriptFor())
+  // No territory: the script never says "anywhere". In --json mode that is exit 3 before publishing.
+  const jsonMode = await mandate(consentGrant({ subject: 'cara', 'valid-until': until }), { lp, tty: true, input: 'anywhere\n' })
+  assert.equal(jsonMode.code, 3, jsonMode.stderr)
+  assert.equal(json(jsonMode).reason, 'consent confirmation impossible')
+  assert.equal(publishes(grantor), before)
+  const wrong = await mandate(consentGrant({ subject: 'cara', 'valid-until': until, json: null }), { lp, tty: true, input: 'yes\n' })
+  assert.equal(wrong.code, 3, wrong.stdout)
+  assert.equal(publishes(grantor), before)
+  // No ceiling: the script never says "none".
+  const noCeiling = await mandate(consentGrant({ subject: 'cara', territory: 'GB', 'valid-until': until, 'max-spend': null }), { lp: consentLp(scriptFor({ territory: ['GB'], maxSpendUsd: null })), tty: true, input: 'none\n' })
+  assert.equal(noCeiling.code, 3, noCeiling.stderr)
+  assert.match(json(noCeiling).detail, /ceiling/)
+  const ok = await mandate(consentGrant({ subject: 'cara', 'valid-until': until, json: null }), { lp, tty: true, input: 'anywhere\n' })
+  assert.equal(ok.code, 0, ok.stdout)
+  assert.match(ok.stdout, /territory ANYWHERE/)
+  assert.doesNotMatch(ok.stdout, /Type .*matches/)
+  assert.match(ok.stdout, /consent clip [0-9a-f]{64}/)
+  assert.equal(publishes(grantor), before + 1)
+})
+
+test('D2: a transcript that is not the script needs every typed answer, which --yes never skips, and is published without the clip hash', async () => {
+  // Heuristically consent-like, but not a reading of the script.
+  const lp = consentLp('I consent to a talking head video of me for advertising.')
+  const before = publishes(grantor)
+  const args = over => consentGrant({ subject: 'cara', 'valid-until': until, json: null, ...over })
+  // --json on a terminal: the confirmation cannot be asked; exit 3, nothing published, the differences reported.
+  const jsonMode = await mandate(args({ json: true }), { lp, tty: true, input: 'matches\nconsents\n2026-12-01\n5\nanywhere\n' })
+  assert.equal(jsonMode.code, 3, jsonMode.stderr)
+  assert.equal(json(jsonMode).reason, 'consent confirmation impossible')
+  assert.equal(json(jsonMode).consent.scope.scriptMatch.matched, false)
+  assert.match(jsonMode.stderr, /NOT A READING OF THE CONSENT SCRIPT/)
+  assert.match(jsonMode.stderr, /script\s+"I consent to talking head/)
+  assert.match(jsonMode.stderr, /missing\s+\S/)
+  // The transcript answer alone is wrong; every later answer is right: not confirmed.
+  const noMatch = await mandate(args(), { lp, tty: true, input: 'yes\nconsents\n2026-12-01\n5\nanywhere\n' })
+  assert.equal(noMatch.code, 3, noMatch.stdout)
+  // The meaning answer alone is wrong.
+  const noMeaning = await mandate(args(), { lp, tty: true, input: 'matches\nmatches\n2026-12-01\n5\nanywhere\n' })
+  assert.equal(noMeaning.code, 3, noMeaning.stdout)
+  // An unchecked term alone is wrong.
+  const noDate = await mandate(args(), { lp, tty: true, input: 'matches\nconsents\n2026-12-02\n5\nanywhere\n' })
+  assert.equal(noDate.code, 3, noDate.stdout)
+  // No answers at all (end of input): not confirmed.
+  assert.equal((await mandate(args(), { lp, tty: true })).code, 3)
+  assert.equal(publishes(grantor), before)
+
+  const ok = await mandate(args(), { lp, tty: true, input: 'matches\nconsents\n2026-12-01\n5\nanywhere\n' })
+  assert.equal(ok.code, 0, ok.stdout)
+  assert.match(ok.stdout, /NOT CHECKED against the words — valid until 2026-12-01/)
+  assert.match(ok.stdout, /spend ceiling \$5/)
+  assert.match(ok.stdout, /territory ANYWHERE/)
+  assert.match(ok.stdout, /consent clip not attached/)
+  assert.equal(publishes(grantor), before + 1)
+  assert.ok(!lastGrantQuads().some(q => /consentClipSha256/.test(q.predicate)))
 })
 
 test('R18: --force never publishes past a failed transcription or a clip with no first-person consent', async () => {
@@ -394,24 +462,45 @@ test('R18: --force never publishes past a failed transcription or a clip with no
   assert.equal(asrFailed.code, 3, asrFailed.stderr)
   assert.match(json(asrFailed).consent.asrError, /model unavailable/)
 
-  const reported = await mandate(consentGrant({ subject: 'dan', force: true }), {
+  // Every typed answer a hand confirmation would need is given: still refused, because nobody said "I consent".
+  const reported = await mandate(consentGrant({ subject: 'dan', force: true, json: null }), {
     lp: consentLp('She said she consents to a talking head video for advertising.'), tty: true,
-    input: `matches\n${new Date(Date.now() + 90 * 864e5).toISOString().slice(0, 10)}\n5\nanywhere\n`,
+    input: `matches\nconsents\n${new Date(Date.now() + 90 * 864e5).toISOString().slice(0, 10)}\n5\nanywhere\n`,
   })
-  assert.equal(reported.code, 3, reported.stderr)
-  assert.equal(json(reported).consent.scope.affirmative, false)
+  assert.equal(reported.code, 3, reported.stdout)
+  assert.match(reported.stdout, /NO CONSENT SAID/)
   assert.equal(publishes(grantor), before)
 })
 
-test('item 11: a grant forced past a missing term is published without the clip hash, so it never looks checked', async () => {
+test('item 11: a grant forced past unheard terms is published without the clip hash, so it never looks checked', async () => {
   const lp = consentLp('I consent to a talking head video of me.')
-  const r = await mandate(consentGrant({ subject: 'eve', force: true, territory: 'GB' }), { lp, tty: true, input: 'matches\n' + new Date(Date.now() + 90 * 864e5).toISOString().slice(0, 10) + '\n5\n' })
-  assert.equal(r.code, 0, r.stderr)
-  const out = json(r)
-  assert.equal(out.consent.forced, true)
-  assert.equal(out.consent.publishedClipHash, false)
-  assert.equal(out.grant.consentClipSha256, null)
-  assert.match(out.consent.sha256, /^[0-9a-f]{64}$/)
+  const date = new Date(Date.now() + 90 * 864e5).toISOString().slice(0, 10)
+  const before = publishes(grantor)
+  // Without --force the unheard terms stop it before any question is asked.
+  const unforced = await mandate(consentGrant({ subject: 'eve', territory: 'GB', json: null }), { lp, tty: true, input: `matches\nconsents\n${date}\n5\n` })
+  assert.equal(unforced.code, 3, unforced.stdout)
+  assert.match(unforced.stdout, /Not heard: .*advertising/)
+  assert.equal(publishes(grantor), before)
+  const r = await mandate(consentGrant({ subject: 'eve', force: true, territory: 'GB', json: null }), { lp, tty: true, input: `matches\nconsents\n${date}\n5\n` })
+  assert.equal(r.code, 0, r.stdout)
+  assert.match(r.stdout, /--force: the heuristics did not hear every requested term/)
+  assert.match(r.stdout, /consent clip not attached .*clip sha256 [0-9a-f]{64}/)
+  assert.equal(publishes(grantor), before + 1)
+  assert.ok(!lastGrantQuads().some(q => /consentClipSha256/.test(q.predicate)))
+})
+
+test('D1: consent confirms only a reading of the script; anything else is exit 3 with the differences', async () => {
+  const requested = { capability: ['talking-head'], useClass: ['advertising'], territory: ['GB'] }
+  const args = ['consent', '--capability', 'talking-head', '--use-class', 'advertising', '--territory', 'GB', '--json']
+  const ok = await mandate(args, { lp: consentLp(consentScript(requested)) })
+  assert.equal(ok.code, 0, ok.stderr)
+  assert.equal(json(ok).confirmed, true)
+  const loose = await mandate(args, { lp: consentLp('I consent to a talking head video of me for advertising in the UK.') })
+  assert.equal(loose.code, 3, loose.stderr)
+  assert.equal(json(loose).confirmed, false)
+  assert.match(loose.stderr, /NOT A READING OF THE CONSENT SCRIPT/)
+  const contradicted = await mandate(args, { lp: consentLp(`${consentScript(requested)} But not for advertising.`) })
+  assert.equal(contradicted.code, 8, contradicted.stderr)
 })
 
 /* Rendering */
@@ -479,7 +568,9 @@ test('R14: a rerun never re-dispatches a recorded, submitted or rendered render'
 test('item 8: an inline call that times out with no job id stays recoverable, and rerunning the same command recovers it', async () => {
   await newGrant('ivy')
   const lost = await mandate(execArgs('ivy'), { lp: renderLp('ivy', { 'run_capability:talking-head': { throw: 'Request timed out' } }) })
-  assert.equal(lost.code, 5, lost.stdout)
+  // Outcome unknown: 9, as for `record`, never 5 ("render failed"), which a script would read as not billed.
+  assert.equal(lost.code, 9, lost.stdout)
+  assert.equal(json(lost).outcome, 'unknown')
   const out = json(lost)
   assert.equal(out.recoverable, true)
   const rec = store().load(out.pending)
@@ -571,7 +662,8 @@ test('R3: after a lost publish response the asset is not published again until t
   const before = publishes(producer)
   const blocked = await mandate(['record', '--pending', out.pending, '--json'])
   assert.equal(blocked.code, 4)
-  assert.equal(json(blocked).stage, 'resume-refused')
+  // Retryable, not permanent: the retry below succeeds once the node shows the asset published.
+  assert.equal(json(blocked).stage, 'resume-unverified')
   assert.match(json(blocked).error, /swm-shared/)
   assert.equal(publishes(producer), before)
 
@@ -594,9 +686,11 @@ test('R3: a retry after a failed share continues the same asset instead of creat
   }
   assert.equal(first.code, 4, first.stdout)
   const name = json(first).asset
+  const id = json(first).derivationId
   const retry = await mandate(['record', '--pending', json(first).pending, '--json'])
   assert.equal(retry.code, 0, retry.stdout)
   assert.equal(json(retry).derivation.name, name)
+  assert.equal(json(retry).derivation.id, id)
   assert.equal(producer.calls.filter(x => x.method === 'POST' && x.path === '/api/knowledge-assets' && x.body.name?.startsWith(name.slice(0, 27))).length, 1)
 })
 
@@ -619,17 +713,120 @@ test('item 12: renders on this machine not yet recorded count against the ceilin
   const dry = renderArgs({ subject: `${ANA}:ora` })
   assert.equal((await mandate(dry)).code, 0)
   const other = { key: `mandate-${'1'.repeat(32)}`, capability: 'talking-head', grantId: g.id, createdAt: new Date().toISOString() }
-  store().save({ ...other, status: 'submitted', jobId: 'mjob_ora00001', estimateUsd: 0.5 })
+  // A fixed-unit list price is a usable estimate.
+  const fixed = { estimateUsd: 0.5, estimateSource: 'static list price', priceUnit: 'request' }
+  store().save({ ...other, ...fixed, status: 'submitted', jobId: 'mjob_ora00001' })
   const over = await mandate(dry)
   assert.equal(over.code, 2)
   assert.equal(json(over).decision.clause, 'spend-ceiling')
   assert.equal(json(over).localPending.length, 1)
-  store().save({ ...other, status: 'dispatching', estimateUsd: null })
+  assert.equal(json(over).localPending[0].billedUsd, 0.5)
+  // Billed media not yet anchored counts too.
+  store().save({ ...other, ...fixed, status: 'rendered', mediaUrl: mediaUrl('out-ora.mp4') }, { allowResolve: true })
+  const rendered = await mandate(dry)
+  assert.equal(rendered.code, 2, rendered.stdout)
+  assert.equal(json(rendered).localPending[0].status, 'rendered')
+  store().save({ ...other, status: 'dispatching', estimateUsd: null }, { allowResolve: true })
   const unknown = await mandate(dry)
   assert.equal(unknown.code, 2)
   assert.match(json(unknown).decision.reason, /unknown/)
-  store().save({ ...other, status: 'failed' })
+  // Whatever its status says, a record that may be billed counts.
+  store().save({ ...other, status: 'failed', mayHaveStarted: true }, { allowResolve: true })
+  assert.equal((await mandate(dry)).code, 2)
+  store().save({ ...other, status: 'failed', mayHaveStarted: false }, { allowResolve: true })
   assert.equal((await mandate(dry)).code, 0)
+})
+
+test('item 12: a pending estimate the operator shrank with --seconds is not trusted as the amount', async () => {
+  const g = await newGrant('oto', { 'max-spend': '1' })
+  const dry = renderArgs({ subject: `${ANA}:oto`, seconds: '1' })
+  const other = { key: `mandate-${'2'.repeat(32)}`, capability: 'talking-head', grantId: g.id, createdAt: new Date().toISOString(), status: 'rendered', mediaUrl: mediaUrl('out-oto.mp4') }
+  // A 1-second estimate of a per-second render, with no platform cost: unknown, which refuses under the ceiling.
+  store().save({ ...other, estimateUsd: 0.168, estimateSource: 'static list price', priceUnit: 'second', costUsdEstimated: null })
+  const shrunk = await mandate(dry)
+  assert.equal(shrunk.code, 2, shrunk.stdout)
+  assert.equal(json(shrunk).localPending[0].billedUsd, null)
+  // A known cost smaller than the estimate: the larger counts.
+  store().save({ ...other, estimateUsd: 0.9, estimateSource: 'static list price', priceUnit: 'second', costUsdEstimated: 0.1 })
+  assert.equal(json(await mandate(dry)).localPending[0].billedUsd, 0.9)
+  store().save({ ...other, status: 'recorded' })
+})
+
+test('D3: a possibly-billed render rerun that then fails cleanly stays unknown, keeps its key and history, and keeps counting', async () => {
+  const g = await newGrant('vaa', { 'max-spend': '1' })
+  const lost = await mandate(execArgs('vaa'), { lp: renderLp('vaa', { 'run_capability:talking-head': { throw: 'Request timed out' } }) })
+  assert.equal(lost.code, 9, lost.stdout)
+  const key = json(lost).pending
+  const firstKey = lost.calls.find(x => x.name === 'run_capability:talking-head').args.idempotency_key
+  const again = await mandate(execArgs('vaa'), { lp: renderLp('vaa', { 'run_capability:talking-head': { structured: { ok: false, error: 'insufficient credits' } } }) })
+  assert.equal(again.code, 9, again.stdout)
+  assert.equal(json(again).outcome, 'unknown')
+  assert.equal(again.calls.find(x => x.name === 'run_capability:talking-head').args.idempotency_key, firstKey)
+  const rec = store().load(key)
+  assert.equal(rec.status, 'submitted')
+  assert.equal(rec.mayHaveStarted, true)
+  assert.equal(rec.attempts.length, 2)
+  assert.equal(rec.idempotencyKey, firstKey)
+  // Still counted, and still unknown to record.
+  const other = await mandate(renderArgs({ subject: `${ANA}:vaa`, seconds: '1' }))
+  assert.equal(other.code, 2, other.stdout)
+  assert.equal(json(other).localPending.length, 1)
+  assert.equal((await mandate(['record', '--pending', key, '--json'])).code, 9)
+  // A spend-cap refusal on a further rerun does not erase it either.
+  const capped = await mandate(execArgs('vaa'), { lp: renderLp('vaa', { spend_cap: { structured: { remaining_usd: 0.0001 } } }) })
+  assert.equal(capped.code, 10, capped.stdout)
+  assert.ok(!capped.calls.some(x => x.name.startsWith('run_capability')))
+  assert.equal(store().load(key).status, 'submitted')
+  assert.equal(store().load(key).attempts.length, 3)
+})
+
+test('D3: a rerun without --idempotency-key reuses the key a possibly-billed render was sent with; a different key is refused before sending', async () => {
+  await newGrant('vac')
+  const lost = await mandate(execArgs('vac', { 'idempotency-key': 'custom-key-1' }), { lp: renderLp('vac', { 'run_capability:talking-head': { throw: 'Request timed out' } }) })
+  const key = json(lost).pending
+  assert.equal(store().load(key).idempotencyKey, 'custom-key-1')
+  const other = await mandate(execArgs('vac', { 'idempotency-key': 'custom-key-2' }), { lp: renderLp('vac') })
+  assert.equal(other.code, 1, other.stdout)
+  assert.match(json(other).error, /custom-key-1/)
+  assert.ok(!other.calls.some(x => x.name.startsWith('run_capability')))
+  const again = await mandate(execArgs('vac'), { lp: renderLp('vac') })
+  assert.equal(again.code, 0, again.stdout)
+  assert.deepEqual(again.calls.filter(x => x.name === 'run_capability:talking-head').map(x => x.args.idempotency_key), ['custom-key-1'])
+})
+
+test('D3: a crashed legacy dispatching record is resumed under its own key and never downgraded; a live dispatch is not touched', async () => {
+  const g = await newGrant('vaf', { 'max-spend': '1' })
+  const key = keyFor(g.id)
+  store().save({ key, idempotencyKey: key, status: 'dispatching', createdAt: new Date().toISOString(), subject: g.subject, capability: 'talking-head', grantId: g.id, estimateUsd: 0.84 })
+  const again = await mandate(execArgs('vaf'), { lp: renderLp('vaf', { 'run_capability:talking-head': { structured: { ok: false, error: 'bad input' }, isError: true } }) })
+  assert.equal(again.code, 9, again.stdout)
+  assert.equal(again.calls.find(x => x.name === 'run_capability:talking-head').args.idempotency_key, key)
+  assert.equal(store().load(key).status, 'submitted')
+
+  const g2 = await newGrant('vag')
+  const key2 = keyFor(g2.id)
+  // Another process that is still alive (this test runner) is dispatching it.
+  store().save({ key: key2, idempotencyKey: key2, status: 'dispatching', createdAt: new Date().toISOString(), capability: 'talking-head', grantId: g2.id, attempts: [{ n: 1, pid: process.pid, startedAt: new Date().toISOString(), sentAt: new Date().toISOString() }] })
+  const live = await mandate(execArgs('vag'), { lp: renderLp('vag') })
+  assert.equal(live.code, 5, live.stdout)
+  assert.equal(json(live).inFlight, true)
+  assert.ok(!live.calls.some(x => x.name.startsWith('run_capability')))
+  store().save({ ...store().load(key2), status: 'recorded' }, { allowResolve: true })
+})
+
+test('an unreadable pending record is exit 9 naming the file, not a usage error', async () => {
+  await newGrant('vae')
+  mkdirSync(pendingDir(), { recursive: true })
+  const bad = join(pendingDir(), `mandate-${'7'.repeat(32)}.json`)
+  writeFileSync(bad, '{ not json')
+  try {
+    const r = await mandate(renderArgs({ subject: `${ANA}:vae` }))
+    assert.equal(r.code, 9, r.stdout)
+    assert.match(json(r).error, /mandate-7{32}\.json/)
+    assert.match(json(r).file, /mandate-7{32}\.json/)
+  } finally {
+    rmSync(bad)
+  }
 })
 
 test('render --execute refuses to pay for a render whose derivation would not count toward spend', async () => {
@@ -744,4 +941,231 @@ test('R25 and item 15: demo runs are ignored by git, redact transcripts and priv
   assert.equal(clearFor({ result: { verdict: 'CLEAR', grantId: g } }, g), true)
   assert.equal(taintedFor({ result: { verdict: 'TAINTED', subStatus: 'MALFORMED', grantId: g } }, g), false)
   assert.equal(taintedFor({ result: { verdict: 'TAINTED', subStatus: 'REVOKED', grantId: g } }, g), true)
+})
+
+/* Derivation retries, lost grant and revocation replies, exit codes, node scripts */
+
+const sha = s => createHash('sha256').update(s).digest('hex')
+
+/** A rendered, unrecorded record whose last derivation attempt is `attempt`, and the asset it names. */
+function stuckRender(g, tag, attempt, { descriptor = null, extra = {} } = {}) {
+  const key = `mandate-${sha(tag).slice(0, 32)}`
+  const h = sha(`bytes of /out-${tag}.mp4`)
+  const nonce = sha(`nonce ${tag}`).slice(0, 16)
+  const name = `derivation-${h.slice(0, 16)}-${nonce}`
+  const id = `urn:mandate:derivation:${h.slice(0, 16)}:${nonce}`
+  if (descriptor) producer.assets.set(name, { quads: [], cg: DERIVS_CG, descriptor: { agentAddress: PRODUCER, ...descriptor } })
+  store().save({
+    key, idempotencyKey: key, status: 'rendered', createdAt: new Date().toISOString(), capability: 'talking-head', grantId: g.id,
+    mediaUrl: mediaUrl(`out-${tag}.mp4`), jobId: null, costUsdEstimated: 0.5, derivationAttempt: { id, name, ual: null, txHash: null, stage: 'started', mayHaveSent: false, ...attempt }, ...extra,
+  })
+  return { key, name }
+}
+const assetCreates = (node, name) => node.calls.filter(x => x.method === 'POST' && x.path === '/api/knowledge-assets' && x.body.name === name).length
+
+test('R3: a derivation publish that reported a transaction, or left no HTTP status, is never published again while the node shows it shared', async () => {
+  const g = await newGrant('vad')
+  const shared = { status: 'swm-shared', wmCurrentAssertion: '1'.repeat(64), swmCurrentAssertion: '1'.repeat(64) }
+  const before = publishes(producer)
+  // Even with a 4xx status saved, a reported transaction means it may have been sent.
+  const withTx = stuckRender(g, 'vad-tx', { stage: 'publish', txHash: `0x${'cd'.repeat(32)}` }, { descriptor: shared, extra: { derivationPublishStatus: 409 } })
+  const r1 = await mandate(['record', '--pending', withTx.key, '--json'])
+  assert.equal(r1.code, 4, r1.stdout)
+  assert.equal(json(r1).stage, 'resume-unverified')
+  // An older `publish` attempt with no status kept: it may have followed a broadcast (a 500).
+  const legacy = stuckRender(g, 'vad-legacy', { stage: 'publish' }, { descriptor: shared })
+  const r2 = await mandate(['record', '--pending', legacy.key, '--json'])
+  assert.equal(r2.code, 4, r2.stdout)
+  assert.equal(json(r2).stage, 'resume-unverified')
+  assert.equal(publishes(producer), before)
+})
+
+test('R3: a derivation publish refused with 4xx sent nothing, so the retry publishes the same asset', async () => {
+  await newGrant('vah')
+  producer.scenario.publish = 'refused'
+  let first
+  try {
+    first = await mandate(execArgs('vah'), { lp: renderLp('vah') })
+  } finally {
+    delete producer.scenario.publish
+  }
+  assert.equal(first.code, 4, first.stdout)
+  assert.equal(json(first).stage, 'publish')
+  assert.equal(json(first).mayHaveSent, false)
+  assert.equal(store().load(json(first).pending).derivationPublishStatus, 409)
+  const retry = await mandate(['record', '--pending', json(first).pending, '--json'])
+  assert.equal(retry.code, 0, retry.stdout)
+  assert.equal(json(retry).derivation.name, json(first).asset)
+  assert.equal(json(retry).derivation.resumed, true)
+})
+
+test('R3: an unbound attempt is never continued, even if the node later shows it sealed; a possibly-sent attempt with no asset is not recreated', async () => {
+  const g = await newGrant('vai')
+  const before = publishes(producer)
+  const unbound = stuckRender(g, 'vai-unbound', { stage: 'unbound', ual: `did:dkg:base:84532/${PRODUCER}/999` }, { descriptor: { status: 'wm-sealed', wmCurrentAssertion: '1'.repeat(64) } })
+  const r1 = await mandate(['record', '--pending', unbound.key, '--json'])
+  assert.equal(r1.code, 4, r1.stdout)
+  assert.equal(json(r1).stage, 'resume-refused')
+  assert.match(r1.stdout, /never publish this asset again|resume-refused/)
+  const text = await mandate(['record', '--pending', unbound.key])
+  assert.match(text.stdout, /will never publish this asset again/)
+  const sent = stuckRender(g, 'vai-sent', { stage: 'publish-transport', mayHaveSent: true })
+  const r2 = await mandate(['record', '--pending', sent.key, '--json'])
+  assert.equal(r2.code, 4, r2.stdout)
+  assert.equal(json(r2).stage, 'resume-unverified')
+  assert.match(json(r2).error, /no such asset/)
+  assert.equal(assetCreates(producer, sent.name), 0)
+  assert.equal(publishes(producer), before)
+})
+
+test('D5: a grant whose publish reply is lost reports its grant id and asset, and the same id is revocable once it lands', async () => {
+  grantor.scenario.publish = 'lost'
+  let first
+  try {
+    first = await mandate(grantArgs({ subject: 'vv5' }))
+  } finally {
+    delete grantor.scenario.publish
+  }
+  assert.equal(first.code, 7, first.stdout)
+  const out = json(first)
+  assert.equal(out.outcome, 'unknown')
+  assert.equal(out.mayHaveSent, true)
+  assert.match(out.grantId, new RegExp(`^urn:mandate:grant:${ANA}:vv5:[0-9a-f]{16}$`))
+  assert.match(out.assetName, /^grant-vv5-[0-9a-f]{16}$/)
+  assert.equal(out.check, `mandate revoke --id ${out.grantId}`)
+  // Not landed yet: the check says so and publishes nothing.
+  const early = await mandate(['revoke', '--id', out.grantId, '--yes', '--json'])
+  assert.equal(early.code, 2)
+  assert.equal(json(early).reason, 'grant not found')
+  // The chain confirms it later; the same id is then revoked, and renders refuse.
+  grantor.confirm(out.assetName)
+  const rv = await mandate(['revoke', '--id', out.grantId, '--yes', '--json'])
+  assert.equal(rv.code, 0, rv.stdout)
+  assert.equal(json(rv).revoked, true)
+  const r = await mandate(renderArgs({ subject: `${ANA}:vv5` }))
+  assert.equal(r.code, 2, r.stdout)
+})
+
+test('D5: the human output of a lost grant names the id, the asset and how to check it', async () => {
+  grantor.scenario.publish = 'lost'
+  let r
+  try {
+    r = await mandate(grantArgs({ subject: 'vv7', json: null }))
+  } finally {
+    delete grantor.scenario.publish
+  }
+  assert.equal(r.code, 7, r.stderr)
+  assert.match(r.stdout, /GRANT OUTCOME UNKNOWN/)
+  assert.match(r.stdout, new RegExp(`grantId\\s+urn:mandate:grant:${ANA}:vv7:[0-9a-f]{16}`))
+  assert.match(r.stdout, /asset\s+grant-vv7-[0-9a-f]{16}/)
+  assert.match(r.stdout, /Check whether it landed: mandate revoke --id urn:mandate:grant:/)
+})
+
+test('D5: a revocation whose publish reply is lost reports the grant id, state id and asset, and a check finds it once it lands', async () => {
+  const g = await newGrant('vv8')
+  grantor.scenario.publish = 'lost'
+  let first
+  try {
+    first = await mandate(['revoke', '--id', g.id, '--yes', '--json'])
+  } finally {
+    delete grantor.scenario.publish
+  }
+  assert.equal(first.code, 7, first.stdout)
+  const out = json(first)
+  assert.equal(out.outcome, 'unknown')
+  assert.equal(out.grantId, g.id)
+  assert.match(out.stateId, /^urn:mandate:state:[0-9a-f]{16}$/)
+  assert.match(out.assetName, /^revoke-vv8-[0-9a-f]{16}$/)
+  assert.equal(out.check, `mandate revoke --id ${g.id}`)
+  grantor.confirm(out.assetName)
+  const again = await mandate(['revoke', '--id', g.id, '--yes', '--json'])
+  assert.equal(again.code, 0, again.stdout)
+  assert.equal(json(again).alreadyRevoked, true)
+})
+
+test('render --at with --execute is refused before anything is resolved or dispatched', async () => {
+  await newGrant('wat')
+  const r = await mandate(execArgs('wat', { at: '2026-09-13T00:00:00Z' }), { lp: renderLp('wat') })
+  assert.equal(r.code, 1, r.stdout)
+  assert.match(json(r).error, /dry runs only/)
+  assert.deepEqual(r.calls, [])
+})
+
+test('exit codes: the built-in help, README and CONTRACTS name the same codes, and help says what each covers', () => {
+  const byCode = Object.fromEntries(EXIT_HELP)
+  assert.match(byCode[3], /not a reading of the consent script/)
+  assert.match(byCode[3], /--json/)
+  assert.match(byCode[1], /off a terminal or with --json and no --yes/)
+  assert.match(byCode[4], /unbound, resume-refused and the retryable resume-unverified/)
+  assert.match(byCode[5], /already submitted/)
+  assert.match(byCode[7], /unknown after send/)
+  assert.match(byCode[9], /outcome is unknown/)
+  assert.match(byCode[9], /stale/)
+  assert.match(byCode[9], /pending file/)
+  for (const doc of ['../README.md', '../docs/CONTRACTS.md']) {
+    const text = readFileSync(new URL(doc, import.meta.url), 'utf8')
+    for (const [code] of EXIT_HELP) assert.match(text, new RegExp(`^\\| ${code} \\|`, 'm'), `${doc} has a row for exit ${code}`)
+  }
+})
+
+test('nodes.mjs: a reconcile reply with a null head or watermark is never current; doctor and sync exit 9', async () => {
+  const odd = await startFakeDkg({ address: ANA_CHECKSUM, name: 'grantor', world, scenario: { reconcile: { headOrdinal: null } } })
+  try {
+    const env = { MANDATE_GRANTOR_HOME: homes.grantor, MANDATE_GRANTOR_PORT: String(odd.port) }
+    const doctor = await mandate(['doctor', 'grantor'], { bin: NODES, env })
+    assert.equal(doctor.code, 9, doctor.stdout + doctor.stderr)
+    assert.match(doctor.stdout, /freshness unknown/)
+    assert.doesNotMatch(doctor.stdout, /current \d/)
+    odd.scenario.reconcile = { headOrdinal: null, watermarkAfter: null }
+    const sync = await mandate(['sync', 'grantor'], { bin: NODES, env })
+    assert.equal(sync.code, 9, sync.stdout + sync.stderr)
+    assert.match(sync.stdout, /freshness unknown/)
+    assert.doesNotMatch(sync.stdout, /: current/)
+    // A real reply is still current, exit 0.
+    delete odd.scenario.reconcile
+    const fine = await mandate(['sync', 'grantor'], { bin: NODES, env })
+    assert.equal(fine.code, 0, fine.stdout + fine.stderr)
+    assert.match(fine.stdout, /: current \(\d+\/\d+\)/)
+  } finally {
+    await odd.close()
+  }
+})
+
+test('R16: nodes.mjs up stops after starting the nodes, with exit 0 and no subscribe, while graph ids are placeholders', async () => {
+  const home = join(work, 'dkg-up-grantor')
+  const env = { MANDATE_GRANTS_CG: '0x<grantor agent address>/mandate-grants', MANDATE_DERIVATIONS_CG: '', MANDATE_GRANTOR_HOME: home }
+  const before = grantor.calls.length
+  const up = await mandate(['up', 'grantor'], { bin: NODES, env })
+  assert.equal(up.code, 0, up.stdout + up.stderr)
+  assert.match(up.stdout, /already running/)
+  assert.match(up.stdout, /do not hold graph ids yet/)
+  assert.ok(!grantor.calls.slice(before).some(x => /subscri|reconcile|connect/.test(x.path)))
+})
+
+test('item 15: the demo blast-radius line uses the CLI label and names unreadable records; the integration test decides at a fixed time', () => {
+  const line = blastLine({ exitCode: 0, result: { assets: [{}], billedUnknown: false, totalBilledUsd: 0.84, unreadable: 2 } })
+  assert.match(line, /as recorded by producers; not an invoice/)
+  assert.doesNotMatch(line, /list price/)
+  assert.match(line, /2 trusted record\(s\) under the grant UNREADABLE/)
+  assert.doesNotMatch(blastLine({ result: { assets: [], billedUnknown: true, unreadable: 0 } }), /UNREADABLE/)
+  const demo = readFileSync(new URL('../demo/full.mjs', import.meta.url), 'utf8')
+  assert.match(demo, /if \(blast\.exitCode !== 0\) fail\('blast radius', blast\)/)
+  const s6c = readFileSync(new URL('./integration/s6c.test.mjs', import.meta.url), 'utf8')
+  assert.doesNotMatch(s6c, /at: new Date\(\)/)
+  const at = s6c.match(/const DECIDE_AT = '([^']+)'/)?.[1]
+  assert.ok(at && Date.parse(at) < Date.parse('2026-12-12T15:42:18Z'), 'the decision time is inside G2\'s validity window')
+})
+
+test('D3: a render that dies mid-dispatch is marked sent, so a rerun replays it under the key it was sent with', async () => {
+  await newGrant('vaj')
+  const crashed = await mandate(execArgs('vaj', { 'idempotency-key': 'custom-hang-1' }), { lp: renderLp('vaj', { 'run_capability:talking-head': { hang: true } }) })
+  assert.notEqual(crashed.code, 0)
+  assert.ok(crashed.calls.some(x => x.name === 'run_capability:talking-head'))
+  const key = keyFor(store().list().find(r => r.idempotencyKey === 'custom-hang-1').grantId)
+  const rec = store().load(key)
+  assert.equal(rec.status, 'dispatching')
+  assert.ok(rec.attempts.at(-1).sentAt)
+  const again = await mandate(execArgs('vaj'), { lp: renderLp('vaj') })
+  assert.equal(again.code, 0, again.stdout)
+  assert.deepEqual(again.calls.filter(x => x.name === 'run_capability:talking-head').map(x => x.args.idempotency_key), ['custom-hang-1'])
 })

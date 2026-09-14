@@ -106,8 +106,6 @@ export async function requestUpload(client, kind = 'video') {
 }
 
 const UPLOAD_DONE = new Set(['done', 'complete', 'completed', 'uploaded', 'received', 'ready', 'succeeded', 'success'])
-const MEDIA_EXT = /\.(mp4|m4v|mov|webm|mkv|3gp|m4a|mp3|wav|ogg|oga|opus|aac|flac|caf)$/i
-
 /** The capture page itself, or any other page on the agent site that is not hosted media. */
 function isAgentPage(u) {
   return u.hostname === 'agent.livepeer.org' && !u.pathname.startsWith('/a/')
@@ -123,27 +121,39 @@ function parsedHttps(s) {
   } catch { return null }
 }
 
+/** Typographic apostrophes as straight ones, and hyphens and dashes as spaces, as the platform's own summaries use them. */
+const plainPunctuation = text => String(text ?? '').replace(/[\u2018\u2019\u201b\u02bc`\u00b4]/g, "'").replace(/[-\u2010-\u2015\u2212]+/g, ' ')
+
 /**
- * Only "expired" said as a fact counts: "not expired yet" and "hasn't expired"
- * are still waiting.
+ * Only "expired" said as a fact counts: "not expired yet", "hasn\u2019t expired"
+ * and "not-expired" are still waiting.
  */
 export function saysExpired(text) {
-  const t = String(text ?? '')
+  const t = plainPunctuation(text)
   return /\bexpired\b/i.test(t) && !/(\bnot|\bnever|n't|\bhasnt|\bisnt)\s+(yet\s+|been\s+|already\s+)?expired\b/i.test(t)
+}
+
+const saysReceived = text => /\b(received|uploaded|complete|completed|done|ready)\b/i.test(plainPunctuation(text))
+
+/** Text that says the upload has not arrived yet, so a link in it is not the clip. */
+function saysWaiting(text) {
+  const t = plainPunctuation(text)
+  return /\b(wait|waiting|pending|not yet|not expired|hasn't expired|still|in progress|uploading|no file)\b/i.test(t)
 }
 
 /**
  * A clip URL named in the reply text, used only when the structured reply has
- * none. It must look like hosted media — an agent.livepeer.org/a/ path or a
- * media file extension — so a docs or capture-page link is never hashed as the
- * clip. Two different candidates are ambiguous and give none.
+ * none. It must be media hosted by the platform itself, an
+ * agent.livepeer.org/a/ path: any other https link in prose (a docs page, an
+ * example file) could be hashed as the person's recording. Two different
+ * candidates are ambiguous and give none.
  */
 export function uploadUrlFromText(text) {
   const found = new Set()
   for (const raw of String(text ?? '').match(/https:\/\/[^\s<>"'\]\[)(]+/g) ?? []) {
     const u = parsedHttps(raw.replace(/[.,;:!?]+$/, ''))
-    if (!u || isAgentPage(u)) continue
-    if (u.hostname === 'agent.livepeer.org' || MEDIA_EXT.test(u.pathname)) found.add(u.href)
+    if (!u || u.protocol !== 'https:' || u.hostname !== 'agent.livepeer.org' || !u.pathname.startsWith('/a/')) continue
+    found.add(u.href)
   }
   return found.size === 1 ? [...found][0] : null
 }
@@ -157,7 +167,9 @@ export async function getUpload(client, token, waitSeconds = 20) {
   if (status === null || UPLOAD_DONE.has(status)) {
     const s = parsedHttps(structured?.url)
     if (s && !isAgentPage(s)) url = s.href
-    else if (structured?.url == null) url = uploadUrlFromText(text)
+    // A link in prose is the clip only when nothing says the upload is still to
+    // come, and, with no structured status to lean on, the text says it arrived.
+    else if (structured?.url == null && !saysWaiting(text) && (status !== null || saysReceived(text))) url = uploadUrlFromText(text)
   }
   return { url, status: url ? (status ?? 'done') : (status && !UPLOAD_DONE.has(status) ? status : 'pending'), pending: !url, mime: structured?.mime ?? null, text, structured }
 }

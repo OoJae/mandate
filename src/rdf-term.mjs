@@ -132,11 +132,17 @@ export function asDecimal(cell) {
  * never exponent form, trailing zeros only trimmed after the point.
  *
  * A value with more precision is rounded UP, so a positive amount is never
- * written as 0 and a billed amount is never under-recorded. Deliberate
- * trade-off: a spend ceiling given with sub-micro precision is raised by less
- * than one micro-dollar, which the gate cannot see anyway because it compares
- * whole micro-dollars. Binary noise such as 0.8400000000000001 is not
- * precision and is not rounded up.
+ * written as 0 and a billed amount is never under-recorded. Binary noise such
+ * as 0.8400000000000001 is not precision and is not rounded up, but a positive
+ * amount too small to show any micro-dollar digit (1e-13) is written as
+ * 0.000001, matching microUsd in src/gate.mjs.
+ *
+ * Deliberate trade-off: a spend ceiling given with sub-micro precision is also
+ * raised, to the next whole micro-dollar, and that higher anchored value is the
+ * one the gate enforces once the grant is read back. The gate rounds a ceiling
+ * down only when it still has sub-micro digits, so a ceiling of 0.0000015 held
+ * in memory counts as 1 micro-dollar but, once written as 0.000002, as 2. The
+ * difference is at most one micro-dollar per grant.
  */
 function formatDecimal(n) {
   let s = n.toFixed(6)
@@ -146,6 +152,7 @@ function formatDecimal(n) {
     const m = (BigInt(s.replace('.', '')) + 1n).toString().padStart(7, '0')
     s = `${m.slice(0, -6)}.${m.slice(-6)}`
   }
+  if (n > 0 && Number(s) === 0) s = '0.000001'
   if (s.includes('.')) s = s.replace(/0+$/, '').replace(/\.$/, '')
   return s
 }
@@ -155,13 +162,20 @@ export function asInteger(cell) {
   return v !== null && INTEGER.test(v) ? Number(v) : NaN
 }
 
+// The instants a four-digit UTC year can name. The writer normalises to UTC, so
+// 9999-12-31T23:00:00-05:00 would come out as year +010000, which no reader
+// accepts; the reader refuses such instants too, so both agree on one range.
+const MIN_DATETIME_MS = Date.parse('0000-01-01T00:00:00.000Z')
+const MAX_DATETIME_MS = Date.parse('9999-12-31T23:59:59.999Z')
+
 /**
  * ISO-8601 with an explicit offset, as epoch milliseconds; otherwise NaN.
  *
  * Every field is range-checked. Date.parse rolls impossible dates forward, so
  * 2026-02-31 would silently become 3 March and a validity window would end on a
  * day nobody wrote. Hour 24 and leap second 60 are refused too: the writer
- * never emits them.
+ * never emits them. Offsets beyond ±14:00 are not real offsets and are refused,
+ * and so is an instant whose UTC year leaves 0000-9999.
  */
 export function asDateTime(cell) {
   const v = typeof cell === 'string' && !cell.startsWith('"') ? cell : literalLexical(cell, [`${XSD}dateTime`])
@@ -171,7 +185,10 @@ export function asDateTime(cell) {
   const leap = (year % 4 === 0 && year % 100 !== 0) || year % 400 === 0
   const days = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][month - 1]
   if (!days || day < 1 || day > days || hour > 23 || minute > 59 || second > 59 || offH > 14 || offM > 59) return NaN
-  return Date.parse(v)
+  if (offH * 60 + offM > 840) return NaN
+  const ms = Date.parse(v)
+  if (!(ms >= MIN_DATETIME_MS && ms <= MAX_DATETIME_MS)) return NaN
+  return ms
 }
 
 /* ------------------------------------------------------------------------- */
@@ -276,10 +293,14 @@ export function decimalTerm(value, field = 'decimal') {
 /** Serialise a dateTime the reader will accept, normalised to UTC, or throw. */
 export function dateTimeTerm(value, field = 'dateTime') {
   const ms = value instanceof Date ? value.getTime() : asDateTime(String(value))
-  if (!Number.isFinite(ms)) {
-    throw new TermError(`${field} must be a real ISO-8601 date and time with an explicit offset (e.g. 2026-12-31T23:59:00Z), got ${JSON.stringify(value)}`)
+  // Round-trip the output through the reader: a Date outside years 0000-9999 UTC
+  // would serialise as +010000-… and be anchored as a value nobody can read.
+  const iso = Number.isFinite(ms) ? new Date(ms).toISOString() : null
+  if (iso === null || asDateTime(iso) !== ms) {
+    throw new TermError(`${field} must be a real ISO-8601 date and time with an explicit offset (e.g. 2026-12-31T23:59:00Z), `
+      + `falling within years 0000-9999 in UTC, got ${JSON.stringify(value)}`)
   }
-  return literalTerm(new Date(ms).toISOString(), { field, datatype: `${XSD}dateTime` })
+  return literalTerm(iso, { field, datatype: `${XSD}dateTime` })
 }
 
 /** Render one wire term as N-Triples / Turtle. */

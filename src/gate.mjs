@@ -40,6 +40,10 @@ export function microUsd(usd, { down = false } = {}) {
   const tol = Math.max(1e-12, usd * 4 * Number.EPSILON)
   if (!down && diff > tol) return m + 1n
   if (down && diff < -tol) return m - 1n
+  // The tolerance above is for binary noise on an amount that already has
+  // micro-dollar digits. A positive amount that rounds to 0 has none, so however
+  // small (1e-13, Number.MIN_VALUE) it counts as one micro-dollar.
+  if (!down && m === 0n && usd > 0) return 1n
   return m
 }
 
@@ -59,18 +63,29 @@ export function grantIsAuthentic(g) {
   return Boolean(a) && subjectAddress(g.subject) === a && grantIriAddress(g.id) === a && agentAddress(g.grantor) === a
 }
 
+/** The tiers the resolver attributes a state to. */
+const STATE_TIERS = new Set(['vm', 'context', 'swm'])
+
 /**
  * Revocation state of one grant. Terminal: any accepted revocation, at any time,
  * ends the grant — renewing means publishing a new grant id. A revocation
  * counts when its anchor's address is the grant's publisher, or when it appears
  * in a merged view with no publisher at all (the resolver's context tier).
  * Shared-memory revocations are not anchored and only warn.
+ *
+ * Only the grantor can write a state that counts, so its own states fail closed:
+ * one marked malformed counts whatever its state field says (a mistake in a
+ * revocation must not un-revoke), and one carrying no tier the resolver
+ * produces (hand-built knowledge) cannot be read as anything but a revocation.
  */
 export function revocationOf(grant, states = []) {
   const about = states.filter(s => s?.stateOf === grant.id)
-  const counted = about.filter(s => s.state !== 'active' && (
-    (s.tier === 'vm' && typeof s.publisher === 'string' && s.publisher.toLowerCase() === grant.publisher.toLowerCase())
-    || s.tier === 'context'))
+  const counted = about.filter(s => {
+    const byGrantor = typeof s.publisher === 'string' && s.publisher.toLowerCase() === grant.publisher.toLowerCase()
+    if (byGrantor && !STATE_TIERS.has(s.tier)) return true
+    const revokes = s.state !== 'active' || s.malformed === true
+    return revokes && ((s.tier === 'vm' && byGrantor) || s.tier === 'context')
+  })
   counted.sort((a, b) => String(a.ual ?? a.id).localeCompare(String(b.ual ?? b.id)))
   return { revoked: counted.length > 0, by: counted[0] ?? null, all: counted }
 }
@@ -111,7 +126,9 @@ function requestProblem(r) {
 
 function knowledgeProblem(k) {
   if (!k || typeof k !== 'object') return 'no knowledge was supplied'
-  for (const f of ['grants', 'states', 'derivations']) if (!Array.isArray(k[f])) return `knowledge.${f} is not a list`
+  // forgeries too: without it a trusted producer's unreadable record under a
+  // grant would be missed, and its spend would read as nothing.
+  for (const f of ['grants', 'states', 'derivations', 'forgeries']) if (!Array.isArray(k[f])) return `knowledge.${f} is not a list`
   if (k.consistency?.ok !== true) return k.consistency?.reason ?? 'knowledge carries no consistency result'
   return null
 }

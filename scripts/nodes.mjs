@@ -183,6 +183,19 @@ async function knownPublishers(n, cg) {
   return out
 }
 
+/**
+ * Whether a reconcile reply shows the node current. Both numbers must be
+ * whole and non-negative: in JavaScript `5 >= null` and `null >= null` are
+ * true, so a reply missing either would otherwise read as current.
+ */
+function freshness(r) {
+  const ok = v => Number.isInteger(v) && v >= 0
+  if (!ok(r?.watermarkAfter) || !ok(r?.headOrdinal)) {
+    return { unknown: true, current: false, detail: `the node reported watermark ${JSON.stringify(r?.watermarkAfter) ?? 'none'} and head ${JSON.stringify(r?.headOrdinal) ?? 'none'}` }
+  }
+  return { unknown: false, current: r.watermarkAfter >= r.headOrdinal }
+}
+
 async function sync(rc, rcs, { timeoutMs = 10 * 60_000 } = {}) {
   const n = nodeFor(rc)
   const info = await n.info()
@@ -204,7 +217,9 @@ async function sync(rc, rcs, { timeoutMs = 10 * 60_000 } = {}) {
         await sleep(15_000)
         continue
       }
-      if (r.watermarkAfter >= r.headOrdinal) { say(rc.role, `${cg}: current (${r.watermarkAfter}/${r.headOrdinal})`); break }
+      const f = freshness(r)
+      if (f.unknown) { say(rc.role, `${cg}: freshness unknown (${f.detail}); not treated as current`); process.exitCode = 9; break }
+      if (f.current) { say(rc.role, `${cg}: current (${r.watermarkAfter}/${r.headOrdinal})`); break }
       if (Date.now() > deadline) { say(rc.role, `${cg}: still behind after ${Math.round(timeoutMs / 1000)}s (${r.watermarkAfter}/${r.headOrdinal})`); process.exitCode = 9; break }
       const missing = r.headOrdinal - r.watermarkAfter
       say(rc.role, `${cg}: behind by ${missing}; fetching from peers`)
@@ -243,9 +258,10 @@ async function doctor(rc) {
     for (const cg of [...grantsCgs(), ...derivationsCgs()]) {
       const s = subs.subscriptions?.find(x => x.contextGraphId === cg)
       const r = await n.reconcile(cg).catch(e => ({ error: e.message }))
-      const fresh = r.error ? `freshness unknown (${r.error})` : r.watermarkAfter >= r.headOrdinal ? `current ${r.watermarkAfter}/${r.headOrdinal}` : `BEHIND ${r.watermarkAfter}/${r.headOrdinal} — run sync`
+      const f = r.error ? { unknown: true, detail: r.error } : freshness(r)
+      const fresh = f.unknown ? `freshness unknown (${f.detail})` : f.current ? `current ${r.watermarkAfter}/${r.headOrdinal}` : `BEHIND ${r.watermarkAfter}/${r.headOrdinal} — run sync`
       say('', `  ${cg}  ${s?.subscribed ? 'subscribed' : 'NOT SUBSCRIBED'}  ${fresh}`)
-      if (!s?.subscribed || r.error || r.watermarkAfter < r.headOrdinal) process.exitCode = 9
+      if (!s?.subscribed || !f.current) process.exitCode = 9
     }
   } catch (e) {
     if (e instanceof DkgHttpError && e.status === 403) say('', '  subscriptions need a node-admin token')

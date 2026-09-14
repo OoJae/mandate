@@ -70,11 +70,15 @@ the anchoring address is rejected.
   Working Memory, share to Shared Working Memory, publish to Verifiable Memory. A
   write is reported as done only when the chain has confirmed it and it is bound to
   the graph; a minted but unbound asset is a failure that names its UAL and
-  transaction. When a publish response is lost, success is reported only if the
-  node's record shows a chain-confirmed UAL for the sealed content and a confirmed
-  `_meta` anchor. A `mandate record --pending` retry of a derivation resumes the same
-  asset rather than minting another, and refuses to publish again when a transaction
-  may already have been sent.
+  transaction. Only a publish refused with a 4xx is known to have sent nothing. Any
+  other failure (a 5xx, a lost connection, a `200` that is not confirmed) is treated as
+  possibly sent: success is reported only if the node's record shows a chain-confirmed
+  UAL for the sealed content and a `_meta` anchor that passes the resolver's own anchor
+  rules. A `mandate record --pending` retry of a derivation resumes the same asset
+  rather than minting another, and never publishes again after a publish whose outcome
+  is unknown: it waits for the node to show the asset published, and then only verifies
+  it. A grant or revocation whose outcome is unknown is reported with its id and asset
+  name, so the operator checks that exact id instead of publishing a second one.
 - **`_meta`.** Each anchored asset's record (`kaUal`, `status "confirmed"`,
   `assertionGraph`, `publicTripleCount`, `transactionHash`) is what the resolver
   checks a graph against. `prov:wasAttributedTo` exists only on the publishing node,
@@ -91,6 +95,27 @@ the anchoring address is rejected.
 | **Shared Working Memory** | The sealed asset is shared to the owning graph. | A staging step. Measured: SWM content for these graphs did not reach the other party, and SWM paths are not authenticated. A revocation seen only in SWM is a warning, never a decision. |
 | **Verifiable Memory** | Grants, revocations and derivations are published and anchored. | Required. Only anchored assets can permit a render or clear a file. |
 
+## Consent evidence
+
+A grant is the grantor's statement. The consent clip is the evidence behind it, and the
+design keeps two kinds of evidence apart:
+
+- **Checked by construction.** The CLI generates a script from the grant's own terms,
+  and the person reads it on their phone. A transcript that is a reading of that script
+  (word for word after normalising ASR spellings, with every term, the date and the
+  amount exact, and nothing extra but filler) is confirmed without anyone judging what
+  the words mean. Only such a grant carries `mandate:consentClipSha256`.
+- **Judged by a person.** Anything else, however consent-like, is unconfirmed. An
+  operator watching the clip must type that the transcript is accurate, that it is
+  consent to exactly these terms with no condition, exclusion, coercion or retraction,
+  and each term the words were not compared with. That grant is published without the
+  clip hash.
+
+Refusal heuristics sit beside both. They can stop a clip outright (a refusal, exclusion,
+retraction or sign of coercion anywhere), but never confirm one: no list of the ways
+people decline is complete, so an open-world check that passes is not evidence of
+consent.
+
 ## The rules a resolver must follow
 
 1. **Authorship is the anchoring address.** A grant counts only when anchored by the
@@ -102,12 +127,19 @@ the anchoring address is rejected.
    a duplicated single-valued property makes the object malformed. A grant id
    published more than once is refused.
 3. **Revocation is terminal.** Any counted revocation ends a grant, even one whose
-   other fields are malformed. A revocation that appears only in a merged view with no
-   Verifiable Memory copy is honoured, because its publisher cannot be established.
+   other fields are malformed, and even one also typed as something else. A revocation
+   that appears only in a merged view with no Verifiable Memory copy is honoured,
+   because its publisher cannot be established. A node can leave that view out of an
+   answer. When the grantor has published a state about the grant, the resolver requires
+   the view once the node has shown it, and believes "no view" only when the node's probe
+   for it answered empty on every attempt. A node that leaves the view out of every
+   answer on every attempt cannot be told apart from one that holds none
+   (`docs/CONTRACTS.md`, "Read consistency").
 4. **Capabilities match exactly**, never by family, and **a forbid beats a permit**.
    Requests whose declared use-class label is on the deny list (adult, sexual,
-   deceptive impersonation and synonyms) are refused whatever a grant says. This checks
-   the label a producer declares; it cannot see the prompt or the media.
+   deceptive impersonation and synonyms, matched through common inflections and joined
+   words) are refused whatever a grant says. This checks the label a producer declares;
+   it cannot see the prompt or the media.
 5. **Every trusted derivation for a file is judged.** A file is TAINTED if any trusted
    record is (including a trusted producer's record that cannot be read), otherwise
    UNKNOWN if any cites a grant in a grants graph the verifier does not read, otherwise
@@ -135,7 +167,12 @@ verifier (`src/verify-core.mjs`) are pure functions, so these rules can be read 
 tested in isolation. The attacks from the adversarial study are replayed as tests in
 `test/adversarial.test.mjs` and the unit tests beside it, and `npm run test:mutation`
 removes each security guard listed in `scripts/mutations.json` in turn and fails if no
-test notices.
+test notices. A mutant whose tests only hang or time out counts as a failure, not a
+kill, so every such test carries a deadline of its own. The list also covers the
+checker's own rules and the workflow promises (`test/release.test.mjs`): CI and the
+release test job install with `--ignore-scripts`, the release tarball is packed before
+anything is installed, publish waits for the test job, and the namespace documents
+check sees untracked files.
 
 ## Security
 
@@ -148,8 +185,8 @@ test notices.
     streams with one size cap and one deadline across retries, and accepts http(s)
     only. It does not restrict hosts and follows redirects, so run it where internal
     services are unreachable, or pass a `fetch` that enforces an allow-list.
-  - A transcript link returned by `nemotron-asr`: http(s) only, never the clip itself,
-    declared as text or JSON, capped at 1 MB.
+  - A transcript link returned by `nemotron-asr`: https only (plain http to loopback
+    alone), never the clip itself, declared as text or JSON, capped at 1 MB.
 - **Credentials:** each DKG node's API token, read from its home, and an optional
   `LIVEPEER_AGENT_KEY`. The CLI's freshness check calls `reconcile` with the node's
   token on every decision, so that token needs node-admin rights for the check to run.
@@ -172,9 +209,15 @@ test notices.
   carries advisories in its own dependency tree (libp2p gossipsub, undici, jsonld at
   the time of writing); they affect the nodes an operator runs, not the published
   package.
-- **Releases:** `.github/workflows/release.yml` tests and packs in a job with no
-  publish permission, then publishes that exact tarball, with provenance, from a job in
-  the protected `npm` environment that installs nothing from the project.
+- **Releases:** `.github/workflows/release.yml` packs the tarball straight from the
+  tagged checkout, before anything is installed and with lifecycle scripts refused, and
+  records its SHA-256. No dependency code has run when the digest is fixed. A separate
+  test job repacks its own clean checkout, requires the same digest, then installs with
+  `--ignore-scripts` and runs the tests. It uploads nothing. The publish job, in the
+  protected `npm` environment with the only `id-token` permission, installs nothing from
+  the project and publishes the packed tarball, fetched by artifact id and checked
+  against the digest, with provenance. The repack check assumes `npm pack` is
+  reproducible, and fails closed if it is not.
 
 ## Known limits and next steps
 
@@ -191,7 +234,16 @@ test notices.
   and a grant's blast radius lists exact bytes only: a re-encoded copy of a file made
   under a revoked grant is not on the list. Next: a perceptual hint that can only raise
   suspicion (flag a likely re-encode of a recorded file for review), never clear a file.
-- **Revocation timing.** A render made before a revocation and one recorded after it
-  both verify TAINTED / REVOKED.
+- **Revocation timing and action.** A render made before a revocation and one recorded
+  after it both verify TAINTED / REVOKED, and nothing tells anyone holding a file that its
+  grant was revoked. Next: split the verdict by the recorded render time against the
+  revocation's anchor, and a `watch` command that re-verifies accepted files.
+- **Renders made outside the gate cannot be recorded.** `mandate record` finishes only a
+  render `render --execute` started. Next: `mandate record --url --grant --capability`.
+- **Verifier independence is configuration.** Nothing checks that the node a verifier
+  reads from is not the producer's own.
+- **Unknown mints.** A publish whose answer was lost, and that the node never shows as
+  published, is left unpublished and reported with its asset and any transaction; a mint
+  the node never records cannot be found from this client.
 - **DKG literal handling.** v10.0.16 cannot publish a double quote or a line break in a
   literal. Mandate refuses such values rather than rewriting them.

@@ -9,8 +9,9 @@
  *   CLEAR         every trusted edge traces to a live grant that permitted it
  *   TAINTED       some trusted edge does not, or a trusted producer's record for
  *                 these bytes could not be read (subStatus says why)
- *   UNKNOWN       no trusted edge for these bytes, or an edge cites a grant kept
- *                 in a grants graph this verifier does not read
+ *   UNKNOWN       no trusted edge for these bytes, or an edge cites a grant whose
+ *                 owner's grants graph this verifier does not read and nothing it
+ *                 did read taints the edge
  *   INCONCLUSIVE  the read behind the knowledge was incomplete
  *
  * The file is TAINTED if any judgement is; otherwise CLEAR only if every
@@ -50,16 +51,23 @@ function judgeEdge(k, d, nowMs, unresolved) {
     derivation: d.id, derivationUal: d.ual ?? null, publisher: d.publisher, grant: grant?.id ?? d.authorizedUnder,
     grantUal: grant?.ual ?? null, grantor: grant?.publisher ?? null, verdict, subStatus, reason,
   })
-  if (unresolved.has(d.authorizedUnder)) {
-    return out(UNKNOWN, null, `cites grant ${d.authorizedUnder}, which is recorded in a graph this verifier does not read `
-      + `(no configured grants graph belongs to ${grantIriAddress(d.authorizedUnder) ?? 'its owner'})`)
-  }
+  // A grant listed as unresolved may still have been read (its owner published it
+  // into a graph this verifier does read). What was read is judged first: a
+  // revocation or a defect the verifier can see is TAINTED, never UNKNOWN. The
+  // unread owner's graph only stops a verdict from being CLEAR.
+  const unread = unresolved.has(d.authorizedUnder)
   // Only the address embedded in the grant id may publish that grant. grantIsAuthentic
   // enforces that (with subject and grantor), case-insensitively, exactly as the gate
   // does; a second copy of the comparison here could never fail on its own, so a
   // mutation test could not tell whether it was protected.
   const found = k.grants.filter(g => g?.id === d.authorizedUnder && grantIsAuthentic(g)).sort(byUal)
-  if (found.length === 0) return out(TAINTED, 'UNAUTHORISED', `cites grant ${d.authorizedUnder}, which no one entitled to has published`)
+  if (found.length === 0) {
+    if (unread) {
+      return out(UNKNOWN, null, `cites grant ${d.authorizedUnder}, which is recorded in a graph this verifier does not read `
+        + `(no configured grants graph belongs to ${grantIriAddress(d.authorizedUnder) ?? 'its owner'})`)
+    }
+    return out(TAINTED, 'UNAUTHORISED', `cites grant ${d.authorizedUnder}, which no one entitled to has published`)
+  }
   // Copies of one id could disagree, and picking one would make the verdict depend on row order.
   if (found.length > 1) return out(TAINTED, 'MALFORMED', `grant ${d.authorizedUnder} is published more than once, so which one applies cannot be established`, found[0])
   const grant = found[0]
@@ -96,6 +104,10 @@ function judgeEdge(k, d, nowMs, unresolved) {
     return out(TAINTED, 'EXPIRED', `grant ${grant.id} expired at ${grant.validUntil}. The producer records this render at ${d.derivedAt}, `
       + 'inside the window, but that time is the producer\'s own claim, and the grant no longer covers any use of the file', grant)
   }
+  if (unread) {
+    return out(UNKNOWN, null, `grant ${grant.id} was read and permitted this render, but its owner's grants graph `
+      + `(${grantIriAddress(grant.id) ?? 'its owner'}) is not read here, so a revocation published there would not be seen`, grant)
+  }
   return out(CLEAR, null, `authorised by ${grant.publisher} under ${grant.id}, served by "${d.servedCapability}". ${CLEAR_SCOPE}`, grant)
 }
 
@@ -112,7 +124,9 @@ export function verifyKnowledge(k, sha256, { now = new Date().toISOString() } = 
   if (!Number.isFinite(nowMs)) throw new TypeError(`now must be ISO-8601 with an offset: ${JSON.stringify(now)}`)
 
   const list = v => (Array.isArray(v) ? v : [])
-  const edges = list(k?.derivations).filter(d => d?.outputSha256 === sha).sort(byUal)
+  // Compared case-insensitively, as forgery claims are: hand-built knowledge with
+  // an uppercase hash must not hide a tainted edge for the same bytes.
+  const edges = list(k?.derivations).filter(d => normSha256(d?.outputSha256) === sha).sort(byUal)
   const trusted = edges.filter(d => d.trusted === true)
   const untrusted = edges.filter(d => d.trusted !== true).map(d => ({
     derivation: d.id, derivationUal: d.ual ?? null, publisher: d.publisher, grant: d.authorizedUnder,
@@ -135,8 +149,9 @@ export function verifyKnowledge(k, sha256, { now = new Date().toISOString() } = 
     return { ...base, verdict: INCONCLUSIVE, reason: `the graph read was incomplete: ${k?.consistency?.reason ?? 'no consistency result'}` }
   }
   // Hand-built knowledge missing a list must not read as "nothing there": no
-  // states would mean no revocations, and the file would verify CLEAR.
-  for (const f of ['grants', 'states', 'derivations']) {
+  // states would mean no revocations, and no forgeries would hide a trusted
+  // producer's unreadable record, so the file would verify CLEAR.
+  for (const f of ['grants', 'states', 'derivations', 'forgeries']) {
     if (!Array.isArray(k[f])) return { ...base, verdict: INCONCLUSIVE, reason: `the knowledge is incomplete: knowledge.${f} is not a list` }
   }
 

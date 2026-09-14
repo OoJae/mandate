@@ -47,10 +47,34 @@ function option(opts, name, { integer = false, min }) {
   return v
 }
 
+/** AbortSignal.timeout and setTimeout fire at once above this, so a longer timeout would be none at all. */
+const MAX_TIMER_MS = 2_147_483_647
+
+/**
+ * Settle with `promise`, or reject once `ms` pass. The deadline is enforced
+ * here as well as through the AbortSignal, because a caller-supplied fetch (the
+ * allow-list hook above) may not pass the signal on to its body stream.
+ */
+function beforeDeadline(promise, ms, onTimeout) {
+  let timer
+  const expired = new Promise((_, reject) => {
+    timer = setTimeout(() => { onTimeout?.(); reject(new FetchBytesError('timed out fetching media')) }, Math.max(0, ms))
+  })
+  return Promise.race([promise, expired]).finally(() => clearTimeout(timer))
+}
+
+/** A body chunk as bytes. A string from a custom fetch is counted by its UTF-8 length, never skipped. */
+function chunkBytes(chunk) {
+  if (typeof chunk === 'string') return Buffer.from(chunk, 'utf8')
+  if (ArrayBuffer.isView(chunk)) return new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength)
+  if (chunk instanceof ArrayBuffer) return new Uint8Array(chunk)
+  throw new FetchBytesError(`cannot hash a body chunk of type ${chunk === null ? 'null' : typeof chunk}`, { final: true })
+}
+
 async function hashOnce(u, { maxBytes, budget, deadline, fetch, now }) {
   const remainingMs = deadline - now()
   if (remainingMs <= 0) throw new FetchBytesError('timed out fetching media', { final: true })
-  const res = await fetch(u, { redirect: 'follow', signal: AbortSignal.timeout(remainingMs) })
+  const res = await beforeDeadline(fetch(u, { redirect: 'follow', signal: AbortSignal.timeout(remainingMs) }), remainingMs)
   if (!res.ok) throw new FetchBytesError(`cannot fetch media: HTTP ${res.status}`, { status: res.status, final: true })
   if (!res.body) throw new FetchBytesError(`cannot fetch media: HTTP ${res.status} with no body`, { status: res.status, final: true })
   const declared = Number(res.headers.get('content-length'))
@@ -62,12 +86,22 @@ async function hashOnce(u, { maxBytes, budget, deadline, fetch, now }) {
   }
   const hash = createHash('sha256')
   let bytes = 0
-  for await (const chunk of res.body) {
-    bytes += chunk.byteLength
-    budget.left -= chunk.byteLength
-    if (bytes > maxBytes) throw new FetchBytesError(`media exceeds the ${maxBytes}-byte limit`, { final: true })
-    if (budget.left < 0) throw new FetchBytesError(`fetching media used the whole ${maxBytes}-byte budget across retries`, { final: true })
-    hash.update(chunk)
+  const reader = res.body[Symbol.asyncIterator]()
+  const stop = () => { Promise.resolve().then(() => reader.return?.()).catch(() => {}) }
+  try {
+    for (;;) {
+      const { value, done } = await beforeDeadline(reader.next(), deadline - now(), stop)
+      if (done) break
+      const chunk = chunkBytes(value)
+      bytes += chunk.byteLength
+      budget.left -= chunk.byteLength
+      if (bytes > maxBytes) throw new FetchBytesError(`media exceeds the ${maxBytes}-byte limit`, { final: true })
+      if (budget.left < 0) throw new FetchBytesError(`fetching media used the whole ${maxBytes}-byte budget across retries`, { final: true })
+      hash.update(chunk)
+    }
+  } catch (e) {
+    stop()
+    throw e
   }
   return { sha256: hash.digest('hex'), bytes }
 }
@@ -84,6 +118,7 @@ async function hashOnce(u, { maxBytes, budget, deadline, fetch, now }) {
 export async function sha256OfUrl(url, opts = {}) {
   const maxBytes = option(opts, 'maxBytes', { min: 1 })
   const timeoutMs = option(opts, 'timeoutMs', { min: 1 })
+  if (timeoutMs > MAX_TIMER_MS) throw new FetchBytesError(`timeoutMs must be at most ${MAX_TIMER_MS}, got ${timeoutMs}`, { final: true })
   const attempts = option(opts, 'attempts', { integer: true, min: 1 })
   const backoffMs = option(opts, 'backoffMs', { min: 0 })
   const fetch = opts.fetch ?? globalThis.fetch

@@ -108,3 +108,12 @@ test('a sub-micro-dollar bill is recorded as at least one micro-dollar, never 0'
     servedCapability: 'talking-head', authorizedUnder: grant().id, derivedAt: '2026-09-13T00:00:00Z', billedUsd: 3.36e-7 })
   assert.equal(asDecimal(quads.find(x => x.predicate === V.billedUsd).object), 0.000001)
 })
+
+test('a validity bound outside years 0000-9999 in UTC is refused before anchoring, not stored unreadable', () => {
+  for (const validUntil of ['9999-12-31T23:00:00-05:00', new Date('+010000-01-01T00:00:00Z')]) {
+    assert.throws(() => grantToQuads(grant({ validFrom: null, validUntil })), e => e instanceof TermError && /0000-9999/.test(e.message), String(validUntil))
+    assert.throws(() => grantToQuads(grant({ validUntil })), /0000-9999/, 'refused for its range, not as earlier than validFrom')
+  }
+  const quads = grantToQuads(grant({ validFrom: null, validUntil: '9999-12-31T18:59:59-05:00' }))
+  assert.ok(Number.isFinite(asDateTime(quads.find(x => x.predicate === V.validUntil).object)))
+})

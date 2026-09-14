@@ -11,7 +11,9 @@
  *   create: 'fail'      share: 'fail'
  *   publish: 'unbound'  (207, minted but not bound)
  *   publish: 'lost'     (503 after send; the asset stays shared until confirm(name))
+ *   publish: 'refused'  (409, refused before any chain call; the asset stays shared)
  *   ualSuffix, txHash   (what a successful publish reports)
+ *   reconcile           fields that replace the reconcile reply's own (e.g. headOrdinal: null)
  */
 import { createServer } from 'node:http'
 import { FakeNode } from './fake-node.mjs'
@@ -52,7 +54,7 @@ export async function startFakeDkg({ address, name = 'fake', token = 'test-token
     if (url.pathname === '/api/context-graph/reconcile') {
       const n = (world[json.contextGraphId]?.kas ?? []).length
       const behind = scenario.staleBy ?? 0
-      return send(res, 200, { contextGraphId: json.contextGraphId, status: behind ? 'pending' : 'current', headOrdinal: n + behind, watermarkBefore: n, watermarkAfter: n })
+      return send(res, 200, { contextGraphId: json.contextGraphId, status: behind ? 'pending' : 'current', headOrdinal: n + behind, watermarkBefore: n, watermarkAfter: n, ...(scenario.reconcile ?? {}) })
     }
     if (url.pathname === '/api/context-graph/subscriptions') {
       return send(res, 200, { subscriptions: Object.keys(world).map(id => ({ contextGraphId: id, subscribed: true })) })
@@ -92,6 +94,7 @@ export async function startFakeDkg({ address, name = 'fake', token = 'test-token
         return send(res, 207, { ual: minted.ual, txHash, contextGraphError: 'binding reverted' })
       }
       if (scenario.publish === 'lost') return send(res, 503, { error: 'chain connection lost' })
+      if (scenario.publish === 'refused') return send(res, 409, { error: 'no funded wallet for this author' })
       const published = publishAsset(assetName)
       return send(res, 200, { status: 'confirmed', ual: `${published.ual}${scenario.ualSuffix ?? ''}`, txHash, blockNumber: 1 })
     }

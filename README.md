@@ -11,12 +11,16 @@ Built for the **Livepeer Agent Hackathon 2026**, Track 2: **Livepeer Agent + Ori
 ## Install
 
 **0.2.0 is not on npm yet.** `npm install mandate-consent` currently installs 0.1.0,
-which is superseded (below). Until `npm view mandate-consent version` prints `0.2.0`,
-install from the repository:
+which is superseded (below). The repository's default branch (`main`) also still
+holds 0.1.0 until 0.2.0 is merged, so a bare `npm install github:OoJae/mandate` would
+install the superseded version too. Until `npm view mandate-consent version` prints
+`0.2.0`, install 0.2.0 from its branch by name:
 
 ```bash
-npm install github:OoJae/mandate
+npm install "github:OoJae/mandate#fix/adversarial-study"
 ```
+
+Once 0.2.0 is merged and published, use `npm install mandate-consent`.
 
 > **0.1.0 is superseded.** An adversarial review found that its resolver decided
 > authorship from self-declared values inside the graph, so anyone able to publish
@@ -60,9 +64,12 @@ For a producer running the gate: no grant, no render. A refusal names the clause
 costs nothing, because the capability is never invoked. Some declared use classes are
 refused whatever a grant says: `adult`, `sexual`, `deceptive-impersonation` and their
 common synonyms (the list is `PROHIBITED_USE_CLASSES` in
-[`src/policy.mjs`](src/policy.mjs)). That is a check on the **label the producer
-declares**, nothing more: it never looks at the prompt or the media, so a sexual render
-labelled `advertising` is not caught by it.
+[`src/policy.mjs`](src/policy.mjs)). A label is refused when any word in it, or any run
+of adjacent words written together, is on the list once a common inflection is removed,
+so `deepfakes`, `sexualised`, `x-rated-clip` and `nsfw18` are refused too. The cost of
+that is that some innocent labels, such as `adult-education`, are refused as well. It is a
+check on the **label the producer declares**, nothing more: it never looks at the prompt
+or the media, so a sexual render labelled `advertising` is not caught by it.
 
 After a render, the producer anchors a **derivation**: the output's SHA-256, the
 capability that served it, the grant it was made under and the time it says it
@@ -107,7 +114,9 @@ Nothing in Mandate believes a value written inside the graph about who wrote it.
    nobody else can speak for Ana by writing her name. One exception fails the other
    way: a revocation that appears only in a node's merged view of the grants graph,
    with no Verifiable Memory copy from which to read its publisher, is honoured,
-   because refusing is the safe side of not knowing.
+   because refusing is the safe side of not knowing. That view can be left out of an
+   answer like any other graph; how far the resolver can detect that is under Known
+   limitations.
 3. **Revocation is terminal.** Any revocation anchored by the grant's publisher ends
    the grant for good, even when its other fields (time, author, value) are malformed;
    "active" has no effect. Renewal is a new grant.
@@ -208,16 +217,18 @@ Grants and revocations are in context graph `0xeD1e…0B69/mandate-grants` (on-c
 |---|---|
 | Provenance resolver, gate, verifier (pure functions; the attacks from the adversarial review are replayed as tests, and CI's mutation check fails when a listed guard can be removed unnoticed) | working |
 | Grant, revoke and derivation writes, reported only once anchored | working, live |
-| Forgery rejection from the producer's own node | working, live; recorded on the grantor's and producer's nodes, observed but not recorded on the verifier |
+| Forgery rejection from the producer's own node | working, live; recorded on all three nodes (grantor, producer and read-only verifier; re-read 14 Sep) |
 | Read-only verifier node with no funded wallet | working, live |
 | Stale-node refusal (chain head vs local copy) | working, live |
 | `render --execute`: inline or polled, media released only after its derivation anchors, pending-render recovery | built and tested with recorded platform responses; live run pending |
-| Consent capture on a phone, transcription, spoken-scope check | built and tested with recorded responses; live run pending |
+| Consent capture on a phone and transcription; consent confirmed automatically only when the transcript is a reading of the generated consent script | built and tested with recorded responses; live run pending |
+| Recording a render made outside `render --execute` (`mandate record --url --grant --capability`) | planned; today `record` only finishes renders `render --execute` started |
 | Directory of producers' derivation graphs, so a verifier can discover them | planned |
 | A grant naming which producers may render under it | planned |
 | Derivation UAL carried in C2PA or XMP metadata | planned |
 | A Livepeer-side pre-flight: `run_capability` refusing a likeness capability unless given a `consent_ual` that resolves to a live grant | planned (needs Livepeer; the gate cannot bind producers that skip it from outside) |
 | A perceptual hint for re-encoded copies, which can only raise suspicion (point a reviewer at a likely original), never clear a file | planned |
+| A verdict that tells a render recorded before its grant was revoked from one recorded after, and a `watch` command that re-verifies files already accepted when a grant is revoked | planned; today both verify `TAINTED / REVOKED`, and nothing notifies anyone holding a file |
 
 ## Use it
 
@@ -261,12 +272,13 @@ A read-only node can read the demo's public graphs and run every check. It never
 publishes, so it needs no wallet funds.
 
 ```bash
-git clone https://github.com/OoJae/mandate && cd mandate && npm install
+# The 0.2.0 branch, by name: main still holds 0.1.0 until it is merged.
+git clone -b fix/adversarial-study https://github.com/OoJae/mandate && cd mandate && npm install
 npm test && npm run smoke:pack                  # no network needed
 
 cp .env.example .env    # then set the two graph ids to the read-only ones listed in it
 node scripts/nodes.mjs up verifier              # first boot takes ~2 min; catching up took ~10
-node scripts/nodes.mjs doctor verifier          # subscribed, and current with the chain
+node scripts/nodes.mjs doctor verifier          # subscribed, and current with the chain (exit 9 if not, or if the node's reconcile reply has no whole-number head or watermark)
 
 # Resolve the forgery subject on your own node: PERMITTED under G2, with the rejected
 # records listed. G2 is valid until 2026-12-12; after that add --at 2026-10-01T00:00:00Z.
@@ -339,44 +351,82 @@ that the grantor address links every subject it has granted for.
 
 #### Consent capture
 
-`grant --with-consent` must run at a terminal, because a person has to confirm the clip;
-off a terminal it exits 3 before any link is requested. The CLI mints a phone link,
-waits for the clip, transcribes it, and checks the words:
+`grant --with-consent` prints a **consent script** generated from the grant's own
+terms, for example:
 
-- The clip needs an **affirmative first-person consent** ("I consent", "I agree",
-  "I give permission", "we authorise", "I'm happy for"). Questions, conditionals and
-  reported speech are not consent. Without it: exit 3, and `--force` does not help.
-- A refusal or exclusion ("no", "not for", "except", "apart from", "I withdraw") is a
-  contradiction: exit 8, never overridable. A negation contradicts every term in its
-  clause, so "I agree to a talking head for advertising, not for political use" is
-  refused as a whole. The check errs towards refusing; re-record in plain, separate
-  sentences.
-- Requested capabilities, use classes and territories that were not said: exit 3.
-  `--force` publishes anyway, but the grant then carries **no clip hash**, so on the
-  graph a clip hash always means the words were checked.
-- A failed transcription is exit 3; `--force` never overrides it.
+> I consent to lip sync of my likeness for advertising in United Kingdom until
+> 13 December 2026. Spending is capped at 5 US dollars.
 
-The words are never compared with the **validity date**, the **spend ceiling**, or an
-**unrestricted territory**. After the check, the operator types `matches` to confirm the
-transcript, then the end date (`YYYY-MM-DD`), the ceiling amount or `none`, and
-`anywhere` for an unrestricted territory. Neither `--yes` nor `--force` skips this;
-`--yes` skips only the final "publish" confirmation.
+It then mints a phone link, waits for the clip, transcribes it, and compares the words.
+Off a terminal it exits 3 before any link is requested, with or without `--yes`. On a
+terminal with `--json` it needs `--yes` (otherwise exit 1, also before any link).
+
+**Consent is confirmed automatically only when the transcript is a reading of that
+script.** Both are put in one canonical form first (case, punctuation and hyphens
+ignored; `lipsync` and `lip-sync`, `U.K.` and `UK`, `13th of December` and
+`December the 13th`, `$5` and `five US dollars` each count as one form). Then every
+script word must appear in order. `I`, `consent`, every capability, use class and
+territory word, `until`, the date, `capped` and the amount must all be there exactly.
+At most two other short words may be missing, and the only extra words allowed are
+filler (`um`, `uh`, `hi`, `so`, `okay`, `yes` and a few more; never `but`, `not`,
+`if` or similar). Anything else is **not confirmed**, however consent-like it sounds.
+No list of refusal phrasings is complete, which is why nothing but the script can pass
+on its own.
+
+What happens next:
+
+- **A contradiction is exit 8, never overridable.** A refusal, exclusion, retraction or
+  sign of coercion anywhere in the transcript ("no", "not for", "except", "I withdraw",
+  "I take that back", "they made me say this") ends it, even inside an otherwise exact
+  reading of the script. This check errs towards refusing.
+- **A reading of the script** is accepted without typing anything about the words. The
+  script never states "no ceiling" or "anywhere", so a grant with no ceiling needs
+  `none` typed, and one with no territory needs `anywhere`. Only this grant is published
+  with the clip's SHA-256, so on the graph a clip hash always means the words matched the
+  script.
+- **Anything else** prints the script, the transcript, and the missing and extra words.
+  It is refused (exit 3) if it has no affirmative first-person consent, or if a requested
+  capability, use class or territory was not heard and `--force` was not given. Otherwise
+  a person must watch the clip and type `matches` (the transcript is what was said),
+  `consents` (to exactly these terms, with no condition, exclusion, coercion or
+  retraction), the end date (`YYYY-MM-DD`), the ceiling or `none`, and `anywhere` for an
+  unrestricted territory. A grant confirmed this way is published **without** the clip
+  hash; the hash stays in the command's result.
+- A clip that never arrives, or a failed transcription, is exit 3, and `--force` never
+  overrides it.
+
+No typed answer can be skipped: `--yes` only skips the final "publish" confirmation, and
+`--force` only lets an unheard term go on to the typed confirmation. When a typed answer
+is needed but cannot be given (off a terminal, or with `--json`), the command exits 3
+before anything is published. `mandate consent` runs the same capture without granting,
+and exits 0 only for a reading of the script.
+
+#### When a write's outcome is unknown
+
+A grant or revocation whose publish answer is lost (the node timed out, answered 5xx, or
+reported a transaction without confirming it) may still land on-chain. The command exits
+7 and prints, and returns in `--json`, the grant id (and for a revocation, its state id),
+the asset name, the stage, any UAL or transaction, `mayHaveSent: true` and a `check`
+command. Do not publish again under a new id. For a grant, `mandate revoke --id <grant
+id>` answers "not anchored" until it lands; once it has, the same command revokes it.
+For a revocation, the same command answers "already revoked" once it lands, and publishing
+a second revocation before then is harmless.
 
 #### Exit codes
 
 | Exit | Meaning |
 |---|---|
-| 0 | success, permitted, CLEAR; `help` and `--version` |
-| 1 | usage or configuration error (a bad flag, a missing or malformed `MANDATE_*` graph id, no graph under the node's own address) |
+| 0 | success, permitted, CLEAR; `help` and `--version`; a rerun of a render already recorded; a revocation already in place |
+| 1 | usage or configuration error (a bad flag, a missing or malformed `MANDATE_*` graph id, no graph under the node's own address, a producer not in `MANDATE_TRUSTED_PRODUCERS`, `--at` with `--execute`, the "publish" confirmation needed off a terminal or with `--json` and no `--yes`, an `--idempotency-key` that differs from the one a possibly billed render was sent with) |
 | 2 | refused by the gate; TAINTED or UNKNOWN |
-| 3 | consent not confirmed: transcription failed, no first-person consent, terms missing, or the typed consent confirmation not given or not possible |
-| 4 | rendered, but its derivation failed to commit (run `mandate record --pending <key>`) |
-| 5 | render failed, or a rerun found the render already submitted or rendered |
-| 6 | DKG write failed before anchoring |
-| 7 | DKG anchor not confirmed: minted but unbound, unknown after send, or an earlier asset the node would not let a retry resume |
+| 3 | consent not confirmed: no clip, transcription failed, no first-person consent, a requested term not heard (without `--force`), not a reading of the consent script with no typed confirmation given, or a typed confirmation that is impossible (off a terminal, or `--json`); nothing is published |
+| 4 | rendered, but its derivation failed to commit, at any stage (including `unbound`, `publish-transport`, `resume-refused` and `resume-unverified`); the result carries `stage`, `asset`, `ual`, `txHash` and `mayHaveSent`. Run `mandate record --pending <key>`, which never publishes an asset whose last publish may have been sent |
+| 5 | render failed, or a rerun found the render already submitted with a job id, rendered, or being dispatched by another process |
+| 6 | grant or revocation write failed before anchoring (`create`, `share`, `author`) |
+| 7 | grant or revocation anchor not confirmed: minted but unbound, refused at publish, or unknown after send; the result names the grant id (and state id) and the asset to check |
 | 8 | consent contradicted; never overridable |
-| 9 | INCONCLUSIVE: node unreachable, stale or read incomplete; a media download, node token or `~/.mandate` state file that could not be read; a Livepeer failure that is not about credentials; a render whose outcome is unknown |
-| 10 | Livepeer payment or credential problem |
+| 9 | INCONCLUSIVE: node unreachable, stale or read incomplete; a media download, node token, or `~/.mandate` state or pending file that could not be read; a Livepeer failure that is not about credentials; a render whose outcome is unknown (it may have been billed) |
+| 10 | Livepeer payment or credential problem, including a render over the account's remaining 24 h budget |
 
 ## How Livepeer Agent is used
 
@@ -388,15 +438,23 @@ transcript, then the end date (`YYYY-MM-DD`), the ceiling amount or `none`, and
 | `get_pricing` | The list price behind an estimate, labelled as live, or as Livepeer's static fallback when the platform says so; a local static table is used when it cannot be read. An unknown price under a ceiling refuses. |
 | `spend_cap` | Read only: a render whose estimate is over the account's remaining 24 h budget is not dispatched. When the budget cannot be evaluated (no numeric `remaining_usd`, an unknown estimate, a failed read) the render still goes ahead and the result says the budget was not checked. Mandate never changes the cap. |
 | `request_upload`, `get_upload` | A 30-minute link the depicted person opens on their own phone to record consent. No API key needed. |
-| `nemotron-asr` (via `run_capability`) | Transcribes the clip, so the spoken words are checked against the grant's clauses. |
+| `nemotron-asr` (via `run_capability`) | Transcribes the clip, so the spoken words can be compared with the consent script generated from the grant's clauses. |
 
 Every call above is keyless on the demo tier. Each render carries an idempotency key
 derived from the grant and inputs, so that a retried request returns the first result
 instead of billing again; that replay is Livepeer's behaviour, and Mandate has not yet
-exercised it live. A render whose request timed out on the client with no job id may
-still be rendering: it is saved as `submitted`, and rerunning the same command recovers
-it under the same key. A rerun never dispatches again a render already submitted with a
-job id, rendered, or recorded.
+exercised it live. A render whose request timed out, or whose platform error says it may
+still complete, may still be rendering with no job id: it is saved as `submitted` and
+exits 9.
+
+A render that **may have been billed is never marked failed** and never gets a new key.
+Rerunning the same command replays it under the idempotency key it was first sent with
+(leaving out `--idempotency-key` reuses it; passing a different one is exit 1 before
+anything is sent). Every dispatch is kept as an attempt in the pending record, and the
+render keeps counting against the ceiling on this machine until it is rendered and
+recorded, even if a later attempt fails cleanly. A rerun never dispatches again a render
+already submitted with a job id, rendered, recorded, or being dispatched by another
+`mandate` process on this machine.
 
 Recorded spend is the platform's reported cost when it gives one. Without one, a
 per-second estimate is not recorded as spend (it scales with a number the operator
@@ -453,7 +511,33 @@ consent clip is evidence bound to the grant by SHA-256.
 - **CLEAR is narrower than the gate.** It does not check use class, territory,
   prohibited uses or the spend ceiling; derivations do not record them.
 - **The deny list checks declared labels.** A producer that labels a sexual or
-  impersonating render as something else is not caught by it.
+  impersonating render as something else is not caught by it. Matching inflections and
+  joined words also refuses some innocent labels.
+- **Spoken consent is only as good as the script.** Only a reading of the generated script
+  is confirmed without a person, and that compares words, not meaning: "Georgia" read from
+  the script names whatever territory the grant names. A clip that is not a reading of the
+  script is judged by the operator who types the confirmation, and on the graph such a
+  grant looks the same as one granted without any clip (no clip hash); nothing else marks
+  it. The refusal heuristics can stop a clip, never pass one.
+- **The CLI cannot tell whether the verifier node is independent.** `verify` reads from the
+  node at `MANDATE_VERIFIER_PORT`; nothing checks that it is not the producer's own node
+  under another port.
+- **A mint the node never reports cannot be found from here.** If a publish's answer is
+  lost and the node's own record never shows the asset published, Mandate reports the
+  outcome as unknown, keeps the asset unpublished rather than risk minting twice, and names
+  the asset and any transaction to check on the explorer. A minted but unbound asset is
+  never retried.
+- **A merged-view-only revocation relies on the node showing that view at least once.** A
+  node can leave the merged view of the grants graph out of an answer like any other graph.
+  The resolver catches that when the node has shown the view on some attempt, or when its
+  probe for the view went unanswered on any attempt. A node that leaves the view out of the
+  probe and of every answer on every attempt looks exactly like a node that holds no view,
+  and is believed. The check applies only when the grantor has published a Verifiable
+  Memory state about the grant in question. On a node that holds no view, it spends every
+  retry (about 1.75 s) each time it applies.
+- **`mandate record` finishes only renders `render --execute` started.** There is no
+  command yet to record a render made some other way (`record --url --grant --capability`
+  is planned); such a file verifies `UNKNOWN`.
 - **Verification matches exact bytes.** Any re-encode, trim or recompression gives a new
   hash and verifies `UNKNOWN`, and `blast-radius` lists exact bytes only: re-encoded
   copies of a file made under a revoked grant are not on its list. It is meant for the
@@ -472,10 +556,14 @@ consent clip is evidence bound to the grant by SHA-256.
   anchor. A publish took 82–109 s end to end in the S6c run. A node that stops syncing
   refuses once the chain shows it is behind, but only when the freshness check can run:
   it calls `reconcile` with the node's admin token before every decision, and without
-  admin rights it only warns.
+  admin rights it only warns. With such a token, a graph id the node does not hold (a typo,
+  or the address in another case) also reads as empty with only a warning. Library callers
+  get the freshness check only when they pass `checkFreshness: true`.
 - **A verdict about a render does not say when it happened relative to a revocation.**
   A render made lawfully and revoked later, and one recorded after the revocation, both
-  verify `TAINTED / REVOKED`.
+  verify `TAINTED / REVOKED`. What to do with a TAINTED file is the verifier's policy, and
+  nothing notifies anyone already holding a file when its grant is revoked: they must
+  verify it again.
 - **The spend ceiling is enforced by the producer's gate**, from the platform's reported
   cost or list-price estimates and trusted producers' records in the derivations graphs
   it reads. It is advisory, not a platform limit, and estimates are not invoices; failed

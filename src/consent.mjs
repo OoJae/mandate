@@ -16,7 +16,7 @@
  * It fails closed. No transcript means the spoken scope was not checked, and
  * the caller must treat that as unconfirmed, never as a pass.
  */
-import { connect, requestUpload, getUpload, callStrict, RAW } from './livepeer.mjs'
+import { connect, requestUpload, getUpload, callStrict, saysExpired, LivepeerToolError, RAW } from './livepeer.mjs'
 import { checkSpokenScope, consentScript } from './scope.mjs'
 import { sha256OfUrl } from './fetch-bytes.mjs'
 
@@ -44,11 +44,19 @@ export async function beginCapture(client, kind = 'video') {
  * up to ~20s, so this is a long poll, not a busy loop. A poll that throws (a
  * dropped connection, a platform hiccup) is retried after a pause: the person
  * may be mid-recording, and one bad poll must not throw their clip away.
+ *
+ * A tool error is the platform answering, not the network failing: one that
+ * says the link expired or does not exist ends the wait at once, and so do
+ * TOOL_ERROR_LIMIT identical ones in a row. A status that is neither a known
+ * wait nor a finished upload also ends it, reported as itself. Deliberate
+ * trade-off: a new pending status the platform starts using ends the wait
+ * early, which costs a new link, never a false capture.
  */
 export async function awaitCapture(client, token, { deadline = Date.now() + LINK_LIFETIME_MS, onPending, now = Date.now, sleep = ms => new Promise(r => setTimeout(r, ms)), retryMs = 3000 } = {}) {
   let polls = 0
   let errors = 0
   let lastError = null
+  let sameToolError = 0
   while (now() < deadline) {
     let r
     try {
@@ -56,20 +64,31 @@ export async function awaitCapture(client, token, { deadline = Date.now() + LINK
     } catch (e) {
       polls++
       errors++
+      if (e instanceof LivepeerToolError) {
+        const said = `${e.text ?? ''} ${e.message}`
+        if (saysExpired(said)) return { url: null, status: 'expired', polls, errors, lastError: e.message }
+        if (PERMANENT_TOOL_ERROR.test(said)) return { url: null, status: 'failed', polls, errors, lastError: e.message }
+        sameToolError = e.message === lastError ? sameToolError + 1 : 1
+        if (sameToolError >= TOOL_ERROR_LIMIT) return { url: null, status: 'failed', polls, errors, lastError: e.message }
+      } else sameToolError = 0
       lastError = e.message
       onPending?.({ polls, remainingMs: deadline - now(), error: e.message })
       if (now() < deadline) await sleep(retryMs)
       continue
     }
     polls++
+    sameToolError = 0
     if (r.url) return { ...r, polls, errors }
-    if (TERMINAL_UPLOAD.has(r.status)) return { url: null, status: r.status, polls, errors, lastError }
+    if (!UPLOAD_WAITING.has(r.status)) return { url: null, status: r.status, polls, errors, lastError }
     onPending?.({ polls, remainingMs: deadline - now() })
   }
   return { url: null, status: 'expired', polls, errors, lastError }
 }
 
-const TERMINAL_UPLOAD = new Set(['expired', 'failed', 'error', 'cancelled', 'canceled', 'rejected'])
+// getUpload reports 'pending' when it has no status at all.
+const UPLOAD_WAITING = new Set(['pending', 'waiting', 'awaiting', 'awaiting_upload', 'uploading', 'receiving', 'processing', 'queued', 'open', 'created', 'active', 'in_progress', 'in-progress'])
+const PERMANENT_TOOL_ERROR = /\b(unknown|invalid|not found|no such|does not exist|not exist|unauthori[sz]ed|forbidden)\b/i
+const TOOL_ERROR_LIMIT = 5
 
 const ZERO_WIDTH = /[\u200b-\u200f\u2060\ufeff]/g
 const hasLink = s => /\bhttps?:\/\/|\bwww\./i.test(String(s).replace(ZERO_WIDTH, ''))
@@ -79,7 +98,7 @@ function looksLikeUrlOnly(s) {
 
 // A text-only reply that reads like the platform talking about a job, not a
 // person talking. Only consulted when there is no structured reply at all.
-const STATUS_TEXT = /\b(job|poll|polling|submitted|queued|running|pending|in progress|failed|failure|error|status|get_job|get_create_media|call \w+ to|capability|nemotron|asr)\b|→/i
+const STATUS_TEXT = /\b(job|poll|polling|submitted|queued|running|pending|in progress|processing|please wait|could not be processed|unavailable|failed|failure|error|status|get_job|get_create_media|call \w+ to|capability|nemotron|asr)\b|→/i
 
 /**
  * Pull a transcript out of whatever shape the ASR result took. A structured
@@ -107,12 +126,49 @@ const ASR_PENDING = new Set(['submitted', 'queued', 'pending', 'running', 'proce
 const TRANSCRIPT_MAX_BYTES = 1024 * 1024
 const TEXT_TYPES = /^(text\/plain|application\/json|application\/[a-z0-9.+-]*\+json)\b/i
 
+// Percent-encoding, repeated and trailing slashes name the same file on most
+// hosts, so they are undone before comparing: %65xample.mp4 is example.mp4.
+function canonicalPath(pathname) {
+  let p = pathname
+  try { p = decodeURIComponent(p) } catch { /* malformed escapes stay as they are */ }
+  return p.replace(/\/{2,}/g, '/').replace(/\/+$/, '')
+}
+
 function sameResource(a, b) {
   try {
     const x = new URL(a)
     const y = new URL(b)
-    return x.origin === y.origin && x.pathname.replace(/\/+$/, '') === y.pathname.replace(/\/+$/, '')
+    return x.origin === y.origin && canonicalPath(x.pathname) === canonicalPath(y.pathname)
   } catch { return String(a).trim() === String(b).trim() }
+}
+
+const LOOPBACK = new Set(['127.0.0.1', 'localhost', '[::1]'])
+
+/**
+ * Why this reply, or a part of it, says the transcription did not succeed, or
+ * null. Looked for at the top level and inside result, output and run_output,
+ * because a failure can be reported at any of them.
+ */
+function failureOf(reply) {
+  const layers = [reply, reply?.result, reply?.output, reply?.run_output].filter(x => x && typeof x === 'object' && !Array.isArray(x))
+  for (const o of layers) {
+    if (o.ok === false || o.success === false) return `transcription failed: ${String(o.error?.message ?? o.error ?? o.message ?? 'the platform answered ok: false').slice(0, 300)}`
+    if (o.error) return `transcription failed: ${String(o.error.message ?? o.error).slice(0, 300)}`
+    for (const field of ['status', 'state', 'job_status', 'phase']) {
+      if (o[field] == null) continue
+      const status = typeof o[field] === 'string' ? o[field].trim().toLowerCase() : ''
+      if (!status) return `transcription returned an unreadable ${field}`
+      if (ASR_PENDING.has(status)) return `transcription has not finished (${field} ${status}); nothing was heard yet`
+      if (!ASR_DONE.has(status)) return `transcription ended with ${field} ${status}`
+    }
+  }
+  return null
+}
+
+/** A transcript candidate outside result.text that reads like the platform talking about a job. */
+function platformTextIn(reply) {
+  const loose = [reply?.text, reply?.transcript, typeof reply?.output === 'string' ? reply.output : null, typeof reply?.run_output === 'string' ? reply.run_output : null]
+  return loose.some(v => typeof v === 'string' && !looksLikeUrlOnly(v) && STATUS_TEXT.test(v))
 }
 
 /**
@@ -123,7 +179,11 @@ function sameResource(a, b) {
 async function fetchTranscriptLink(link, sourceUrl, { fetch, timeoutMs, maxBytes }) {
   let u
   try { u = new URL(link) } catch { throw new ConsentError('transcript link is not a URL', { stage: 'asr' }) }
-  if (u.protocol !== 'https:' && u.protocol !== 'http:') throw new ConsentError(`transcript link must be http(s), got ${u.protocol}`, { stage: 'asr' })
+  // The words become the evidence of what was consented to, so they travel over
+  // TLS as the clip does. Plain http is allowed for loopback alone. This is
+  // stricter than allowing http to the clip's own host: that host is no safer
+  // from someone on the path.
+  if (u.protocol !== 'https:' && !(u.protocol === 'http:' && LOOPBACK.has(u.hostname))) throw new ConsentError(`transcript link must use https, got ${u.protocol}//${u.hostname}`, { stage: 'asr' })
   if (sameResource(u.href, sourceUrl)) throw new ConsentError('transcription answered with the consent clip itself, not a transcript', { stage: 'asr' })
   let r
   try {
@@ -140,10 +200,17 @@ async function fetchTranscriptLink(link, sourceUrl, { fetch, timeoutMs, maxBytes
   if (Number.isFinite(declared) && declared > maxBytes) { cancel(); throw new ConsentError(`transcript is ${declared} bytes, over the ${maxBytes}-byte limit`, { stage: 'asr' }) }
   const chunks = []
   let bytes = 0
-  for await (const chunk of r.body ?? []) {
-    bytes += chunk.byteLength
-    if (bytes > maxBytes) throw new ConsentError(`transcript exceeds the ${maxBytes}-byte limit`, { stage: 'asr' })
-    chunks.push(chunk)
+  try {
+    for await (const chunk of r.body ?? []) {
+      bytes += chunk.byteLength
+      // Throwing out of for-await cancels the stream, so nothing more is read.
+      if (bytes > maxBytes) throw new ConsentError(`transcript exceeds the ${maxBytes}-byte limit`, { stage: 'asr' })
+      chunks.push(chunk)
+    }
+  } catch (e) {
+    // A dropped socket or a timeout mid-body is still a transcription failure.
+    if (e instanceof ConsentError) throw e
+    throw new ConsentError(`transcript link failed while reading: ${e?.message ?? e}`, { stage: 'asr' })
   }
   let body
   try {
@@ -155,10 +222,16 @@ async function fetchTranscriptLink(link, sourceUrl, { fetch, timeoutMs, maxBytes
   if (/json/i.test(type)) {
     let parsed
     try { parsed = JSON.parse(body) } catch { throw new ConsentError('transcript link returned invalid JSON', { stage: 'asr' }) }
-    const t = transcriptFrom(parsed && typeof parsed === 'object' ? parsed : { value: parsed }, '')
+    const reply = parsed && typeof parsed === 'object' ? parsed : { value: parsed }
+    // The linked document can report its own failure, as the reply can.
+    const failed = failureOf(reply)
+    if (failed) throw new ConsentError(`transcript link: ${failed}`, { stage: 'asr' })
+    if (platformTextIn(reply)) throw new ConsentError('transcript link returned a platform status message, not speech', { stage: 'asr' })
+    const t = transcriptFrom(reply, '')
     if (!t) throw new ConsentError('transcript JSON has no transcript field', { stage: 'asr' })
     return t
   }
+  if (STATUS_TEXT.test(body)) throw new ConsentError('transcript link returned a platform status message, not speech', { stage: 'asr' })
   return body.trim()
 }
 
@@ -178,35 +251,39 @@ export async function transcribe(client, url, { fetch = globalThis.fetch, timeou
   const s = res.structured
   const raw = s ?? res.text
   const fail = message => new ConsentError(message, { stage: 'asr', raw })
-  if (s && typeof s === 'object') {
-    const status = typeof s.status === 'string' ? s.status.trim().toLowerCase() : null
-    if (s.ok === false) throw fail(`transcription failed: ${String(s.error ?? s.message ?? 'the platform answered ok: false').slice(0, 300)}`)
-    if (s.error) throw fail(`transcription failed: ${String(s.error.message ?? s.error).slice(0, 300)}`)
-    if (status && ASR_PENDING.has(status)) throw fail(`transcription has not finished (status ${status}); nothing was heard yet`)
-    if (status && !ASR_DONE.has(status)) throw fail(`transcription ended with status ${status}`)
-    if (s.status != null && !status) throw fail('transcription returned an unreadable status')
-    if (s.job_id && !transcriptFrom(s, '') && !s.url) throw fail(`transcription was queued as job ${String(s.job_id).slice(0, 60)}, not finished`)
-    for (const [field, want] of [['capability', 'nemotron-asr'], ['requested_capability', 'nemotron-asr']]) {
-      if (s[field] != null && s[field] !== want) throw fail(`transcription was served by ${String(s[field]).slice(0, 60)}, not ${want}`)
-    }
-    if (s.output_kind != null && s.output_kind !== 'text') throw fail(`transcription returned ${String(s.output_kind).slice(0, 40)} output, not text`)
-    // The words must be of this clip, not of some other input.
-    for (const heard of [s.source_url, s.inputs?.audio_url]) {
-      if (heard != null && !sameResource(heard, url)) throw fail('transcription reports a different source than the consent clip')
-    }
+  // Only the live shape is read: a structured reply that says ok: true. Plain
+  // text alone carries no provenance and no failure flags to check.
+  if (!s || typeof s !== 'object' || Array.isArray(s)) throw fail('transcription returned no structured result; plain text cannot be checked as speech')
+  const failed = failureOf(s)
+  if (failed) throw fail(failed)
+  if (s.ok !== true) throw fail('transcription did not answer ok: true')
+  if (s.job_id && !transcriptFrom(s, '') && !s.url) throw fail(`transcription was queued as job ${String(s.job_id).slice(0, 60)}, not finished`)
+  if (platformTextIn(s)) throw fail('transcription returned a platform status message, not speech')
+  for (const [field, want] of [['capability', 'nemotron-asr'], ['requested_capability', 'nemotron-asr']]) {
+    if (s[field] != null && s[field] !== want) throw fail(`transcription was served by ${String(s[field]).slice(0, 60)}, not ${want}`)
+  }
+  // The live reply names what served it and what it heard. Without both, the
+  // words could be of any model and any input.
+  if (s.capability == null && s.requested_capability == null) throw fail('transcription does not say which capability served it')
+  if (s.source_url == null && s.inputs?.audio_url == null) throw fail('transcription does not say which clip it heard')
+  if (s.output_kind != null && s.output_kind !== 'text') throw fail(`transcription returned ${String(s.output_kind).slice(0, 40)} output, not text`)
+  // The words must be of this clip, not of some other input.
+  for (const heard of [s.source_url, s.inputs?.audio_url]) {
+    if (heard != null && !sameResource(heard, url)) throw fail('transcription reports a different source than the consent clip')
   }
   let transcript = transcriptFrom(s, res.text)
+  // Speech that reads like a job report and has no first-person word is the
+  // platform talking ("Job submitted. Call get_job to poll."), not a person.
+  if (transcript && !looksLikeUrlOnly(transcript) && STATUS_TEXT.test(transcript) && !/\b(i|we|my|me|our|us)\b/i.test(transcript)) throw fail('transcription returned a platform status message, not speech')
   if (transcript && hasLink(transcript) && !looksLikeUrlOnly(transcript)) throw fail('transcription returned text mixed with a link; it cannot be read as speech')
   // Some capabilities answer with a link to their output instead of the output.
-  const bare = transcript && looksLikeUrlOnly(transcript)
-    ? transcript.replace(ZERO_WIDTH, '').match(/https?:\/\/[^\s)]+/)[0]
-    : (!s && looksLikeUrlOnly(res.text ?? '') ? String(res.text).replace(ZERO_WIDTH, '').match(/https?:\/\/[^\s)]+/)[0] : null)
-  const link = typeof s?.url === 'string' ? s.url : bare
+  const bare = transcript && looksLikeUrlOnly(transcript) ? transcript.replace(ZERO_WIDTH, '').match(/https?:\/\/[^\s)]+/)[0] : null
+  const link = typeof s.url === 'string' ? s.url : bare
   if (!transcript || bare) {
     if (!link) throw fail('transcription returned no text')
     transcript = await fetchTranscriptLink(link, url, { fetch, timeoutMs, maxBytes })
     if (hasLink(transcript)) throw fail('the fetched transcript contains a link; it cannot be read as speech')
-  } else if (typeof s?.url === 'string') {
+  } else if (typeof s.url === 'string') {
     throw fail('transcription returned both text and a link; it cannot be read as speech')
   }
   if (!transcript) throw fail('transcription returned no text')

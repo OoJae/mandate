@@ -10,20 +10,26 @@
  * though the media exists and was billed: better to report a render as failed
  * than to hold media a revocation cannot account for.
  */
-import { nonce16, normSha256, agentAddress } from './rdf-term.mjs'
+import { nonce16, normSha256, agentAddress, decimalTerm } from './rdf-term.mjs'
 import { derivationToQuads } from './rdf.mjs'
 import { hashUrl } from './verify.mjs'
 
 /** Derivation ids and asset names share the output hash prefix and one nonce. */
 const DERIVATION_ID = /^urn:mandate:derivation:([0-9a-f]{16}):([0-9a-f]{16})$/
 const DERIVATION_NAME = /^derivation-([0-9a-f]{16})-([0-9a-f]{16})$/
-const DECIMAL = /^(0|[1-9]\d*)(\.\d+)?$/
 
 function checkBilledUsd(v) {
   if (v === null || v === undefined) return null
-  if (typeof v === 'number' && Number.isFinite(v) && v >= 0) return v
-  if (typeof v === 'string' && DECIMAL.test(v)) return v
-  throw new TypeError(`billedUsd must be a finite non-negative amount like 0.25, or null; got ${typeof v === 'string' ? JSON.stringify(v) : String(v)}`)
+  // Checked with the writer's own rule, which refuses non-numbers, NaN,
+  // Infinity, negatives and strings like "1e3". It also refuses a finite number
+  // too large for a plain decimal (1e21), which would otherwise fail only after
+  // the media was downloaded and hashed, on every retry.
+  try {
+    decimalTerm(v, 'billedUsd')
+  } catch (e) {
+    throw new TypeError(`billedUsd must be a finite non-negative amount like 0.25, or null; got ${typeof v === 'string' ? JSON.stringify(v) : String(v)} (${e.message})`)
+  }
+  return v
 }
 
 /** The nonce a caller-supplied id and name agree on, or throw. Returns null when neither is given. */
@@ -55,18 +61,20 @@ function callerNonce(id, name) {
  * pass back the `id` or `name` of an earlier attempt (both carry the same
  * nonce) with `resume: true`, and the earlier asset is finished instead. The
  * id's hash prefix must match the output, so a saved id cannot be reused for
- * other bytes.
+ * other bytes. Pass `lastPublishUnknown: true` when that earlier attempt may
+ * have sent a publish transaction: resume then verifies but never publishes.
  */
 export async function recordDerivation(node, contextGraphId, {
   outputUrl, outputSha256, servedCapability, servedModelId = null, authorizedUnder,
   billedUsd = null, jobId = null, derivedAt = new Date().toISOString(), expectAuthor,
-  id, name, resume = false, fetchOptions,
+  id, name, resume = false, lastPublishUnknown = false, fetchOptions,
 } = {}) {
   // Checked before anything is downloaded or written: an amount that cannot be
   // recorded must fail at once, not after a hash and an identity round trip.
   const billed = checkBilledUsd(billedUsd)
   const given = callerNonce(id, name)
   if (typeof resume !== 'boolean') throw new TypeError('resume must be true or false')
+  if (typeof lastPublishUnknown !== 'boolean') throw new TypeError('lastPublishUnknown must be true or false')
 
   const sha = outputSha256 ? normSha256(outputSha256) : outputUrl ? await hashUrl(outputUrl, fetchOptions) : null
   if (!sha) throw new Error('recordDerivation needs outputUrl or a valid outputSha256')
@@ -80,7 +88,7 @@ export async function recordDerivation(node, contextGraphId, {
   const author = expectAuthor ?? agentAddress((await node.identity()).agentDid)
   let anchored
   try {
-    anchored = await node.sealShareAnchor({ name: assetName, contextGraphId, quads, expectAuthor: author, resume })
+    anchored = await node.sealShareAnchor({ name: assetName, contextGraphId, quads, expectAuthor: author, resume, lastPublishUnknown })
   } catch (e) {
     // Carry the id alongside the asset name so the caller can save both and resume.
     if (e && typeof e === 'object' && !Object.isFrozen(e)) e.derivationId ??= derivationId

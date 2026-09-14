@@ -57,6 +57,18 @@ test('knowledge without a consistent read refuses', async () => {
   assert.equal(decide(req(), { grants: k.grants, states: [], derivations: [] }).clause, 'read-inconsistent')
 })
 
+test('knowledge with every list but no consistency result refuses, even when the grant would permit', async () => {
+  // Every list is present, so only the consistency check can refuse: a hand-built
+  // knowledge object that never ran the resolver's checks must not be believed.
+  const k = await K(grantKa(grant()))
+  assert.equal(decide(req(), k).permit, true)
+  for (const consistency of [undefined, {}, { ok: 'true' }, { ok: 1 }, { ok: false }]) {
+    const d = decide(req(), { ...k, consistency })
+    assert.equal(d.permit, false, JSON.stringify(consistency))
+    assert.equal(d.clause, 'read-inconsistent', JSON.stringify(consistency))
+  }
+})
+
 test('refuses when no grant exists for the subject', async () => {
   const d = decide(req({ subject: `${ANA}:someone-else` }), await K(grantKa(grant())))
   assert.equal(d.clause, 'grant-exists')
@@ -262,4 +274,84 @@ test('a grant whose subject belongs to another address is not authentic, even wh
   const d = decide(req({ subject }), k)
   assert.equal(d.permit, false)
   assert.equal(d.clause, 'grant-exists')
+})
+
+/* Round two: exact money edges, duplicate ids and hand-built knowledge. */
+
+test('any positive amount counts as at least one micro-dollar, however small', async () => {
+  for (const usd of [1e-12, 1e-13, Number.MIN_VALUE]) assert.equal(microUsd(usd), 1n, String(usd))
+  assert.equal(microUsd(0), 0n)
+  assert.equal(microUsd(1e-13, { down: true }), 0n, 'a ceiling is still rounded down')
+  const g = grant({ maxSpendUsd: 0.000001 })
+  const k = await K(grantKa(g), derivationKa(derivation({ authorizedUnder: g.id, billedUsd: 0.000001 })))
+  for (const estimatedUsd of [1e-12, 1e-13, Number.MIN_VALUE]) {
+    assert.equal(decide(req({ estimatedUsd }), k).clause, 'spend-ceiling', `${estimatedUsd} on a used-up ceiling`)
+  }
+  const zero = await K(grantKa(grant({ maxSpendUsd: 0 })))
+  assert.equal(decide(req({ estimatedUsd: 5e-13 }), zero).clause, 'spend-ceiling')
+  assert.equal(decide(req({ estimatedUsd: 0 }), zero).permit, true)
+})
+
+test('a ceiling with sub-micro digits is rounded down, never up', async () => {
+  assert.equal(microUsd(1.0000006, { down: true }), 1000000n)
+  assert.equal(microUsd(0.0000016, { down: true }), 1n)
+  const k = await K(grantKa(grant()))
+  // Hand-built: the writer would have raised the ceiling to 0.000002 before anchoring it.
+  const hand = { ...k, grants: [{ ...k.grants[0], maxSpendUsd: 0.0000016 }] }
+  assert.equal(decide(req({ estimatedUsd: 0.000002 }), hand).clause, 'spend-ceiling')
+  assert.equal(decide(req({ estimatedUsd: 0.000001 }), hand).permit, true)
+})
+
+test('one grant id published under two subjects is refused for either subject', async () => {
+  const g = grant()
+  const bob = { ...g, subject: `${ANA}:bob` }
+  const k = await K(grantKa(g), grantKa(bob))
+  assert.equal(k.grants.length, 2)
+  assert.notEqual(k.grants[0].ual, k.grants[1].ual)
+  const d = decide(req(), k)
+  assert.equal(d.permit, false)
+  assert.equal(d.clause, 'grant-exists')
+  assert.match(d.reason, /published more than once/)
+  assert.equal(decide(req({ subject: `${ANA}:bob` }), k).clause, 'grant-exists')
+})
+
+test('hand-built knowledge without a forgeries list refuses', async () => {
+  const k = await K(grantKa(grant()))
+  assert.equal(decide(req(), k).permit, true)
+  for (const forgeries of [undefined, null, 'none', {}]) {
+    const d = decide(req(), { ...k, forgeries })
+    assert.equal(d.clause, 'read-inconsistent', String(forgeries))
+    assert.match(d.reason, /knowledge\.forgeries is not a list/)
+  }
+})
+
+test('the grantor\'s malformed or untiered state counts as a revocation, whatever it says', async () => {
+  const g = { id: 'urn:g', publisher: ANA }
+  const s = over => ({ stateOf: 'urn:g', state: 'revoked', tier: 'vm', publisher: ANA, ...over })
+  assert.equal(revocationOf(g, [s({ state: 'active', malformed: true })]).revoked, true)
+  assert.equal(revocationOf(g, [s({ state: 'active', malformed: false })]).revoked, false)
+  for (const tier of [undefined, null, 'VM', 'other']) {
+    assert.equal(revocationOf(g, [s({ tier })]).revoked, true, `tier ${tier}`)
+    assert.equal(revocationOf(g, [s({ tier, state: 'active' })]).revoked, true, `active, tier ${tier}`)
+    assert.equal(revocationOf(g, [s({ tier, publisher: STRANGER })]).revoked, false, `someone else's, tier ${tier}`)
+  }
+  assert.equal(revocationOf(g, [s({ tier: 'vm', publisher: STRANGER, malformed: true })]).revoked, false, 'nobody else can revoke')
+  assert.equal(revocationOf(g, [s({ tier: 'swm', malformed: true })]).revoked, false, 'shared memory still only warns')
+  const k = await K(grantKa(grant()))
+  const id = k.grants[0].id
+  assert.equal(decide(req(), { ...k, states: [{ id: 'urn:mandate:state:1', stateOf: id, state: 'revoked', publisher: ANA }] }).clause, 'not-revoked')
+  assert.equal(decide(req(), { ...k, states: [{ id: 'urn:mandate:state:1', stateOf: id, state: 'active', tier: 'vm', publisher: ANA, malformed: true }] }).clause, 'not-revoked')
+})
+
+test('prohibited labels are matched through inflections, joined words and digits', async () => {
+  const k = await K(grantKa(grant({ permitsUseClass: [], forbidsUseClass: [] })))
+  for (const useClass of ['deepfakes', 'impersonating', 'impersonations', 'impersonated', 'sexualised', 'sexualized', 'sexually-explicit',
+    'lewd', 'hentai', 'nsfw18', 'x-rated', 'xrated', 'x-rated-clip', 'fetish', 'fetishes', 'onlyfans', 'only-fans', 'deep-fakes', 'nudes', 'kinky']) {
+    assert.equal(decide(req({ useClass }), k).clause, 'use-class-prohibited', useClass)
+  }
+  for (const label of ['advertising', 'entertainment', 'education', 'news', 'political', 'classic', 'documentary', 'parody',
+    'sussex-tourism', 'unisex-fashion', 'music-video', 'localisation']) {
+    assert.equal(isProhibitedUseClass(label), false, label)
+    assert.notEqual(decide(req({ useClass: label }), k).clause, 'use-class-prohibited', label)
+  }
 })

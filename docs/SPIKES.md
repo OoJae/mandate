@@ -16,7 +16,7 @@ Sections are in the order they were run. Scratch output from the early spikes we
 | S4 Two independent parties | GREEN | below |
 | S5 Testnet anchoring | GREEN after manual funding | "S5 revisited" |
 | S6 Author attestation, S6b forging it from the producer's node | GREEN: the producer's node refuses to seal as the grantor | "S6" |
-| S6c Forgery of graph *content* from the producer's node | GREEN against 0.2.0 on the grantor's and producer's nodes. That 0.1.0 would accept the same forgeries is shown by replaying them against 0.1.0's resolver in tests; no live 0.1.0 read of these assets was recorded | "S6c" |
+| S6c Forgery of graph *content* from the producer's node | GREEN against 0.2.0 on all three nodes, the grantor's, the producer's and the read-only verifier's (re-recorded 14 Sep). That 0.1.0 would accept the same forgeries is shown by replaying them against 0.1.0's resolver in tests; no live 0.1.0 read of these assets was recorded | "S6c" |
 | S7 Live render | GREEN inline (`sync-lipsync-v3`, 103 s); async worker abandons at ~128 s | "S7" |
 | Graph omission in `/api/query` | reproduced on both nodes; handled by merged, checked reads | "DKG v10.0.16 leaves whole named graphs out" |
 | Read-only verifier node | GREEN, no funded wallet | "A third, read-only verifier node" |
@@ -719,5 +719,7 @@ What it took, for anyone repeating it:
   chain-driven reconciliation, not the probes, brought it from 0 to 12/12 and 4/4
   in about ten minutes.
 
-The verifier then resolved the S6c subject in 16 s with the same verdict as the
-other two nodes (table above); that read was observed, not saved.
+On 13 Sep the verifier then resolved the S6c subject in 16 s with the same verdict as
+the other two nodes; that first read was observed, not saved. The 14 Sep `--reread`
+recorded a verifier read with the same verdict, which is the one in the S6c table above
+and in [`s6c-forgery.txt`](evidence/s6c-forgery.txt).

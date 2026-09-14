@@ -24,4 +24,6 @@ export { anchorsFromMeta, checkConsistency, reduceSlice } from './provenance.mjs
 export { memoryStateStore, fileStateStore, StateReadError } from './state-store.mjs'
 export { makeSubject, subjectAddress, TermError, InvalidIriError, UnpublishableLiteralError } from './rdf-term.mjs'
 export { reconcile } from './derivation.mjs'
-export { checkSpokenScope } from './scope.mjs'
+// The script and its matcher go with the check: a harness that shows or reads the
+// consent script must build the same words checkSpokenScope compares against.
+export { checkSpokenScope, consentScript, matchScript } from './scope.mjs'

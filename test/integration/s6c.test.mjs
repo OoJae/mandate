@@ -84,8 +84,15 @@ async function unusable(node) {
   return null
 }
 
+/**
+ * A fixed decision time inside G2's validity window (G2 is valid until
+ * 2026-12-12T15:42:18Z), so the recorded verdict does not turn into a
+ * validity-window refusal once G2 expires. Same date the README suggests for --at.
+ */
+const DECIDE_AT = '2026-10-01T00:00:00.000Z'
+
 const request = capability => ({
-  subject: SUBJECT, capability, useClass: 'advertising', territory: 'GB', at: new Date().toISOString(), estimatedUsd: 0.01,
+  subject: SUBJECT, capability, useClass: 'advertising', territory: 'GB', at: DECIDE_AT, estimatedUsd: 0.01,
 })
 
 for (const r of ROLES) {

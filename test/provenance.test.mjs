@@ -339,3 +339,101 @@ test('a grant under the subject\'s own prefix whose mandate:grantor names anothe
   assert.equal(out.forgeries[0].kind, 'grantor-literal-mismatch')
   assert.equal(out.forgeries[0].trusted, true)
 })
+
+/* ------------------- objects typed more than one way, or not at all ------------------- */
+
+test('contract 3: the grantor\'s own state also typed LikenessGrant is a revoked state entry, never a failed grant', () => {
+  const g = grant()
+  for (const id of [`urn:mandate:grant:${ANA}:ana:00000000000000c9`, g.id, 'urn:x:state:1']) {
+    const pairs = [[RDF_TYPE, V.LikenessGrant], ...wellFormed(g.id, 'active')]
+    const k = ka({ cg: GRANTS_CG, publisher: ANA, quads: pairs.map(([predicate, object]) => ({ subject: id, predicate, object })) })
+    const out = reduceGrants(read(grantKa(g), k))
+    assert.equal(out.states.length, 1, id)
+    assert.equal(out.states[0].state, 'revoked')
+    assert.equal(out.states[0].stateOf, g.id)
+    assert.match(out.states[0].problems.join(), /also typed LikenessGrant/)
+    assert.equal(out.forgeries.length, 0)
+    assert.equal(out.grants.length, 1, 'the real grant is still read')
+  }
+})
+
+test('contract 3: the grantor\'s own "active" co-typed Derivation, or with no GrantState type, counts as revoked', () => {
+  const g = grant()
+  const typed = [[RDF_TYPE, V.Derivation], ...wellFormed(g.id, 'active')]
+  const untyped = wellFormed(g.id, 'active').filter(([p]) => p !== RDF_TYPE)
+  const renamed = wellFormed(g.id, 'active').map(([p, o]) => [p, p === RDF_TYPE ? `${V.GrantState}V2` : o])
+  for (const [name, pairs, problem] of [['co-typed', typed, /also typed Derivation/], ['untyped', untyped, /not typed GrantState/], ['renamed', renamed, /not typed GrantState.*unknown type GrantStateV2/]]) {
+    const out = reduceGrants(read(grantKa(g), ownState(g.id, pairs)))
+    assert.equal(out.states.length, 1, name)
+    assert.equal(out.states[0].state, 'revoked', name)
+    assert.match(out.states[0].problems.join(), problem, name)
+  }
+})
+
+test('an untyped stateOf naming someone else\'s grant, in a stranger\'s prefix, is still ignored by the reducer', () => {
+  const g = grant()
+  const k = ka({ cg: GRANTS_CG, publisher: STRANGER, quads: [{ subject: 'urn:x:1', predicate: V.stateOf, object: g.id }, { subject: 'urn:x:1', predicate: V.state, object: '"active"' }] })
+  const out = reduceGrants(read(grantKa(g), k))
+  assert.deepEqual([out.states.length, out.forgeries.length], [0, 0])
+})
+
+test('contract 6: a trusted state with an unreadable stateOf is reported as a trusted malformed forgery with its claims', () => {
+  const g = grant()
+  const pairs = [...wellFormed(g.id).filter(([p]) => p !== V.stateOf), [V.stateOf, g.id], [V.stateOf, `"${g.id}"`]]
+  const out = reduceGrants(read(grantKa(g), ownState(g.id, pairs)))
+  const f = out.forgeries.find(x => x.detail === 'unreadable stateOf')
+  assert.ok(f, JSON.stringify(out.forgeries))
+  assert.equal(f.kind, 'malformed')
+  assert.equal(f.trusted, true)
+  assert.deepEqual(f.claims.stateOf, [g.id])
+})
+
+for (const [name, edit] of [
+  ['no rdf:type', rows => rows.filter(x => x.p !== RDF_TYPE)],
+  ['a foreign namespace type', rows => rows.map(x => (x.p === RDF_TYPE ? { ...x, o: 'https://example.org/mandate/v2#Derivation' } : x))],
+  ['an unknown mandate type', rows => rows.map(x => (x.p === RDF_TYPE ? { ...x, o: `${V.Derivation}V2` } : x))],
+  ['a Refusal type', rows => rows.map(x => (x.p === RDF_TYPE ? { ...x, o: V.Refusal } : x))],
+]) {
+  test(`item 5: a trusted producer's edge with ${name} is a trusted malformed forgery carrying its grant and bill`, () => {
+    const d = derivation({ authorizedUnder: grant().id, billedUsd: 4.5 })
+    const quads = edit(derivationKa(d).contentRows).map(x => ({ subject: x.s, predicate: x.p, object: x.o }))
+    const out = reduceDerivs(read(ka({ cg: DERIVS_CG, publisher: PRODUCER, quads })))
+    assert.equal(out.derivations.length, 0)
+    assert.equal(out.forgeries.length, 1, JSON.stringify(out.warnings))
+    assert.equal(out.forgeries[0].kind, 'malformed')
+    assert.equal(out.forgeries[0].trusted, true)
+    assert.deepEqual(out.forgeries[0].claims.authorizedUnder, [d.authorizedUnder])
+    assert.deepEqual(out.forgeries[0].claims.billedUsd, ['4.5'])
+    // A stranger's is not their record to answer for.
+    const theirs = reduceDerivs(read(ka({ cg: DERIVS_CG, publisher: STRANGER, quads })))
+    assert.deepEqual([theirs.derivations.length, theirs.forgeries.length], [0, 0])
+  })
+}
+
+test('a trusted producer\'s plain Refusal names no grant or file and is not a forgery', () => {
+  const quads = [{ subject: 'urn:mandate:refusal:1', predicate: RDF_TYPE, object: V.Refusal }, { subject: 'urn:mandate:refusal:1', predicate: V.deniedByClause, object: '"not-revoked"' }]
+  assert.equal(reduceDerivs(read(ka({ cg: DERIVS_CG, publisher: PRODUCER, quads }))).forgeries.length, 0)
+})
+
+test('claims keep every value: a trusted record naming the grant fifth still names it', () => {
+  const g = grant()
+  const d = derivation({ authorizedUnder: g.id })
+  const k = derivationKa(d)
+  const others = Array.from({ length: 6 }, () => grant().id)
+  const rows = k.contentRows.filter(x => x.p !== V.authorizedUnder)
+  const extra = [...others.slice(0, 4), g.id, ...others.slice(4)].map(o => ({ ...k.contentRows.find(x => x.p === V.authorizedUnder), o }))
+  const quads = [...rows, ...extra].map(x => ({ subject: x.s, predicate: x.p, object: x.o }))
+  const out = reduceDerivs(read(ka({ cg: DERIVS_CG, publisher: PRODUCER, quads })))
+  assert.equal(out.forgeries[0].trusted, true)
+  assert.equal(out.forgeries[0].claims.authorizedUnder.length, 7)
+  assert.ok(out.forgeries[0].claims.authorizedUnder.includes(g.id))
+})
+
+test('the graph count guard: more graphs visible than anchored plus pending is inconsistent', () => {
+  const g1 = grantKa(grant())
+  const { anchors } = anchorsFromMeta(g1.metaRows, GRANTS_CG)
+  const prefix = vmPublisherPrefix(GRANTS_CG, ANA)
+  assert.equal(checkConsistency({ prefix, anchors, contentRows: g1.contentRows, visibleGraphCount: 1 }).ok, true)
+  assert.match(checkConsistency({ prefix, anchors, contentRows: g1.contentRows, visibleGraphCount: 2 }).reason, /shows 2 graphs .* but 1 are anchored/)
+  assert.equal(checkConsistency({ prefix, anchors, contentRows: g1.contentRows, visibleGraphCount: 2, pendingGraphs: new Set([`${prefix}999`]) }).ok, true)
+})

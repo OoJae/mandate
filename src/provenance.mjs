@@ -210,8 +210,16 @@ const asIso = cell => {
   return Number.isFinite(ms) ? new Date(ms).toISOString() : NaN
 }
 
-/** Raw string values of a predicate, for reporting what a rejected object claimed. */
-const claimed = (obj, predicate) => (obj.props.get(predicate) ?? []).map(t => t.value).filter(v => typeof v === 'string').slice(0, 4)
+/**
+ * Raw string values of a predicate, for reporting what a rejected object claimed.
+ *
+ * Every distinct value is kept. The gate counts a trusted forgery against a grant,
+ * and the verifier against a file, only when its claims name them, so a cap would
+ * let a record hide the value that matters behind a few others. Deliberate
+ * trade-off: a report can be as long as the object, which the prefix read's row
+ * limits already bound.
+ */
+const claimed = (obj, predicate) => [...new Set((obj.props.get(predicate) ?? []).map(t => t.value).filter(v => typeof v === 'string'))]
 
 function single(obj, predicate, read, { required = true } = {}) {
   const values = obj.props.get(predicate) ?? []
@@ -277,8 +285,8 @@ function readStateOf(obj) {
  * counts as revoked, with its problems listed. The grantor is the only party
  * who can write here, so a mistake in its own revocation must not un-revoke.
  */
-function buildState(obj, anchor, stateOf) {
-  const problems = []
+function buildState(obj, anchor, stateOf, typeProblems = []) {
+  const problems = [...typeProblems]
   const one = (predicate, { required = true } = {}) => {
     const values = obj.props.get(predicate) ?? []
     if (values.length === 0) { if (required) problems.push(`missing ${localName(predicate)}`); return undefined }
@@ -399,11 +407,39 @@ export function reduceSlice({ role, anchors, contentRows, trustedProducers = [] 
       if (anchor) report('malformed', 'unreadable rdf:type')
       continue
     }
-    if (!types.some(t => t.startsWith(V.NS))) continue
+    // An object with no Mandate type is skipped, unless it carries Mandate
+    // predicates where a trusted party publishes: a trusted producer's record
+    // with a missing or renamed type still names a grant and a bill, and a
+    // grantor's untyped statement about its own grant is still its statement.
+    const mandatePredicates = [...obj.props.keys()].some(p => p.startsWith(V.NS))
+    if (!types.some(t => t.startsWith(V.NS)) && !(mandatePredicates && isTrusted())) continue
     if (!anchor) { report('unanchored', 'no confirmed anchor for this graph'); continue }
+    // A grantor's own statement about its own grant is a state whatever else it is typed as (contract 3).
+    const stateOfIri = role === 'grants' ? readStateOf(obj) : null
+    const ownState = stateOfIri !== null && grantIriAddress(stateOfIri) === anchor.publisher
 
     try {
-      if (types.includes(V.LikenessGrant)) {
+      if (role === 'grants' && (types.includes(V.GrantState) || ownState)) {
+        const stateOf = stateOfIri
+        if (stateOf === null) {
+          unreadable.push({ graph: obj.graph, id: obj.id, ual: anchor.ual, reason: `state ${obj.id} has an unreadable stateOf` })
+          report('malformed', 'unreadable stateOf')
+          continue
+        }
+        const owner = grantIriAddress(stateOf)
+        if (!owner) { warnings.push(`ignored ${obj.id} in ${anchor.ual}: refers to a non-current grant id`); continue }
+        if (owner !== anchor.publisher) { report('state-not-by-grantor', `published by ${anchor.publisher} for a grant belonging to ${owner}`); continue }
+        // Checked before the grant branch: an object typed both a state and a grant
+        // would otherwise be judged as a grant, fail as one, and lose the revocation.
+        const typeProblems = [
+          ...(types.includes(V.GrantState) ? [] : ['not typed GrantState']),
+          ...[V.LikenessGrant, V.Derivation, V.Refusal].filter(t => types.includes(t)).map(t => `also typed ${localName(t)}`),
+          ...types.filter(t => t.startsWith(V.NS) && ![V.GrantState, V.LikenessGrant, V.Derivation, V.Refusal].includes(t)).map(t => `unknown type ${localName(t)}`),
+        ]
+        const st = buildState(obj, anchor, stateOf, typeProblems)
+        if (st.malformed) warnings.push(`state ${obj.id} in ${anchor.ual} is malformed (${st.problems.join('; ')}); it counts as a revocation of ${stateOf}`)
+        states.push(st)
+      } else if (types.includes(V.LikenessGrant)) {
         if (role !== 'grants') { report('misplaced-grant', `a grant in a ${role} graph is never accepted`); continue }
         if (!GRANT_IRI.test(obj.id)) { warnings.push(`ignored ${obj.id} in ${anchor.ual}: not a current-format grant id`); continue }
         const g = buildGrant(obj, anchor)
@@ -413,19 +449,8 @@ export function reduceSlice({ role, anchors, contentRows, trustedProducers = [] 
         if (grantIriAddress(g.id) !== g.publisher) { report('grant-id-mismatch', `grant id names ${grantIriAddress(g.id)} but ${g.publisher} published it`); continue }
         grants.push(g)
       } else if (types.includes(V.GrantState)) {
-        if (role !== 'grants') { report('misplaced-state', `a state assertion in a ${role} graph is never accepted`); continue }
-        const stateOf = readStateOf(obj)
-        if (stateOf === null) {
-          unreadable.push({ graph: obj.graph, id: obj.id, ual: anchor.ual, reason: `state ${obj.id} has an unreadable stateOf` })
-          report('malformed', 'unreadable stateOf')
-          continue
-        }
-        const owner = grantIriAddress(stateOf)
-        if (!owner) { warnings.push(`ignored ${obj.id} in ${anchor.ual}: refers to a non-current grant id`); continue }
-        if (owner !== anchor.publisher) { report('state-not-by-grantor', `published by ${anchor.publisher} for a grant belonging to ${owner}`); continue }
-        const st = buildState(obj, anchor, stateOf)
-        if (st.malformed) warnings.push(`state ${obj.id} in ${anchor.ual} is malformed (${st.problems.join('; ')}); it counts as a revocation of ${stateOf}`)
-        states.push(st)
+        // Only a derivations graph reaches here: every state in a grants graph took the first branch.
+        report('misplaced-state', `a state assertion in a ${role} graph is never accepted`)
       } else if (types.includes(V.Derivation)) {
         if (role !== 'derivations') { report('misplaced-derivation', `a derivation in a ${role} graph is never accepted`); continue }
         if (!DERIVATION_IRI.test(obj.id)) {
@@ -437,6 +462,15 @@ export function reduceSlice({ role, anchors, contentRows, trustedProducers = [] 
         const d = buildDerivation(obj, anchor, trusted)
         if (!d.id.startsWith(`urn:mandate:derivation:${d.outputSha256.slice(0, 16)}:`)) { report('derivation-id-mismatch', 'id does not match outputSha256'); continue }
         derivations.push(d)
+      } else if (role === 'derivations' && isTrusted()) {
+        // A trusted producer's record with no Derivation type (absent, renamed, or a
+        // later version's) is still its record: reported, so the spend and the file
+        // it names are unknown rather than silently absent.
+        const refusalOnly = types.length > 0 && types.every(t => t === V.Refusal)
+          && !claims.outputSha256.length && !claims.authorizedUnder.length && !claims.billedUsd.length
+        if (!refusalOnly) report('malformed', types.length ? `not a Derivation (typed ${types.join(', ')})` : 'no rdf:type')
+      } else if (types.some(t => t.startsWith(V.NS) && t !== V.Refusal)) {
+        warnings.push(`ignored ${obj.id} in ${anchor.ual}: unrecognised type ${types.filter(t => t.startsWith(V.NS)).join(', ')}`)
       }
     } catch (e) {
       if (!(e instanceof Malformed)) throw e

@@ -60,12 +60,17 @@ function cliTable(rows) {
   return [line(['s', 'p', 'o']), line(widths.map(w => '─'.repeat(w))), ...body.map(line), '', `${rows.length} row(s)`].join('\n')
 }
 
-async function knowledge(kas, scope, { drop, rowOrder = rows => rows } = {}) {
+/**
+ * `fault(node)` wraps the node with a fault of its own, and `cfg` adds reader
+ * configuration. Both apply to the current implementation only: v0.1.0 read a
+ * CLI table and had neither, so cases using them also carry an attack it gets wrong.
+ */
+async function knowledge(kas, scope, { drop, rowOrder = rows => rows, fault = node => node, cfg = {} } = {}) {
   if (CURRENT) {
     const world = {}
     for (const k of kas) (world[cgOf(k)] ??= { kas: [] }).kas.push(k)
-    const node = new FakeNode({ world, drop: drop ? q => q.graph !== undefined && drop(q.graph) : undefined })
-    return resolver.readKnowledge(node, { grantsCg: GRANTS_CG, derivationsCgs: [DERIVS_CG], sleep: async () => {}, attempts: 2 }, scope)
+    const node = fault(new FakeNode({ world, drop: drop ? q => q.graph !== undefined && drop(q.graph) : undefined }))
+    return resolver.readKnowledge(node, { grantsCg: GRANTS_CG, derivationsCgs: [DERIVS_CG], sleep: async () => {}, attempts: 2, ...cfg }, scope)
   }
   const node = {
     query: async cg => cliTable(rowOrder(kas.filter(k => cgOf(k) === cg).flatMap(k => k.contentRows)).filter(r => !drop?.(r.g))),
@@ -81,8 +86,8 @@ async function render(kas, request = req(), opts) {
   return gate.decide(request, { grants: k.grants, assertions: k.assertions, priorSpendUsd })
 }
 
-async function verify(kas, sha = SHA, now = NOW) {
-  return verifier.verifyKnowledge(await knowledge(kas, { sha256: sha }), sha, { now })
+async function verify(kas, sha = SHA, now = NOW, opts) {
+  return verifier.verifyKnowledge(await knowledge(kas, { sha256: sha }, opts), sha, { now })
 }
 
 /**
@@ -277,6 +282,10 @@ const R4_CASES = {
   'a missing stateAuthor': pairs => pairs.filter(([p]) => p !== V.stateAuthor),
   'a mismatched stateAuthor': setP(V.stateAuthor, did(STRANGER)),
   'an unparseable state cell': setP(V.state, '"revoked"^^xsd:string'),
+  'a second type, LikenessGrant': pairs => [...pairs, [RDF_TYPE, V.LikenessGrant]],
+  'a second type, Derivation': pairs => [...pairs, [RDF_TYPE, V.Derivation]],
+  'no rdf:type': pairs => pairs.filter(([p]) => p !== RDF_TYPE),
+  'a renamed type': setP(RDF_TYPE, `${V.GrantState}V2`),
 }
 
 for (const [name, edit] of Object.entries(R4_CASES)) {
@@ -358,4 +367,155 @@ test('R7: a producer with more recorded renders than one query holds still enfor
   const d = await render([grantKa(g), grantKa(other), ...derivs], req({ estimatedUsd: 1 }))
   assert.equal(d.permit, false)
   assert.equal(d.clause, 'spend-ceiling')
+})
+
+/* -------------------------------------------------------------------------- */
+/* Contract 3 — a revocation typed as a grant as well                         */
+/* -------------------------------------------------------------------------- */
+
+for (const id of [`urn:mandate:grant:${ANA}:ana:00000000000000c9`, 'the grant id itself']) {
+  test(`contract 3: Ana's revocation typed both GrantState and LikenessGrant, with ${id.startsWith('urn:') ? 'a grant-format id' : id}, refuses and taints`, async () => {
+    const g = grant()
+    const sid = id.startsWith('urn:') ? id : g.id
+    const rev = ka({ cg: GRANTS_CG, publisher: ANA, quads: raw(sid, [
+      [RDF_TYPE, V.GrantState], [RDF_TYPE, V.LikenessGrant], [V.stateOf, g.id], [V.state, '"revoked"'], [V.stateAuthor, did(ANA)], [V.stateAt, `"2026-09-13T10:00:00Z"${DT}`],
+    ]) })
+    const kas = [grantKa(g), rev, forgedActive(g.id), derivationKa(edgeFor(g.id))]
+    const d = await render(kas)
+    assert.equal(d.permit, false)
+    if (CURRENT) assert.equal(d.clause, 'not-revoked')
+    const v = await verify(kas)
+    assert.equal(v.verdict, verifier.TAINTED)
+    if (CURRENT) assert.equal(v.subStatus, 'REVOKED')
+  })
+}
+
+/* -------------------------------------------------------------------------- */
+/* Item 5 — a trusted producer's own record that does not parse               */
+/* -------------------------------------------------------------------------- */
+
+const strangerCredit = grantId => ka({ cg: DERIVS_CG, publisher: STRANGER, quads: raw('urn:mandate:derivation:eeeeeeeeeeeeeeee:0000000000000003', [
+  [RDF_TYPE, V.Derivation], [V.outputSha256, `"${'e'.repeat(64)}"`], [V.servedCapability, '"talking-head"'],
+  [V.authorizedUnder, grantId], [V.billedUsd, `"-1000"${DEC}`], [V.derivedAt, `"2026-09-13T11:00:00Z"${DT}`],
+]) })
+const withRows = (k, edit) => {
+  k.contentRows = edit(k.contentRows)
+  k.metaRows = k.metaRows.map(r => (r.p.endsWith('publicTripleCount') ? { ...r, o: `"${k.contentRows.length}"^^<http://www.w3.org/2001/XMLSchema#integer>` } : r))
+  return k
+}
+const TRUSTED_REJECTED = {
+  'a negative billedUsd': rows => rows.map(r => (r.p === V.billedUsd ? { ...r, o: `"-1000"${DEC}` } : r)),
+  'a legacy id': rows => rows.map(r => ({ ...r, s: 'urn:mandate:derivation:legacy-1' })),
+  'an id that does not match its hash': rows => rows.map(r => ({ ...r, s: 'urn:mandate:derivation:0000000000000000:0000000000000001' })),
+  'no derivedAt': rows => rows.filter(r => r.p !== V.derivedAt),
+  'two billedUsd values': rows => [...rows, { ...rows.find(r => r.p === V.billedUsd), o: `"0.1"${DEC}` }],
+  'a string-typed billedUsd': rows => rows.map(r => (r.p === V.billedUsd ? { ...r, o: '"4.5"^^<http://www.w3.org/2001/XMLSchema#string>' } : r)),
+  'no rdf:type': rows => rows.filter(r => r.p !== RDF_TYPE),
+  'a later version\'s type': rows => rows.map(r => (r.p === RDF_TYPE ? { ...r, o: `${V.Derivation}V2` } : r)),
+}
+
+for (const [name, edit] of Object.entries(TRUSTED_REJECTED)) {
+  test(`item 5: the trusted producer's $4.50 render recorded with ${name} still counts: ceiling refuses, file taints`, async () => {
+    const g = grant({ maxSpendUsd: 5 })
+    const sha = 'd'.repeat(64)
+    const spent = () => withRows(derivationKa(edgeFor(g.id, { outputSha256: sha, billedUsd: 4.5 })), edit)
+    const d = await render([grantKa(g), spent(), strangerCredit(g.id)], req({ estimatedUsd: 1 }))
+    assert.equal(d.permit, false)
+    if (CURRENT) {
+      assert.equal(d.clause, 'spend-ceiling')
+      assert.equal(d.spend.unknown, true)
+    }
+    assert.equal((await verify([grantKa(g), spent()], sha)).verdict, verifier.TAINTED)
+    if (CURRENT) {
+      const k = await knowledge([grantKa(g), spent()], { grantId: g.id })
+      assert.equal(verifier.blastRadius(g.id, k.derivations, k.forgeries).unreadable, 1)
+    }
+  })
+}
+
+/* -------------------------------------------------------------------------- */
+/* R5 / R6 / R19 / DKG-3 — reads that fail, and must not read as empty        */
+/* -------------------------------------------------------------------------- */
+
+const isPrefixRead = sparql => !sparql.includes('?m <') && !/^SELECT (DISTINCT )?\?g \?s( \?o \?v)? WHERE/.test(sparql)
+/** A node whose answers pass through `fn(sparql, opts, inner)`; returning undefined keeps the real answer. */
+const faulty = fn => inner => ({
+  name: 'faulty', calls: inner.calls, subscriptions: inner.subscriptions, reconcile: inner.reconcile,
+  queryJson: async (sparql, o) => (await fn(sparql, o, inner)) ?? inner.queryJson(sparql, o),
+})
+
+test('R5: the derivations graph answering empty once and then erroring does not read as no prior spend', async () => {
+  const g = grant({ maxSpendUsd: 5 })
+  const kas = [grantKa(g), derivationKa(edgeFor(g.id, { outputSha256: 'd'.repeat(64), billedUsd: 4.5 })), strangerCredit(g.id)]
+  let calls = 0
+  const fault = faulty(async (sparql, o) => {
+    if (o.contextGraphId !== DERIVS_CG || !isPrefixRead(sparql)) return undefined
+    if (++calls > 3) throw new Error('ECONNRESET')
+    return sparql.includes('COUNT(DISTINCT ?g)') ? [{ n: '"0"^^<http://www.w3.org/2001/XMLSchema#integer>' }] : []
+  })
+  const d = await render(kas, req({ estimatedUsd: 1 }), { fault })
+  assert.equal(d.permit, false)
+  if (CURRENT) assert.equal(d.clause, 'read-inconsistent')
+})
+
+test('R6: state discovery that never answers does not skip the merged-view revocation it would have found', async () => {
+  const g = grant()
+  // The revocation exists only in this node's merged view, where only discovery can see it.
+  // v0.1.0 reads no merged view: it has only the producer's forged "active" to get wrong.
+  const kas = [grantKa(g), forgedActive(g.id), derivationKa(edgeFor(g.id))]
+  const s = 'urn:mandate:state:00000000000000bb'
+  const withView = node => Object.assign(node, { world: { ...node.world, [GRANTS_CG]: { ...node.world[GRANTS_CG],
+    graphs: [{ graph: `did:dkg:context-graph:${GRANTS_CG}/context/1`, rows: [{ s, p: V.stateOf, o: g.id }, { s, p: V.state, o: '"revoked"' }] }] } } })
+  const fault = node => faulty(async (sparql, o) => { if (o.view === 'verifiable-memory' && sparql.includes(V.stateOf)) throw new Error('timeout') })(withView(node))
+  if (CURRENT) assert.equal((await render(kas, req(), { fault: withView })).clause, 'not-revoked', 'precondition: discovery that answers finds it')
+  const d = await render(kas, req(), { fault })
+  assert.equal(d.permit, false)
+  if (CURRENT) assert.equal(d.clause, 'read-inconsistent')
+})
+
+test('R6: derivation discovery for a file that never answers is INCONCLUSIVE, not CLEAR', async () => {
+  const g = grant()
+  const kas = [grantKa(g), revocationKa(g.id), forgedActive(g.id), derivationKa(edgeFor(g.id))]
+  const v = await verify(kas, SHA, NOW, { fault: faulty(async sparql => { if (sparql.includes('?m <')) throw new Error('timeout') }) })
+  assert.notEqual(v.verdict, verifier.CLEAR)
+  if (CURRENT) assert.equal(v.verdict, verifier.INCONCLUSIVE)
+})
+
+test('a revocation whose anchor never confirms in Ana\'s own prefix refuses rather than being set aside', async () => {
+  const g = grant()
+  const kas = [grantKa(g), revocationKa(g.id, { status: 'tentative' }), forgedActive(g.id)]
+  const d = await render(kas)
+  assert.equal(d.permit, false)
+  if (CURRENT) assert.equal(d.clause, 'read-inconsistent')
+})
+
+test('a trusted render whose anchor never confirms in the producer\'s prefix does not vanish from spend', async () => {
+  const g = grant({ maxSpendUsd: 5 })
+  const kas = [grantKa(g), derivationKa(edgeFor(g.id, { outputSha256: 'd'.repeat(64), billedUsd: 4.5 }), { status: 'tentative' }), strangerCredit(g.id)]
+  const d = await render(kas, req({ estimatedUsd: 1 }))
+  assert.equal(d.permit, false)
+  if (CURRENT) assert.equal(d.clause, 'read-inconsistent')
+})
+
+test('DKG-3: a failed reconcile is not a fresh node', async () => {
+  const g = grant()
+  const kas = [grantKa(g), revocationKa(g.id), forgedActive(g.id)]
+  const { DkgHttpError } = CURRENT ? await import(`${SRC}dkg.mjs`) : {}
+  const fault = node => Object.assign(node, { reconcile: async () => { throw new DkgHttpError('boom', { status: 500, body: { error: 'internal' } }) } })
+  const d = await render(kas, req(), { fault, cfg: { checkFreshness: true } })
+  assert.equal(d.permit, false)
+  if (CURRENT) assert.equal(d.clause, 'read-inconsistent')
+})
+
+test('R19: a mis-cased derivations graph id on a node that cannot list subscriptions is not zero prior spend', async () => {
+  const g = grant({ maxSpendUsd: 5 })
+  const kas = [grantKa(g), derivationKa(edgeFor(g.id, { outputSha256: 'd'.repeat(64), billedUsd: 4.5 })), strangerCredit(g.id)]
+  const { DkgHttpError } = CURRENT ? await import(`${SRC}dkg.mjs`) : {}
+  const fault = node => Object.assign(node, {
+    subscriptions: async () => { throw new DkgHttpError('boom', { status: 500 }) },
+    reconcile: async () => { throw new DkgHttpError('forbidden', { status: 403, body: { error: 'admin token required' } }) },
+  })
+  const d = await render(kas, req({ estimatedUsd: 1 }), { fault, cfg: { derivationsCgs: [DERIVS_CG.toLowerCase()], trustedProducers: [PRODUCER], checkFreshness: true } })
+  assert.equal(d.permit, false)
+  if (CURRENT) assert.equal(d.clause, 'read-inconsistent')
 })
