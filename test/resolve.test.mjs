@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { readKnowledge, readPublisher } from '../src/resolve.mjs'
 import { decide } from '../src/gate.mjs'
 import { verifyKnowledge, CLEAR, INCONCLUSIVE } from '../src/verify-core.mjs'
-import { memoryStateStore } from '../src/state-store.mjs'
+import { memoryStateStore, fileStateStore, StateReadError } from '../src/state-store.mjs'
 import { cgIri } from '../src/queries.mjs'
 import * as V from '../src/vocab.mjs'
 import { FakeNode } from './fixtures/fake-node.mjs'
@@ -67,10 +67,10 @@ test('an unreachable node is an inconsistent read', async () => {
   assert.equal(decide(req(), k).clause, 'read-inconsistent')
 })
 
-test('a read past the row limit refuses rather than deciding from part of it', async () => {
-  const k = await readKnowledge(new FakeNode({ world: world([grantKa(grant())]) }), cfg({ max: 5 }), { subject: SUBJECT })
+test('a read past the total row limit refuses rather than deciding from part of it', async () => {
+  const k = await readKnowledge(new FakeNode({ world: world([grantKa(grant())]) }), cfg({ max: 5, maxRows: 10 }), { subject: SUBJECT })
   assert.equal(k.consistency.ok, false)
-  assert.match(k.consistency.reason, /more than 5 rows/)
+  assert.match(k.consistency.reason, /over its row limit \(more than 10 rows\)/)
 })
 
 test('an empty answer is believed only after every attempt agrees', async () => {
@@ -93,12 +93,14 @@ test('local memory: an anchor seen once and then missing makes the read inconsis
   assert.equal(decide(req(), later).permit, false)
 })
 
-test('an unconfirmed anchor is accounted for but its content is never accepted', async () => {
+test('an anchor that stays unconfirmed in the grantor\'s own prefix is retried, never accepted, and ends inconsistent', async () => {
   const g = grant()
-  const k = await readKnowledge(new FakeNode({ world: world([grantKa(g, { status: 'tentative' })]) }), cfg(), { subject: SUBJECT })
-  assert.equal(k.consistency.ok, true)
+  const node = new FakeNode({ world: world([grantKa(g, { status: 'tentative' })]) })
+  const k = await readKnowledge(node, cfg({ attempts: 3 }), { subject: SUBJECT })
+  assert.equal(k.consistency.ok, false)
+  assert.match(k.consistency.reason, /is not a confirmed anchor after 3 attempts \(status tentative\)/)
   assert.equal(k.grants.length, 0)
-  assert.ok(k.warnings.some(w => /not a confirmed anchor/.test(w)))
+  assert.equal(decide(req(), k).clause, 'read-inconsistent')
 })
 
 test('spend counts only trusted producers\' derivations under each grant', async () => {
@@ -224,4 +226,400 @@ test('a node that cannot report freshness gives a warning, not a refusal', async
   const k = await readKnowledge(node, cfg({ checkFreshness: true }), { subject: SUBJECT })
   assert.equal(k.consistency.ok, true)
   assert.ok(k.warnings.some(w => /freshness .* not checked \(403/.test(w)))
+})
+
+/* ------------------------------ fail-open reads ------------------------------ */
+
+const { DkgHttpError } = await import('../src/dkg.mjs')
+const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type'
+const XSD_INT = '^^<http://www.w3.org/2001/XMLSchema#integer>'
+const isPrefixRead = sparql => !sparql.includes('?m <') && !/^SELECT (DISTINCT )?\?g \?s( \?o \?v)? WHERE|^SELECT DISTINCT \?g \?s \?o \?v/.test(sparql)
+/** A node that answers through `inner` unless `fault` returns rows or throws. */
+const wrap = (inner, fault) => ({ name: 'flaky', calls: inner.calls, queryJson: async (sparql, o) => (await fault(sparql, o)) ?? inner.queryJson(sparql, o) })
+
+test('R5: one empty answer followed by failed attempts is not believed', async () => {
+  const g = grant({ maxSpendUsd: 2 })
+  const inner = new FakeNode({ world: world([grantKa(g)], [derivationKa(derivation({ authorizedUnder: g.id, billedUsd: 1.5 }))]) })
+  let calls = 0
+  const node = wrap(inner, async (sparql, o) => {
+    if (o.contextGraphId !== DERIVS_CG || !isPrefixRead(sparql)) return null
+    if (++calls > 3) throw new Error('timeout')
+    return sparql.includes('COUNT(DISTINCT ?g)') ? [{ n: `"0"${XSD_INT}` }] : []
+  })
+  const k = await readKnowledge(node, cfg(), { subject: SUBJECT })
+  assert.equal(k.consistency.ok, false)
+  assert.match(k.consistency.reason, /3 of 4 attempts failed .*timeout.*every attempt answers/)
+  assert.equal(decide(req(), k).clause, 'read-inconsistent')
+})
+
+test('R5: failed attempts followed by one empty answer are not believed either', async () => {
+  const inner = new FakeNode({ world: world([grantKa(grant())]) })
+  let calls = 0
+  const node = wrap(inner, async (sparql, o) => {
+    if (o.contextGraphId !== DERIVS_CG || !isPrefixRead(sparql)) return null
+    if (++calls <= 9) throw new Error('503')
+    return null
+  })
+  const k = await readKnowledge(node, cfg(), { subject: SUBJECT })
+  assert.equal(k.consistency.ok, false)
+  assert.match(k.consistency.reason, /attempts failed/)
+})
+
+test('a node that does not report a graph count is an inconsistent read', async () => {
+  const inner = new FakeNode({ world: world([grantKa(grant())]) })
+  const node = wrap(inner, async sparql => (sparql.includes('COUNT(DISTINCT ?g)') ? [] : null))
+  const k = await readKnowledge(node, cfg({ attempts: 2 }), { subject: SUBJECT })
+  assert.equal(k.consistency.ok, false)
+  assert.match(k.consistency.reason, /did not report a graph count/)
+})
+
+test('R6: state discovery that never answers makes the read inconsistent, so a merged-view revocation is not skipped', async () => {
+  const g = grant()
+  const orphan = { graph: `${cgIri(GRANTS_CG)}/context/1`, rows: [
+    { s: 'urn:mandate:state:00000000000000bb', p: V.stateOf, o: g.id },
+    { s: 'urn:mandate:state:00000000000000bb', p: V.state, o: '"revoked"' },
+  ] }
+  const inner = new FakeNode({ world: world([grantKa(g)], [], { grantGraphs: [orphan] }) })
+  const node = wrap(inner, async (sparql, o) => { if (o.view === 'verifiable-memory') throw new Error('timeout') })
+  const k = await readKnowledge(node, cfg(), { subject: SUBJECT })
+  assert.equal(k.consistency.ok, false)
+  assert.match(k.consistency.reason, /state discovery: 1 of \d+ queries never answered/)
+  assert.equal(decide(req(), k).permit, false)
+})
+
+test('R6: grant discovery that does not answer makes the read inconsistent', async () => {
+  const inner = new FakeNode({ world: world([grantKa(grant())]) })
+  const node = wrap(inner, async sparql => { if (/^SELECT DISTINCT \?g \?s WHERE/.test(sparql)) throw new Error('timeout') })
+  const k = await readKnowledge(node, cfg(), { subject: SUBJECT })
+  assert.equal(k.consistency.ok, false)
+  assert.match(k.consistency.reason, /grant discovery .* did not answer/)
+})
+
+test('R6: discovery covers every grant id, not the first fifty', async () => {
+  const grants = Array.from({ length: 60 }, () => grant())
+  const orphans = grants.map((g, i) => {
+    const s = `urn:mandate:state:${String(i).padStart(16, '0')}`
+    return { graph: `${cgIri(GRANTS_CG)}/context/1`, rows: [{ s, p: V.stateOf, o: g.id }, { s, p: V.state, o: '"revoked"' }] }
+  })
+  const k = await readKnowledge(new FakeNode({ world: world(grants.map(g => grantKa(g)), [], { grantGraphs: orphans }) }), cfg(), { subject: SUBJECT })
+  assert.equal(k.consistency.ok, true)
+  assert.equal(k.states.filter(s => s.tier === 'context').length, 60)
+  assert.equal(decide(req(), k).clause, 'not-revoked')
+})
+
+test('discovery retries when the merged view is left out, and fails when it is left out of every answer', async () => {
+  const g = grant()
+  const kas = [grantKa(g), revocationKa(g.id)]
+  // The node leaves the view out of the state discovery answer only; its one-row probe still shows the node holds one.
+  const stripView = n => async (sparql, o) => {
+    if (o.view !== 'verifiable-memory' || !sparql.includes(V.stateOf) || n.left-- <= 0) return null
+    return (await inner.queryJson(sparql, o)).filter(r => !String(r.g).includes('/context/'))
+  }
+  let inner = new FakeNode({ world: world(kas) })
+  const once = await readKnowledge(wrap(inner, stripView({ left: 1 })), cfg(), { subject: SUBJECT })
+  assert.equal(once.consistency.ok, true)
+  inner = new FakeNode({ world: world(kas) })
+  const always = await readKnowledge(wrap(inner, stripView({ left: Infinity })), cfg({ attempts: 3 }), { subject: SUBJECT })
+  assert.equal(always.consistency.ok, false)
+  assert.match(always.consistency.reason, /merged view of .* was left out of every answer/)
+})
+
+test('a node that materialises no merged view (it did not publish the data) reads consistently and honours the revocation', async () => {
+  const g = grant()
+  const node = new FakeNode({ world: world([grantKa(g), revocationKa(g.id)]), mergedView: false })
+  const k = await readKnowledge(node, cfg({ attempts: 2 }), { subject: SUBJECT })
+  assert.equal(k.consistency.ok, true, k.consistency.reason)
+  assert.equal(decide(req(), k).clause, 'not-revoked')
+  assert.ok(node.calls.some(c => c.kind === 'content' && c.prefix?.endsWith('/context/')), 'the merged-view probe ran')
+})
+
+test('a merged-view probe that never answers fails closed', async () => {
+  const g = grant()
+  const inner = new FakeNode({ world: world([grantKa(g), revocationKa(g.id)]), mergedView: false })
+  const node = wrap(inner, async sparql => { if (/\/context\/"\)\)\s*\} LIMIT 1$/.test(sparql)) throw new Error('timeout') })
+  const k = await readKnowledge(node, cfg({ attempts: 2 }), { subject: SUBJECT })
+  assert.equal(k.consistency.ok, false)
+  assert.match(k.consistency.reason, /merged-view check for .* never answered/)
+})
+
+test('a discovery query past the row limit fails closed', async () => {
+  const g = grant()
+  const flood = ka({ cg: GRANTS_CG, publisher: STRANGER, quads: Array.from({ length: 30 }, (_, i) => ({ subject: `urn:x:${i}`, predicate: V.stateOf, object: g.id })) })
+  const k = await readKnowledge(new FakeNode({ world: world([grantKa(g), flood]) }), cfg({ max: 20 }), { subject: SUBJECT })
+  assert.equal(k.consistency.ok, false)
+  assert.match(k.consistency.reason, /discovery query returned more than 20 rows/)
+})
+
+test('a state visible in the grantor\'s own graph but missing from the grantor read makes the read inconsistent', async () => {
+  const g = grant()
+  const rev = revocationKa(g.id)
+  const full = new FakeNode({ world: world([grantKa(g), rev]) })
+  const partial = new FakeNode({ world: world([grantKa(g)]) })
+  const node = { name: 'split', queryJson: (sparql, o) => (isPrefixRead(sparql) ? partial : full).queryJson(sparql, o) }
+  const k = await readKnowledge(node, cfg(), { subject: SUBJECT })
+  assert.equal(k.consistency.ok, false)
+  assert.ok(k.consistency.reasons.some(r => /visible in .* but missing from the grantor read/.test(r)), k.consistency.reasons.join('\n'))
+})
+
+/* ------------------------------ pending anchors ------------------------------ */
+
+const withoutMetaRow = (kaRows, predicate) => r => !(r.s === kaRows.ual && r.p === predicate)
+
+for (const [what, predicate] of [['status', 'http://dkg.io/ontology/status'], ['publicTripleCount', 'http://dkg.io/ontology/publicTripleCount'], ['assertionGraph', 'http://dkg.io/ontology/assertionGraph']]) {
+  test(`a revocation whose ${what} _meta row is missing on the first attempt is retried and counted`, async () => {
+    const g = grant()
+    const rev = revocationKa(g.id)
+    const inner = new FakeNode({ world: world([grantKa(g), rev]) })
+    let first = true
+    const node = wrap(inner, async (sparql, o) => {
+      if (!sparql.includes('/_meta>') || sparql.includes('?s IN') || o.contextGraphId !== GRANTS_CG || !first) return null
+      first = false
+      return (await inner.queryJson(sparql, o)).filter(withoutMetaRow(rev, predicate))
+    })
+    const k = await readKnowledge(node, cfg(), { subject: SUBJECT })
+    assert.equal(k.consistency.ok, true)
+    assert.equal(decide(req(), k).clause, 'not-revoked')
+  })
+
+  test(`a revocation whose ${what} _meta row is always missing ends inconsistent`, async () => {
+    const g = grant()
+    const rev = revocationKa(g.id)
+    const inner = new FakeNode({ world: world([grantKa(g), rev]) })
+    const node = wrap(inner, async (sparql, o) => (sparql.includes('/_meta>') && !sparql.includes('?s IN')
+      ? (await inner.queryJson(sparql, o)).filter(withoutMetaRow(rev, predicate)) : null))
+    const k = await readKnowledge(node, cfg({ attempts: 2 }), { subject: SUBJECT })
+    assert.equal(k.consistency.ok, false)
+    assert.equal(decide(req(), k).permit, false)
+  })
+}
+
+test('a trusted derivation whose _meta status row is always missing ends inconsistent, so its spend is not lost', async () => {
+  const g = grant({ maxSpendUsd: 2 })
+  const d = derivationKa(derivation({ authorizedUnder: g.id, billedUsd: 1.5 }))
+  const inner = new FakeNode({ world: world([grantKa(g)], [d]) })
+  const node = wrap(inner, async (sparql, o) => (sparql.includes('/_meta>') && !sparql.includes('?s IN')
+    ? (await inner.queryJson(sparql, o)).filter(withoutMetaRow(d, 'http://dkg.io/ontology/status')) : null))
+  const k = await readKnowledge(node, cfg({ attempts: 2 }), { subject: SUBJECT })
+  assert.equal(k.consistency.ok, false)
+  assert.equal(decide(req(), k).clause, 'read-inconsistent')
+})
+
+test('a GrantState in the grantor\'s own prefix with an unreadable stateOf makes the read inconsistent', async () => {
+  const g = grant()
+  const s = 'urn:mandate:state:00000000000000e1'
+  const bad = ka({ cg: GRANTS_CG, publisher: ANA, quads: [
+    { subject: s, predicate: RDF_TYPE, object: V.GrantState }, { subject: s, predicate: V.stateOf, object: `"${g.id}"` },
+    { subject: s, predicate: V.state, object: '"revoked"' }, { subject: s, predicate: V.stateAuthor, object: `did:dkg:agent:${ANA}` },
+  ] })
+  const k = await readKnowledge(new FakeNode({ world: world([grantKa(g), bad]) }), cfg({ attempts: 1 }), { subject: SUBJECT })
+  assert.equal(k.consistency.ok, false)
+  assert.match(k.consistency.reason, /unreadable stateOf/)
+})
+
+/* ------------------------------ freshness ------------------------------ */
+
+const freshNode = reconcile => Object.assign(new FakeNode({ world: world([grantKa(grant())]) }), { reconcile })
+
+for (const status of [0, 401, 404, 409, 429, 500, 503]) {
+  test(`freshness: a reconcile answering ${status || 'a transport error'} refuses`, async () => {
+    const node = freshNode(async () => { throw new DkgHttpError('boom', { status, body: { error: 'not subscribed locally' } }) })
+    const k = await readKnowledge(node, cfg({ checkFreshness: true }), { subject: SUBJECT })
+    assert.equal(k.consistency.ok, false)
+    assert.match(k.consistency.reason, /freshness of .* could not be established/)
+  })
+}
+
+for (const [name, reply] of [
+  ['a null head', { status: 'error', headOrdinal: null, watermarkAfter: 1 }],
+  ['a null head and watermark', { headOrdinal: null, watermarkAfter: null }],
+  ['a missing head', { watermarkAfter: 1 }],
+  ['a non-numeric head', { headOrdinal: 'twelve', watermarkAfter: 1 }],
+  ['a fractional watermark', { headOrdinal: 2, watermarkAfter: 1.5 }],
+  ['a watermark ahead of the head', { status: 'current', headOrdinal: 1, watermarkAfter: 5 }],
+  ['a watermark-ahead status', { status: 'watermark-ahead', headOrdinal: 3, watermarkAfter: 3 }],
+  ['an empty reply', null],
+]) {
+  test(`freshness: ${name} refuses`, async () => {
+    const k = await readKnowledge(freshNode(async () => reply), cfg({ checkFreshness: true }), { subject: SUBJECT })
+    assert.equal(k.consistency.ok, false)
+    assert.match(k.consistency.reason, /freshness of .* unknown/)
+  })
+}
+
+test('freshness: numeric strings are accepted as counters', async () => {
+  const k = await readKnowledge(freshNode(async () => ({ status: 'current', headOrdinal: '1', watermarkAfter: '1' })), cfg({ checkFreshness: true }), { subject: SUBJECT })
+  assert.equal(k.consistency.ok, true)
+})
+
+test('freshness: a node with no reconcile call refuses when the check was asked for', async () => {
+  const k = await readKnowledge(new FakeNode({ world: world([grantKa(grant())]) }), cfg({ checkFreshness: true }), { subject: SUBJECT })
+  assert.equal(k.consistency.ok, false)
+  assert.match(k.consistency.reason, /no reconcile call/)
+})
+
+/* ------------------------------ paging and limits ------------------------------ */
+
+test('R7: a producer with more rows than one query page is read in full, not refused', async () => {
+  const g = grant({ maxSpendUsd: 1000 })
+  const other = grant()
+  const derivs = [
+    ...Array.from({ length: 40 }, () => derivationKa(derivation({ authorizedUnder: other.id, billedUsd: 0.01 }))),
+    ...Array.from({ length: 5 }, () => derivationKa(derivation({ authorizedUnder: g.id, billedUsd: 2 }))),
+  ]
+  const node = new FakeNode({ world: world([grantKa(g), grantKa(other)], derivs) })
+  const k = await readKnowledge(node, cfg({ max: 50 }), { subject: SUBJECT })
+  assert.equal(k.consistency.ok, true, k.consistency.reason)
+  assert.equal(k.derivations.length, 45)
+  assert.ok(node.calls.filter(c => c.kind === 'content' && c.contextGraphId === DERIVS_CG).length > 3, 'paged')
+  assert.equal(decide(req({ estimatedUsd: 1 }), k).spend.priorUsd, 10)
+})
+
+test('R7: a graph omitted from one page is caught by the counts and recovered on a later attempt', async () => {
+  const g = grant()
+  const derivs = Array.from({ length: 20 }, () => derivationKa(derivation({ authorizedUnder: g.id, billedUsd: 0.1 })))
+  const drop = ({ kind, call, graph }) => kind === 'content' && call < 8 && graph === derivs[3].graph
+  const k = await readKnowledge(new FakeNode({ world: world([grantKa(g)], derivs), drop }), cfg({ max: 30 }), { subject: SUBJECT })
+  assert.equal(k.consistency.ok, true, k.consistency.reason)
+  assert.equal(k.derivations.length, 20)
+})
+
+/* ------------------------------ local memory ------------------------------ */
+
+test('a remembered revocation missing from a later read is still honoured', async () => {
+  const g = grant()
+  const store = memoryStateStore()
+  // Only the revocation was remembered (no anchor list), so nothing but revocation memory protects this read.
+  store.save(GRANTS_CG, { knownUals: {}, revocations: { [g.id]: { id: 'urn:mandate:state:00000000000000f9', ual: `did:dkg:base:84532/${ANA}/999`, publisher: ANA, stateOf: g.id } } })
+  const k = await readKnowledge(new FakeNode({ world: world([grantKa(g)]) }), cfg({ stateStore: store }), { subject: SUBJECT })
+  assert.ok(k.warnings.some(w => /seen before but is missing from this read/.test(w)))
+  assert.equal(decide(req(), k).clause, 'not-revoked')
+})
+
+test('a remembered revocation is not cancelled by an "active" state from the same publisher', async () => {
+  const g = grant()
+  const store = memoryStateStore()
+  store.save(GRANTS_CG, { knownUals: {}, revocations: { [g.id]: { id: 'urn:mandate:state:00000000000000f9', ual: null, publisher: ANA, stateOf: g.id } } })
+  const s = 'urn:mandate:state:00000000000000fa'
+  const active = ka({ cg: GRANTS_CG, publisher: ANA, quads: [
+    { subject: s, predicate: RDF_TYPE, object: V.GrantState }, { subject: s, predicate: V.stateOf, object: g.id },
+    { subject: s, predicate: V.state, object: '"active"' }, { subject: s, predicate: V.stateAuthor, object: `did:dkg:agent:${ANA}` },
+  ] })
+  const k = await readKnowledge(new FakeNode({ world: world([grantKa(g), active]) }), cfg({ stateStore: store }), { subject: SUBJECT })
+  assert.equal(decide(req(), k).clause, 'not-revoked')
+})
+
+/* ------------------------------ graph ids ------------------------------ */
+
+test('R19: a context graph id held under another case is an inconsistent read, not an empty one', async () => {
+  const lower = `${DERIVS_CG.split('/')[0].toLowerCase()}/mandate-derivations`
+  const node = new FakeNode({ world: { ...world([grantKa(grant())]), [lower]: { kas: [] } } })
+  node.subscriptions = async () => ({ subscriptions: [{ contextGraphId: GRANTS_CG, subscribed: true }, { contextGraphId: DERIVS_CG, subscribed: true }] })
+  const k = await readKnowledge(node, cfg({ derivationsCgs: [lower] }), { subject: SUBJECT })
+  assert.equal(k.consistency.ok, false)
+  assert.match(k.consistency.reason, /held by the node as 0x8EaA.*case-sensitive/)
+  const ok = await readKnowledge(node, cfg(), { subject: SUBJECT })
+  assert.equal(ok.consistency.ok, true)
+})
+
+test('R19: an empty graph the node is not subscribed to is inconsistent; a node that cannot list subscriptions warns', async () => {
+  const node = new FakeNode({ world: world([grantKa(grant())]) })
+  node.subscriptions = async () => ({ subscriptions: [{ contextGraphId: GRANTS_CG, subscribed: true }] })
+  const k = await readKnowledge(node, cfg(), { subject: SUBJECT })
+  assert.equal(k.consistency.ok, false)
+  assert.match(k.consistency.reason, /not subscribed to context graph/)
+  node.subscriptions = async () => { throw new DkgHttpError('forbidden', { status: 403 }) }
+  const w = await readKnowledge(node, cfg(), { subject: SUBJECT })
+  assert.equal(w.consistency.ok, true)
+  assert.ok(w.warnings.some(x => /could not confirm the node holds/.test(x)))
+})
+
+/* ------------------------------ several graphs ------------------------------ */
+
+const OTHER_CG = `${STRANGER}/stranger-grants`
+
+test('grantsCgs: a grant from a second configured grants graph is read, and only unconfigured owners are unresolved', async () => {
+  const theirs = grant({ owner: STRANGER, local: 'sam' })
+  const nobody = grant({ owner: '0x7777777777777777777777777777777777777777', local: 'x' })
+  const mine = grant()
+  const shaA = 'a'.repeat(64)
+  const shaB = 'b'.repeat(64)
+  const w = {
+    [GRANTS_CG]: { kas: [grantKa(mine)] },
+    [OTHER_CG]: { kas: [ka({ cg: OTHER_CG, publisher: STRANGER, quads: (await import('../src/rdf.mjs')).grantToQuads(theirs) })] },
+    [DERIVS_CG]: { kas: [
+      derivationKa(derivation({ outputSha256: shaA, authorizedUnder: theirs.id, servedCapability: 'talking-head' })),
+      derivationKa(derivation({ outputSha256: shaB, authorizedUnder: nobody.id, servedCapability: 'talking-head' })),
+      derivationKa(derivation({ outputSha256: shaB, authorizedUnder: mine.id, servedCapability: 'talking-head' })),
+    ] },
+  }
+  const a = await readKnowledge(new FakeNode({ world: w }), cfg({ grantsCg: GRANTS_CG, grantsCgs: [OTHER_CG, GRANTS_CG] }), { sha256: shaA })
+  assert.equal(a.consistency.ok, true, a.consistency.reason)
+  assert.deepEqual(a.grantsCgs, [GRANTS_CG, OTHER_CG])
+  assert.equal(a.grants.length, 1)
+  assert.equal(verifyKnowledge(a, shaA, { now: '2026-09-13T12:00:00Z' }).verdict, CLEAR)
+  const b = await readKnowledge(new FakeNode({ world: w }), cfg({ grantsCg: GRANTS_CG, grantsCgs: [OTHER_CG] }), { sha256: shaB })
+  assert.deepEqual(b.unresolvedGrants, [nobody.id])
+  // Ana's graph is configured and read: her grant is resolved even had it been missing.
+  assert.ok(!b.unresolvedGrants.includes(mine.id))
+  const single = await readKnowledge(new FakeNode({ world: w }), cfg(), { sha256: shaA })
+  assert.deepEqual(single.unresolvedGrants, [theirs.id, nobody.id].sort())
+  const v = verifyKnowledge(single, shaA, { now: '2026-09-13T12:00:00Z' })
+  assert.equal(v.verdict, 'UNKNOWN')
+  assert.match(v.reason, /graph this verifier does not read/)
+})
+
+test('grantsCgs: a configured grantor graph that lacks the grant is not unresolved', async () => {
+  const missing = grant()
+  const sha = 'd'.repeat(64)
+  const k = await readKnowledge(new FakeNode({ world: world([], [derivationKa(derivation({ outputSha256: sha, authorizedUnder: missing.id }))]) }), cfg(), { sha256: sha })
+  assert.equal(k.consistency.ok, true)
+  assert.deepEqual(k.unresolvedGrants, [])
+})
+
+test('duplicate producers and derivations graphs in the configuration do not double spend', async () => {
+  const g = grant({ maxSpendUsd: 2 })
+  const node = new FakeNode({ world: world([grantKa(g)], [derivationKa(derivation({ authorizedUnder: g.id, billedUsd: 0.8 }))]) })
+  const k = await readKnowledge(node, cfg({ derivationsCgs: [DERIVS_CG, DERIVS_CG], trustedProducers: [PRODUCER, PRODUCER.replace('0x8eaa', '0x8EAA')] }), { subject: SUBJECT })
+  assert.deepEqual(k.trustedProducers, [PRODUCER])
+  assert.equal(k.reads.filter(r => r.role === 'derivations').length, 1)
+  assert.equal(k.derivations.length, 1)
+  assert.equal(decide(req({ estimatedUsd: 1 }), k).spend.priorUsd, 0.8)
+})
+
+test('duplicate reads of one derivation are counted once', async () => {
+  const g = grant({ maxSpendUsd: 2 })
+  const node = new FakeNode({ world: world([grantKa(g)], [derivationKa(derivation({ authorizedUnder: g.id, billedUsd: 0.8 }))]) })
+  const k = await readKnowledge(node, cfg({ trustedProducers: [PRODUCER, PRODUCER] }), { subject: SUBJECT })
+  assert.equal(k.derivations.length, 1)
+})
+
+test('R6: derivation discovery for a file that does not answer makes the read inconsistent', async () => {
+  const g = grant()
+  const sha = 'a'.repeat(64)
+  const inner = new FakeNode({ world: world([grantKa(g)], [derivationKa(derivation({ outputSha256: sha, authorizedUnder: g.id }))]) })
+  const node = wrap(inner, async sparql => { if (sparql.includes('?m <')) throw new Error('timeout') })
+  const k = await readKnowledge(node, cfg(), { sha256: sha })
+  assert.equal(k.consistency.ok, false)
+  assert.match(k.consistency.reason, /derivation discovery .* did not answer/)
+})
+
+test('a row with an unreadable graph cell in a prefix read makes the read inconsistent', async () => {
+  const inner = new FakeNode({ world: world([grantKa(grant())]) })
+  const node = wrap(inner, async (sparql, o) => {
+    if (!sparql.includes('GRAPH ?g { ?s ?p ?o }') || sparql.includes('COUNT') || o.contextGraphId !== GRANTS_CG) return null
+    return [...await inner.queryJson(sparql, o), { g: '"not a graph"', s: 'urn:x', p: V.state, o: '"revoked"' }]
+  })
+  const k = await readKnowledge(node, cfg({ attempts: 1 }), { subject: SUBJECT })
+  assert.equal(k.consistency.ok, false)
+  assert.match(k.consistency.reason, /unreadable graph/)
+})
+
+test('a local state file that cannot be parsed throws StateReadError rather than starting from empty memory', async () => {
+  const { mkdtempSync, writeFileSync } = await import('node:fs')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+  const dir = mkdtempSync(join(tmpdir(), 'mandate-state-'))
+  writeFileSync(join(dir, 'g.json'), '{ not json')
+  assert.throws(() => fileStateStore(dir).load('g'), e => e instanceof StateReadError && /cannot read local state/.test(e.message))
+  assert.deepEqual(fileStateStore(dir).load('absent').knownUals, {})
 })

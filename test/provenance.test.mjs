@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { anchorsFromMeta, checkConsistency, checkReturnedGraphs, reduceSlice, grantIriAddress } from '../src/provenance.mjs'
 import { vmPublisherPrefix } from '../src/queries.mjs'
+import { grantToQuads } from '../src/rdf.mjs'
 import { asInteger } from '../src/rdf-term.mjs'
 import * as V from '../src/vocab.mjs'
 import { GRANTS_CG, DERIVS_CG, ANA, PRODUCER, STRANGER, did, ka, grant, grantKa, revocationKa, derivation, derivationKa, read } from './fixtures/build.mjs'
@@ -67,6 +68,20 @@ test('a dropped graph, a short graph, or a vanished anchor makes the read incons
   assert.match(checkConsistency({ prefix, anchors, contentRows: r.contentRows, visibleGraphCount: 2, knownUals: ['did:dkg:base:84532/x/1'] }).reason, /missing/)
 })
 
+test('content under the prefix from a graph with no anchor and not pending is inconsistent, with no graph count to catch it', () => {
+  const g1 = grantKa(grant())
+  const stray = grantKa(grant())
+  const { anchors } = anchorsFromMeta(g1.metaRows, GRANTS_CG)
+  const prefix = vmPublisherPrefix(GRANTS_CG, ANA)
+  const contentRows = [...g1.contentRows, ...stray.contentRows]
+  assert.equal(checkConsistency({ prefix, anchors, contentRows: g1.contentRows }).ok, true)
+  const c = checkConsistency({ prefix, anchors, contentRows, visibleGraphCount: undefined })
+  assert.equal(c.ok, false)
+  assert.match(c.reason, /has no confirmed anchor/)
+  // A graph the caller knows is pending is accounted for instead.
+  assert.equal(checkConsistency({ prefix, anchors, contentRows, pendingGraphs: new Set([stray.graph]) }).ok, true)
+})
+
 test('marker-filtered reads require each returned graph to be anchored and complete', () => {
   const d = derivationKa(derivation({ authorizedUnder: grant().id }))
   const { anchors } = anchorsFromMeta(d.metaRows, DERIVS_CG)
@@ -129,10 +144,15 @@ test('a grant with a duplicated single-valued predicate is malformed, not merged
   assert.equal(out.forgeries[0].kind, 'malformed')
 })
 
-test('a stateAuthor literal that disagrees with the publisher is a forgery', () => {
+test('the grantor\'s own state with a stateAuthor naming someone else still revokes, and says why', () => {
   const g = grant()
   const out = reduceGrants(read(grantKa(g), revocationKa(g.id, { publisher: ANA, author: STRANGER })))
-  assert.equal(out.forgeries[0].kind, 'state-author-mismatch')
+  assert.equal(out.forgeries.length, 0)
+  assert.equal(out.states.length, 1)
+  assert.equal(out.states[0].state, 'revoked')
+  assert.equal(out.states[0].malformed, true)
+  assert.match(out.states[0].problems.join(), /stateAuthor .* does not name/)
+  assert.ok(out.warnings.some(w => /counts as a revocation/.test(w)))
 })
 
 test('any state value other than exactly "active" counts as revoked', () => {
@@ -164,4 +184,158 @@ test('derivations are attributed to their publisher and marked trusted only for 
 test('grant IRIs carry their grantor address', () => {
   assert.equal(grantIriAddress(grant().id), ANA)
   assert.equal(grantIriAddress('urn:mandate:grant:dana-5i66'), null)
+})
+
+/* ------------------- rejected records and who they belong to ------------------- */
+
+const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type'
+const XSD = 'http://www.w3.org/2001/XMLSchema#'
+const reduceDerivs = (r, trustedProducers = [PRODUCER]) =>
+  reduceSlice({ role: 'derivations', anchors: anchorsFromMeta(r.metaRows, DERIVS_CG).anchors, contentRows: r.contentRows, trustedProducers })
+const swap = (k, predicate, object) => { k.contentRows = k.contentRows.map(x => (x.p === predicate ? { ...x, o: object } : x)); return k }
+
+test('a grant whose id names another address is a forgery, even when subject and grantor agree', () => {
+  const g = grant({ id: `urn:mandate:grant:${STRANGER}:ana:0000000000000001` })
+  const out = reduceGrants(read(grantKa(g)))
+  assert.equal(out.grants.length, 0)
+  assert.equal(out.forgeries[0].kind, 'grant-id-mismatch')
+})
+
+test('a trusted producer\'s edge whose id does not match its hash is a trusted forgery, not an edge', () => {
+  const d = derivation({ authorizedUnder: grant().id, outputSha256: 'a'.repeat(64), id: `urn:mandate:derivation:${'b'.repeat(16)}:0000000000000001` })
+  const out = reduceDerivs(read(derivationKa(d)))
+  assert.equal(out.derivations.length, 0)
+  assert.equal(out.forgeries[0].kind, 'derivation-id-mismatch')
+  assert.equal(out.forgeries[0].trusted, true)
+  assert.deepEqual(out.forgeries[0].claims.authorizedUnder, [d.authorizedUnder])
+  assert.equal(reduceDerivs(read(derivationKa(d, { publisher: STRANGER }))).forgeries[0].trusted, false)
+})
+
+test('a trusted producer\'s legacy-format edge is a trusted forgery; a stranger\'s is only a warning', () => {
+  const g = grant()
+  const legacy = publisher => ka({ cg: DERIVS_CG, publisher, quads: [
+    { subject: 'urn:mandate:derivation:legacy1', predicate: RDF_TYPE, object: V.Derivation },
+    { subject: 'urn:mandate:derivation:legacy1', predicate: V.authorizedUnder, object: g.id },
+    { subject: 'urn:mandate:derivation:legacy1', predicate: V.outputSha256, object: `"${'a'.repeat(64)}"` },
+  ] })
+  const mine = reduceDerivs(read(legacy(PRODUCER)))
+  assert.equal(mine.forgeries[0].kind, 'legacy-format')
+  assert.equal(mine.forgeries[0].trusted, true)
+  assert.deepEqual(mine.forgeries[0].claims.outputSha256, ['a'.repeat(64)])
+  const theirs = reduceDerivs(read(legacy(STRANGER)))
+  assert.equal(theirs.forgeries.length, 0)
+  assert.equal(theirs.warnings.length, 1)
+})
+
+test('a trusted edge with a negative billedUsd or no derivedAt is a trusted malformed forgery carrying its claims', () => {
+  const d = derivation({ authorizedUnder: grant().id })
+  const negative = swap(derivationKa(d), V.billedUsd, `"-1000"^^<${XSD}decimal>`)
+  const out = reduceDerivs(read(negative))
+  assert.equal(out.derivations.length, 0)
+  assert.equal(out.forgeries[0].kind, 'malformed')
+  assert.equal(out.forgeries[0].trusted, true)
+  assert.deepEqual(out.forgeries[0].claims.billedUsd, ['-1000'])
+  const undated = derivationKa(d)
+  undated.contentRows = undated.contentRows.filter(x => x.p !== V.derivedAt)
+  const u = reduceDerivs(read(ka({ cg: DERIVS_CG, publisher: PRODUCER, quads: undated.contentRows.map(x => ({ subject: x.s, predicate: x.p, object: x.o })) })))
+  assert.equal(u.forgeries[0].kind, 'malformed')
+  assert.match(u.forgeries[0].detail, /missing derivedAt/)
+})
+
+test('forgeries in a grants graph are trusted only under the address that owns what they claim', () => {
+  const g = grant()
+  const byProducer = reduceGrants(read(grantKa(g, { publisher: PRODUCER })))
+  assert.equal(byProducer.forgeries[0].trusted, false)
+  const dup = grantKa(g, { extraContent: [{ subject: g.id, predicate: V.maxSpendUsd, object: `"9"^^<${XSD}decimal>` }] })
+  const mine = reduceGrants(read(dup))
+  assert.equal(mine.forgeries[0].kind, 'malformed')
+  assert.equal(mine.forgeries[0].trusted, true)
+})
+
+test('an unparseable cell is kept, so a present-but-odd ceiling makes the grant malformed instead of unlimited', () => {
+  const g = grant({ maxSpendUsd: 5 })
+  for (const cell of ['"5"^^xsd:decimal', `"5"^^<${XSD}decimal> `, { type: 'Literal', value: '5' }, `"${'5'.repeat(5000)}"`]) {
+    const out = reduceGrants(read(swap(grantKa(g), V.maxSpendUsd, cell)))
+    assert.equal(out.grants.length, 0, JSON.stringify(cell).slice(0, 40))
+    assert.equal(out.forgeries[0].kind, 'malformed')
+    assert.equal(out.forgeries[0].trusted, true)
+  }
+})
+
+/* ------------------- the grantor's own state assertions ------------------- */
+
+const ownState = (grantId, pairs) => {
+  const id = 'urn:mandate:state:00000000000000d1'
+  return ka({ cg: GRANTS_CG, publisher: ANA, quads: pairs.map(([predicate, object]) => ({ subject: id, predicate, object })) })
+}
+const wellFormed = (grantId, value = 'revoked') => [
+  [RDF_TYPE, V.GrantState], [V.stateOf, grantId], [V.state, `"${value}"`], [V.stateAuthor, did(ANA)], [V.stateAt, `"2026-09-13T10:00:00Z"^^<${XSD}dateTime>`],
+]
+const variants = grantId => ({
+  'offset-less stateAt': wellFormed(grantId).map(([p, o]) => [p, p === V.stateAt ? `"2026-09-13T10:00:00"^^<${XSD}dateTime>` : o]),
+  'date-only stateAt': wellFormed(grantId).map(([p, o]) => [p, p === V.stateAt ? `"2026-09-13"^^<${XSD}date>` : o]),
+  'duplicated stateAt': [...wellFormed(grantId), [V.stateAt, `"2026-09-14T10:00:00Z"^^<${XSD}dateTime>`]],
+  'duplicated state': [...wellFormed(grantId), [V.state, '"revoked-again"']],
+  'typed state literal': wellFormed(grantId).map(([p, o]) => [p, p === V.state ? `"active"^^<${XSD}token>` : o]),
+  'state given as an IRI': wellFormed(grantId).map(([p, o]) => [p, p === V.state ? 'urn:mandate:state-value:revoked' : o]),
+  'language-tagged active': wellFormed(grantId, 'active').map(([p, o]) => [p, p === V.state ? '"active"@en' : o]),
+  'missing stateAuthor': wellFormed(grantId).filter(([p]) => p !== V.stateAuthor),
+  'stateAuthor as a literal': wellFormed(grantId).map(([p, o]) => [p, p === V.stateAuthor ? `"${did(ANA)}"` : o]),
+  'mismatched stateAuthor': wellFormed(grantId).map(([p, o]) => [p, p === V.stateAuthor ? did(STRANGER) : o]),
+  '"active" with a mismatched stateAuthor': wellFormed(grantId, 'active').map(([p, o]) => [p, p === V.stateAuthor ? did(STRANGER) : o]),
+  'missing state': wellFormed(grantId).filter(([p]) => p !== V.state),
+  'unparseable state cell': wellFormed(grantId).map(([p, o]) => [p, p === V.state ? '"revoked"^^xsd:string' : o]),
+})
+
+for (const name of Object.keys(variants(grant().id))) {
+  test(`the grantor's own state with ${name} yields a revoked state entry with its problems`, () => {
+    const g = grant()
+    const out = reduceGrants(read(grantKa(g), ownState(g.id, variants(g.id)[name])))
+    assert.equal(out.states.length, 1, JSON.stringify(out.forgeries))
+    const st = out.states[0]
+    assert.equal(st.state, 'revoked')
+    assert.equal(st.tier, 'vm')
+    assert.equal(st.publisher, ANA)
+    assert.equal(st.stateOf, g.id)
+    assert.ok(st.ual)
+    assert.equal(st.malformed, true)
+    assert.ok(st.problems.length > 0)
+  })
+}
+
+test('a well-formed "active" state is active and not malformed', () => {
+  const g = grant()
+  const out = reduceGrants(read(grantKa(g), ownState(g.id, wellFormed(g.id, 'active'))))
+  assert.equal(out.states[0].state, 'active')
+  assert.equal(out.states[0].malformed, undefined)
+  assert.deepEqual(out.states[0].problems, [])
+})
+
+test('a GrantState whose stateOf cannot be read is unreadable, never silently dropped', () => {
+  const g = grant()
+  for (const stateOf of [[[V.stateOf, `"${g.id}"`]], [], [[V.stateOf, g.id], [V.stateOf, grant().id]]]) {
+    const pairs = [...wellFormed(g.id).filter(([p]) => p !== V.stateOf), ...stateOf]
+    const out = reduceGrants(read(grantKa(g), ownState(g.id, pairs)))
+    assert.equal(out.states.length, 0)
+    assert.equal(out.unreadable.length, 1)
+    assert.match(out.unreadable[0].reason, /unreadable stateOf/)
+  }
+})
+
+test('an object with an unreadable rdf:type is unreadable', () => {
+  const g = grant()
+  const k = grantKa(g)
+  k.contentRows = k.contentRows.map(x => (x.p === RDF_TYPE ? { ...x, o: `"${x.o}"` } : x))
+  assert.equal(reduceGrants(read(k)).unreadable.length, 1)
+})
+
+test('a grant under the subject\'s own prefix whose mandate:grantor names another agent is a forgery, not a grant', () => {
+  // grantToQuads refuses this, so the grantor triple is swapped after serialising, as a hand-written publish would.
+  const quads = grantToQuads(grant()).map(q => (q.predicate === V.grantor ? { ...q, object: did(STRANGER) } : q))
+  assert.ok(quads.some(q => q.object === did(STRANGER)), 'fixture precondition')
+  const out = reduceGrants(read(ka({ cg: GRANTS_CG, publisher: ANA, quads })))
+  assert.equal(out.grants.length, 0)
+  assert.equal(out.forgeries.length, 1)
+  assert.equal(out.forgeries[0].kind, 'grantor-literal-mismatch')
+  assert.equal(out.forgeries[0].trusted, true)
 })

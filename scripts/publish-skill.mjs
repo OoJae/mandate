@@ -11,14 +11,14 @@
  * Refuses to publish without a key: a keyless publish may create a skill no one
  * can later update or delete, since ownership is verified by API key.
  */
-import { readFileSync, existsSync } from 'node:fs'
-import { parseEnv } from 'node:util'
+import { readFileSync } from 'node:fs'
+import { loadEnvFile } from '../bin/config.mjs'
 
-if (existsSync('.env')) {
-  for (const [k, v] of Object.entries(parseEnv(readFileSync('.env', 'utf8')))) {
-    if (process.env[k] === undefined) process.env[k] = v
-  }
-}
+// Only MANDATE_* and LIVEPEER_AGENT_KEY come from .env. This request carries the
+// key, so a stray NODE_TLS_REJECT_UNAUTHORIZED=0 or proxy setting copied into
+// .env must not reach it.
+const { ignored } = loadEnvFile('.env')
+if (ignored.length) console.log(`.env: ignored ${ignored.join(', ')} (only MANDATE_* and LIVEPEER_AGENT_KEY are read)`)
 
 const arg = (name, def) => {
   const i = process.argv.indexOf(`--${name}`)

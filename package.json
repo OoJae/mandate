@@ -57,6 +57,8 @@
   ],
   "scripts": {
     "test": "node --test test/*.test.mjs",
+    "test:mutation": "node scripts/mutation-check.mjs",
+    "test:integration": "node --test test/integration/*.test.mjs",
     "build:vocab-docs": "node scripts/build-vocab-docs.mjs",
     "smoke:pack": "node scripts/smoke-pack.mjs",
     "spike:caps": "node spikes/s1-capabilities.mjs",

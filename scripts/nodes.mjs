@@ -16,13 +16,19 @@
  * roles given, commands act on grantor and producer, plus the verifier when
  * MANDATE_VERIFIER_PORT is set. Homes, ports and names come from the same
  * MANDATE_* variables as the CLI.
+ *
+ * `init` and `start` work before any context graph exists, because the graphs
+ * can only be created on a running node. Until MANDATE_GRANTS_CG and
+ * MANDATE_DERIVATIONS_CG hold real ids, `up` stops after starting the nodes and
+ * says what to do next; `subscribe`, `connect` and `sync` need the ids and
+ * refuse without them. Either variable may list several graphs, comma-separated.
  */
 import { spawn } from 'node:child_process'
 import { createRequire } from 'node:module'
 import { existsSync, mkdirSync, writeFileSync, chmodSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { DkgNode, DkgHttpError } from '../src/dkg.mjs'
-import { grantsCg, derivationsCg, trustedProducers } from '../bin/config.mjs'
+import { grantsCgs, derivationsCgs, setupCgs, trustedProducers } from '../bin/config.mjs'
 import { anchorsFromMeta } from '../src/provenance.mjs'
 import { metaQuery } from '../src/queries.mjs'
 import { contextGraphAddress } from '../src/resolve.mjs'
@@ -82,12 +88,14 @@ async function init(rc) {
     listenPort: 0,
     nodeRole: 'edge',
     networkConfig: 'testnet',
-    contextGraphs: [grantsCg(), derivationsCg()],
+    // Left empty until the graphs exist; `subscribe` adds them to the running node.
+    contextGraphs: setupCgs() ?? [],
     autoUpdate: { enabled: false },
     auth: { enabled: true },
   }
   writeFileSync(file, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600, flag: 'wx' })
   say(rc.role, `wrote ${file} (testnet, edge, API :${rc.port}); wallets and token are generated on first start`)
+  if (!config.contextGraphs.length) say(rc.role, 'no context graph ids yet; subscribe once MANDATE_GRANTS_CG and MANDATE_DERIVATIONS_CG are set')
 }
 
 async function start(rc) {
@@ -115,7 +123,7 @@ async function stop(rc) {
 async function subscribe(rc) {
   const n = nodeFor(rc)
   const current = await n.subscriptions().catch(() => null)
-  for (const cg of [grantsCg(), derivationsCg()]) {
+  for (const cg of [...grantsCgs(), ...derivationsCgs()]) {
     if (current?.subscriptions?.some(x => x.contextGraphId === cg && x.subscribed)) { say(rc.role, `already subscribed to ${cg}`); continue }
     // A new node can report its read authority as unavailable until its chain
     // reads succeed; public RPC endpoints time out often enough to matter.
@@ -163,7 +171,7 @@ async function connect(rcs) {
 
 /** Addresses whose assets this node should hold, with the highest asset number it already has. */
 async function knownPublishers(n, cg) {
-  const addresses = new Set([contextGraphAddress(grantsCg()), contextGraphAddress(derivationsCg()), ...trustedProducers()])
+  const addresses = new Set([...grantsCgs(), ...derivationsCgs()].map(contextGraphAddress).concat(trustedProducers()))
   const out = []
   for (const address of addresses) {
     let rows = []
@@ -184,7 +192,7 @@ async function sync(rc, rcs, { timeoutMs = 10 * 60_000 } = {}) {
     if (other === rc) continue
     try { peers.push((await nodeFor(other).identity()).peerId) } catch { /* not running */ }
   }
-  for (const cg of [grantsCg(), derivationsCg()]) {
+  for (const cg of [...grantsCgs(), ...derivationsCgs()]) {
     const deadline = Date.now() + timeoutMs
     for (;;) {
       let r
@@ -232,7 +240,7 @@ async function doctor(rc) {
   }
   try {
     const subs = await n.subscriptions()
-    for (const cg of [grantsCg(), derivationsCg()]) {
+    for (const cg of [...grantsCgs(), ...derivationsCgs()]) {
       const s = subs.subscriptions?.find(x => x.contextGraphId === cg)
       const r = await n.reconcile(cg).catch(e => ({ error: e.message }))
       const fresh = r.error ? `freshness unknown (${r.error})` : r.watermarkAfter >= r.headOrdinal ? `current ${r.watermarkAfter}/${r.headOrdinal}` : `BEHIND ${r.watermarkAfter}/${r.headOrdinal} — run sync`
@@ -258,9 +266,22 @@ const rcs = roles.map(roleConfig)
 const everyone = [...new Set([...roles, 'grantor', 'producer', ...(process.env.MANDATE_VERIFIER_PORT ? ['verifier'] : [])])].map(roleConfig)
 
 try {
+  // Graph ids are needed from here on; checked before touching any node.
+  const needsGraphs = ['subscribe', 'connect', 'sync', 'doctor'].includes(command)
+  if (needsGraphs) { grantsCgs(); derivationsCgs() }
   if (command === 'up' || command === 'init') for (const rc of rcs) await init(rc)
   if (command === 'up' || command === 'start') for (const rc of rcs) await start(rc)
   if (command === 'stop') for (const rc of rcs) await stop(rc)
+  if (command === 'up' && !setupCgs()) {
+    console.log([
+      '',
+      'The nodes are running, but MANDATE_GRANTS_CG and MANDATE_DERIVATIONS_CG do not hold graph ids yet.',
+      'Next: create and register the grants graph on the grantor node and the derivations graph on the',
+      'producer node, set both ids in .env, then run:',
+      '  node scripts/nodes.mjs subscribe && node scripts/nodes.mjs connect && node scripts/nodes.mjs sync',
+    ].join('\n'))
+    process.exit(0)
+  }
   if (command === 'up' || command === 'subscribe') for (const rc of rcs) await subscribe(rc)
   if (command === 'up' || command === 'connect') await connect(everyone)
   if (command === 'up' || command === 'sync') for (const rc of rcs) await sync(rc, everyone)

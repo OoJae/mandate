@@ -105,15 +105,61 @@ export async function requestUpload(client, kind = 'video') {
   }
 }
 
+const UPLOAD_DONE = new Set(['done', 'complete', 'completed', 'uploaded', 'received', 'ready', 'succeeded', 'success'])
+const MEDIA_EXT = /\.(mp4|m4v|mov|webm|mkv|3gp|m4a|mp3|wav|ogg|oga|opus|aac|flac|caf)$/i
+
+/** The capture page itself, or any other page on the agent site that is not hosted media. */
+function isAgentPage(u) {
+  return u.hostname === 'agent.livepeer.org' && !u.pathname.startsWith('/a/')
+}
+
+// The clip's hash becomes the evidence, so it is only fetched over TLS. Plain
+// http is allowed for loopback alone, where there is no network to tamper with.
+function parsedHttps(s) {
+  try {
+    const u = new URL(String(s))
+    if (u.protocol === 'https:') return u
+    return u.protocol === 'http:' && ['127.0.0.1', 'localhost', '[::1]'].includes(u.hostname) ? u : null
+  } catch { return null }
+}
+
+/**
+ * Only "expired" said as a fact counts: "not expired yet" and "hasn't expired"
+ * are still waiting.
+ */
+export function saysExpired(text) {
+  const t = String(text ?? '')
+  return /\bexpired\b/i.test(t) && !/(\bnot|\bnever|n't|\bhasnt|\bisnt)\s+(yet\s+|been\s+|already\s+)?expired\b/i.test(t)
+}
+
+/**
+ * A clip URL named in the reply text, used only when the structured reply has
+ * none. It must look like hosted media — an agent.livepeer.org/a/ path or a
+ * media file extension — so a docs or capture-page link is never hashed as the
+ * clip. Two different candidates are ambiguous and give none.
+ */
+export function uploadUrlFromText(text) {
+  const found = new Set()
+  for (const raw of String(text ?? '').match(/https:\/\/[^\s<>"'\]\[)(]+/g) ?? []) {
+    const u = parsedHttps(raw.replace(/[.,;:!?]+$/, ''))
+    if (!u || isAgentPage(u)) continue
+    if (u.hostname === 'agent.livepeer.org' || MEDIA_EXT.test(u.pathname)) found.add(u.href)
+  }
+  return found.size === 1 ? [...found][0] : null
+}
+
 export async function getUpload(client, token, waitSeconds = 20) {
   const { structured, text } = await callStrict(client, 'get_upload', { token, wait_seconds: waitSeconds })
-  const status = structured?.status ?? (/expired/i.test(text) ? 'expired' : null)
-  let url = structured?.url ?? null
-  if (!url) {
-    const m = text.match(/https:\/\/[^\s<>"')\]]+/g) ?? []
-    url = m.find(u => !u.includes('/u/')) ?? null
+  const given = typeof structured?.status === 'string' ? structured.status.trim().toLowerCase() : null
+  const status = given ?? (saysExpired(text) ? 'expired' : null)
+  let url = null
+  // A status that is not a finished upload wins over any link in the reply.
+  if (status === null || UPLOAD_DONE.has(status)) {
+    const s = parsedHttps(structured?.url)
+    if (s && !isAgentPage(s)) url = s.href
+    else if (structured?.url == null) url = uploadUrlFromText(text)
   }
-  return { url, status: status ?? (url ? 'done' : 'pending'), pending: !url, mime: structured?.mime ?? null, text, structured }
+  return { url, status: url ? (status ?? 'done') : (status && !UPLOAD_DONE.has(status) ? status : 'pending'), pending: !url, mime: structured?.mime ?? null, text, structured }
 }
 
 /**

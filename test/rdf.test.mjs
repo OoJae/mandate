@@ -96,3 +96,15 @@ test('a derivation stores the job id under the one key reconcile joins on', () =
   assert.throws(() => derivationToQuads({ id: 'urn:mandate:derivation:a', outputSha256: 'F'.repeat(64),
     servedCapability: 'talking-head', authorizedUnder: grant().id, derivedAt: '2026-09-13T00:00:00Z' }), /lowercase hex/)
 })
+
+test('a calendar-impossible date is refused, not stored as a later day', () => {
+  assert.throws(() => grantToQuads(grant({ validUntil: '2026-02-31T23:59:00Z' })), /explicit offset/)
+  assert.throws(() => derivationToQuads({ id: 'urn:mandate:derivation:ffffffffffffffff:0123456789abcdef', outputSha256: 'f'.repeat(64),
+    servedCapability: 'talking-head', authorizedUnder: grant().id, derivedAt: '2026-09-31T00:00:00Z' }), TermError)
+})
+
+test('a sub-micro-dollar bill is recorded as at least one micro-dollar, never 0', () => {
+  const quads = derivationToQuads({ id: 'urn:mandate:derivation:ffffffffffffffff:0123456789abcdef', outputSha256: 'f'.repeat(64),
+    servedCapability: 'talking-head', authorizedUnder: grant().id, derivedAt: '2026-09-13T00:00:00Z', billedUsd: 3.36e-7 })
+  assert.equal(asDecimal(quads.find(x => x.predicate === V.billedUsd).object), 0.000001)
+})

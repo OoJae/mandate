@@ -11,7 +11,9 @@
  *   MANDATE_SRC=/tmp/mandate-v010/src node --test test/adversarial.test.mjs
  *
  * v0.1.0 read every graph through the dkg CLI's table output and trusted
- * self-declared authors; most of these cases fail there.
+ * self-declared authors. Every case must fail there: a case that passes on
+ * v0.1.0 proves nothing about what changed, so cases whose own fault a table
+ * read cannot expose also carry an attack v0.1.0 gets wrong.
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
@@ -82,6 +84,15 @@ async function render(kas, request = req(), opts) {
 async function verify(kas, sha = SHA, now = NOW) {
   return verifier.verifyKnowledge(await knowledge(kas, { sha256: sha }), sha, { now })
 }
+
+/**
+ * A producer's well-formed "active" naming Ana, later than any real state. Cases
+ * whose own fault a table read never exposes (v0.1.0 saw no wire cells and had no
+ * row limits) pair it in, so the case still fails where authors were
+ * self-declared: a resolver that drops Ana's revocation, or believes this, permits.
+ */
+const forgedActive = grantId => ka({ cg: GRANTS_CG, publisher: PRODUCER,
+  quads: state('urn:mandate:state:00000000000000fa', grantId, 'active', ANA, '2026-09-13T23:30:00Z') })
 
 const edgeFor = (grantId, over = {}) => derivation({ outputSha256: SHA, authorizedUnder: grantId, servedCapability: 'talking-head', derivedAt: '2026-09-13T11:00:00Z', ...over })
 
@@ -242,4 +253,109 @@ test('DOC-7: a read that silently misses the revocation graph refuses', async ()
   const rev = revocationKa(g.id)
   const d = await render([grantKa(g), rev], req(), { drop: graph => graph === rev.graph })
   assert.equal(d.permit, false)
+})
+
+/* -------------------------------------------------------------------------- */
+/* R4 — the grantor's own revocation, written slightly wrong                  */
+/* -------------------------------------------------------------------------- */
+
+const XSD_NS = 'http://www.w3.org/2001/XMLSchema#'
+const ownRevocation = (grantId, edit) => {
+  const id = 'urn:mandate:state:00000000000000c1'
+  const pairs = edit([
+    [RDF_TYPE, V.GrantState], [V.stateOf, grantId], [V.state, '"revoked"'], [V.stateAuthor, did(ANA)], [V.stateAt, `"2026-09-13T10:00:00Z"${DT}`],
+  ])
+  return ka({ cg: GRANTS_CG, publisher: ANA, quads: raw(id, pairs) })
+}
+const setP = (predicate, object) => pairs => pairs.map(([p, o]) => [p, p === predicate ? object : o])
+const R4_CASES = {
+  'an offset-less stateAt': setP(V.stateAt, `"2026-09-13T10:00:00"${DT}`),
+  'a date-only stateAt': setP(V.stateAt, `"2026-09-13"^^<${XSD_NS}date>`),
+  'a duplicated stateAt': pairs => [...pairs, [V.stateAt, `"2026-09-12T10:00:00Z"${DT}`]],
+  'a typed state literal': setP(V.state, `"revoked"^^<${XSD_NS}token>`),
+  'a state given as an IRI': setP(V.state, 'urn:mandate:revoked'),
+  'a missing stateAuthor': pairs => pairs.filter(([p]) => p !== V.stateAuthor),
+  'a mismatched stateAuthor': setP(V.stateAuthor, did(STRANGER)),
+  'an unparseable state cell': setP(V.state, '"revoked"^^xsd:string'),
+}
+
+for (const [name, edit] of Object.entries(R4_CASES)) {
+  test(`R4: Ana's own revocation with ${name} still refuses and never verifies CLEAR`, async () => {
+    const g = grant()
+    const kas = [grantKa(g), ownRevocation(g.id, edit), forgedActive(g.id), derivationKa(edgeFor(g.id))]
+    const d = await render(kas)
+    assert.equal(d.permit, false)
+    if (CURRENT) assert.equal(d.clause, 'not-revoked')
+    assert.notEqual((await verify(kas)).verdict, verifier.CLEAR)
+  })
+}
+
+test('R4: Ana\'s own revocation whose stateOf is a literal refuses as an unreadable read', async () => {
+  const g = grant()
+  const kas = [grantKa(g), ownRevocation(g.id, setP(V.stateOf, `"${g.id}"`)), forgedActive(g.id), derivationKa(edgeFor(g.id))]
+  assert.equal((await render(kas)).permit, false)
+  assert.notEqual((await verify(kas)).verdict, verifier.CLEAR)
+})
+
+/* -------------------------------------------------------------------------- */
+/* SEC-6 — cells that do not parse                                            */
+/* -------------------------------------------------------------------------- */
+
+for (const cell of ['"5"^^xsd:decimal', `"5"${DEC} `, `"${'5'.repeat(5000)}"`]) {
+  test(`SEC-6: a ceiling cell that does not parse (${cell.slice(0, 20)}) is not "no ceiling"`, async () => {
+    const g = grant({ maxSpendUsd: 5 })
+    const bad = grantKa(g)
+    bad.contentRows = bad.contentRows.map(r => (r.p === V.maxSpendUsd ? { ...r, o: cell } : r))
+    // A stranger's second ceiling for the same grant id, read first. The odd cell must not
+    // leave the stranger's value (or none) as the ceiling.
+    const widen = ka({ cg: GRANTS_CG, publisher: STRANGER, quads: raw(g.id, [[V.maxSpendUsd, `"100000"${DEC}`]]) })
+    assert.equal((await render([widen, bad], req({ estimatedUsd: 1000 }))).permit, false)
+  })
+}
+
+/* -------------------------------------------------------------------------- */
+/* SEC-5 / R20 — flooding discovery                                           */
+/* -------------------------------------------------------------------------- */
+
+test('R20: a stranger asset repeating a file\'s hash as a marker does not turn TAINTED into INCONCLUSIVE', async () => {
+  const g = grant()
+  // 80 marker triples: a query without DISTINCT returns 80 x 80 = 6400 rows, past the 5000-row limit.
+  const flood = ka({ cg: DERIVS_CG, publisher: STRANGER, quads: Array.from({ length: 80 }, (_, i) => ({ subject: `urn:x:${i}`, predicate: V.outputSha256, object: `"${SHA}"` })) })
+  const r = await verify([grantKa(g), revocationKa(g.id), forgedActive(g.id), derivationKa(edgeFor(g.id)), flood])
+  assert.equal(r.verdict, verifier.TAINTED)
+})
+
+test('R20: a stranger asset with more distinct state rows than a query holds denies service, never grants it', async () => {
+  const g = grant()
+  // Deliberate trade-off: discovery that overflows fails closed. 2600 distinct values, repeated in the merged view, pass 5000 rows.
+  const s = 'urn:x:flood'
+  const flood = ka({ cg: GRANTS_CG, publisher: STRANGER, quads: [
+    { subject: s, predicate: V.stateOf, object: g.id },
+    ...Array.from({ length: 2600 }, (_, i) => ({ subject: s, predicate: V.state, object: `"v${i}"` })),
+  ] })
+  const d = await render([grantKa(g), flood])
+  assert.equal(d.permit, false)
+  if (CURRENT) assert.equal(d.clause, 'read-inconsistent')
+})
+
+/* -------------------------------------------------------------------------- */
+/* R5 / R7 — reads that used to fail open or lock up                          */
+/* -------------------------------------------------------------------------- */
+
+test('R7: a producer with more recorded renders than one query holds still enforces the ceiling', async () => {
+  const g = grant({ maxSpendUsd: 5 })
+  const other = grant()
+  // A stranger's negative billedUsd rides along, so a reader with no row limit (v0.1.0) still has something to get wrong.
+  const credit = ka({ cg: DERIVS_CG, publisher: STRANGER, quads: raw('urn:mandate:derivation:eeeeeeeeeeeeeeee:0000000000000002', [
+    [RDF_TYPE, V.Derivation], [V.outputSha256, `"${'e'.repeat(64)}"`], [V.servedCapability, '"talking-head"'],
+    [V.authorizedUnder, g.id], [V.billedUsd, `"-1000"${DEC}`],
+  ]) })
+  const derivs = [
+    ...Array.from({ length: 750 }, (_, i) => derivationKa(edgeFor(other.id, { outputSha256: i.toString(16).padStart(64, '0'), billedUsd: 0.01 }))),
+    derivationKa(edgeFor(g.id, { outputSha256: 'e'.repeat(64), billedUsd: 4.5 })),
+    credit,
+  ]
+  const d = await render([grantKa(g), grantKa(other), ...derivs], req({ estimatedUsd: 1 }))
+  assert.equal(d.permit, false)
+  assert.equal(d.clause, 'spend-ceiling')
 })

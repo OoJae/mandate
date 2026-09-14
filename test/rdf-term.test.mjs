@@ -85,3 +85,25 @@ test('writer and reader agree: every value the writer emits reads back identical
   assert.equal(asDateTime(dt), Date.parse('2026-12-31T21:59:00Z'))
   assert.throws(() => dateTimeTerm('2026-12-31T23:59'), TermError)
 })
+
+test('calendar-impossible dateTimes are refused, not rolled forward', () => {
+  for (const bad of ['2026-02-31T23:59:00Z', '2026-02-29T00:00:00Z', '2026-04-31T00:00:00Z', '1900-02-29T00:00:00Z', '2026-13-01T00:00:00Z',
+    '2026-00-10T00:00:00Z', '2026-01-00T00:00:00Z', '2026-01-01T24:00:00Z', '2026-01-01T23:60:00Z', '2026-01-01T23:59:60Z', '2026-01-01T10:00:00+15:00',
+    `"2026-02-31T23:59:00Z"^^<${XSD}dateTime>`]) {
+    assert.ok(Number.isNaN(asDateTime(bad)), bad)
+  }
+  for (const ok of ['2028-02-29T00:00:00Z', '2000-02-29T12:00:00+14:00', '2026-12-31T23:59:59.999Z', '2026-01-01T00:00-05:30']) {
+    assert.ok(Number.isFinite(asDateTime(ok)), ok)
+  }
+  assert.throws(() => dateTimeTerm('2026-02-31T23:59:00Z'), TermError)
+})
+
+test('the decimal writer never writes a positive amount as 0, and never rounds one down', () => {
+  assert.equal(decimalTerm(3.36e-7), `"0.000001"^^<${XSD}decimal>`)
+  assert.equal(decimalTerm(1.0000004), `"1.000001"^^<${XSD}decimal>`)
+  assert.equal(decimalTerm(0.07 * 12), `"0.84"^^<${XSD}decimal>`, 'binary noise is not precision')
+  assert.equal(decimalTerm(0), `"0"^^<${XSD}decimal>`)
+  for (const v of [1e-9, 5e-7, 2.5e-6, 123.4567891]) assert.ok(asDecimal(decimalTerm(v)) >= v, String(v))
+  assert.equal(asDecimal(3.36e-7), 3.36e-7, 'a number read as a decimal is not rounded')
+  assert.throws(() => decimalTerm(1e21), TermError)
+})

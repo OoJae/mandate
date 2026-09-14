@@ -5,11 +5,12 @@ import { createHash } from 'node:crypto'
 import { mkdtempSync, rmSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { dispatchRender, extractMediaUrl, pollJob, RenderError } from '../src/execute.mjs'
+import { dispatchRender, extractMediaUrl, pollJob, RenderError, collectInputUrls, served, classifyFailure } from '../src/execute.mjs'
 import { callStrict, LivepeerToolError } from '../src/livepeer.mjs'
 import { checkInputs, dispatchMode, estimateFromPricing } from '../src/capabilities.mjs'
 import { sha256OfUrl, FetchBytesError } from '../src/fetch-bytes.mjs'
-import { renderKey, pendingStore } from '../src/pending.mjs'
+import { renderKey, pendingStore, PendingConflictError, mergeDerivationAttempt } from '../src/pending.mjs'
+import { verifyMedia, hashUrl } from '../src/verify.mjs'
 
 const IMG = 'https://agent.livepeer.org/a/img.jpg'
 const AUD = 'https://agent.livepeer.org/a/voice.wav'
@@ -161,5 +162,225 @@ test('hashing streams, caps size, refuses non-http URLs and does not retry HTTP 
     await assert.rejects(sha256OfUrl('file:///etc/passwd'), /only http\(s\)/)
   } finally {
     await new Promise(r => server.close(r))
+  }
+})
+
+// --- closure fixes: render lifecycle -------------------------------------------------
+
+const text = t => ({ content: [{ type: 'text', text: t }] })
+// The replies the platform actually sent during the spikes: text only, no structured content.
+const LOGGED_QUEUED = 'Job mjob_93244be79885 is NOT done — poll get_create_media({ job_id: "mjob_93244be79885" }) until status=done to get the media URL.'
+const LOGGED_FAILED = 'Media job mjob_640913486506: failed (129s)\nCapability: talking-head\nError: The background worker running this job stopped responding (no heartbeat for 128s after it started). No media was produced.'
+const TH = { capability: 'talking-head', inputs: { image_url: IMG, audio_url: AUD }, idempotencyKey: 'mandate-k' }
+const noSleep = { sleep: async () => {} }
+const ESC = String.fromCharCode(27)
+
+test('an inline call that times out on the client with no job id may still be rendering', async () => {
+  const client = stubClient({ run_capability: [Object.assign(new Error('Request timed out'), { code: -32001 })] })
+  await assert.rejects(dispatchRender(client, TH), e => e instanceof RenderError && e.kind === 'timeout' && e.jobId === null && e.mayHaveStarted === true)
+  const dropped = stubClient({ run_capability: [new Error('socket hang up')] })
+  await assert.rejects(dispatchRender(dropped, TH), e => e.kind === 'tool' && e.mayHaveStarted === true)
+})
+
+test('a text-only queued inline reply is polled, and its text is never scanned for a URL', async () => {
+  const client = stubClient({
+    run_capability: [text(`${LOGGED_QUEUED}\nPreview of source: ${IMG}?w=512 and https://cdn.test/preview.png`)],
+    get_create_media: [text('Media job mjob_93244be79885: Running (40s)'), text(`Media job mjob_93244be79885: done\nCapability: talking-head\nInput: ${IMG}?w=512\nOutput: https://cdn.test/out.mp4`)],
+  })
+  let job
+  const r = await dispatchRender(client, { ...TH, onJob: j => { job = j }, poll: noSleep })
+  assert.equal(job, 'mjob_93244be79885')
+  assert.equal(r.url, 'https://cdn.test/out.mp4')
+  assert.equal(r.mode, 'async')
+  assert.equal(client.calls.filter(c => c.name === 'get_create_media').length, 2)
+})
+
+test('a text-only failed job fails at once instead of polling until the wait runs out', async () => {
+  const client = stubClient({ get_create_media: [text(LOGGED_FAILED)] })
+  await assert.rejects(pollJob(client, 'mjob_640913486506', noSleep), e => e.kind === 'tool' && /heartbeat/.test(e.message) && e.mayHaveStarted)
+  assert.equal(client.calls.length, 1)
+})
+
+test('status words and job ids are compared case-insensitively', async () => {
+  const client = stubClient({
+    run_capability: [ok({ status: 'Queued', job_id: 'mjob_93244BE79885' }, 'queued https://cdn.test/prev.png')],
+    get_create_media: [ok({ status: 'RUNNING' }), ok({ status: 'Completed', url: OUT })],
+  })
+  const r = await dispatchRender(client, { ...TH, poll: noSleep })
+  assert.equal(r.url, OUT)
+  assert.equal(r.jobId, 'mjob_93244BE79885')
+  const upper = stubClient({ run_capability: [text('Job mjob_93244BE79885 is NOT done')], get_create_media: [ok({ status: 'done', url: OUT })] })
+  assert.equal((await dispatchRender(upper, { ...TH, mode: 'async', poll: noSleep })).jobId, 'mjob_93244BE79885')
+})
+
+test('an unrecognised status stops the render instead of polling to a timeout', async () => {
+  const client = stubClient({ get_create_media: [ok({ status: 'quarantined' })] })
+  let t = 0
+  await assert.rejects(pollJob(client, 'mjob_aaaaaaaaaaaa', { sleep: async () => { t += 10_000 }, now: () => t }),
+    e => e.kind === 'unknown-status' && e.jobId === 'mjob_aaaaaaaaaaaa' && e.mayHaveStarted)
+  assert.equal(client.calls.length, 1)
+  const first = stubClient({ run_capability: [ok({ status: 'on_hold', job_id: 'mjob_aaaaaaaaaaaa' })] })
+  await assert.rejects(dispatchRender(first, TH), e => e.kind === 'unknown-status')
+  const none = stubClient({ get_create_media: [ok({}, 'nothing useful')] })
+  await assert.rejects(pollJob(none, 'mjob_aaaaaaaaaaaa', noSleep), e => e.kind === 'unknown-status')
+})
+
+test('a dropped poll is retried, not treated as the end of a billed render', async () => {
+  const client = stubClient({ get_create_media: [new Error('fetch failed'), ok({ status: 'done', url: OUT })] })
+  assert.equal((await pollJob(client, 'mjob_aaaaaaaaaaaa', noSleep)).url, OUT)
+  await assert.rejects(pollJob(stubClient({}), 'mjob_$(rm -rf)', noSleep), e => e.kind === 'tool' && e.jobId === null)
+})
+
+test('a malformed structured job id is refused rather than saved or printed', async () => {
+  const client = stubClient({ run_capability: [ok({ status: 'submitted', job_id: `mjob_abc${ESC}[2Jdef` })] })
+  await assert.rejects(dispatchRender(client, TH), e => e instanceof RenderError && /expected form/.test(e.message) && e.mayHaveStarted)
+})
+
+test('ok:false is classified for payment too', async () => {
+  const client = stubClient({ run_capability: [ok({ ok: false, error: 'insufficient credit on this account' })] })
+  await assert.rejects(dispatchRender(client, TH), e => e.kind === 'payment' && e.mayHaveStarted === false)
+})
+
+test('payment classification uses word boundaries and prefers structured codes', () => {
+  assert.equal(classifyFailure(null, '403 fetching image_url'), 'tool')
+  assert.equal(classifyFailure(null, 'input from an accredited source could not be decoded'), 'tool')
+  assert.equal(classifyFailure(null, 'HTTP 401 fetching audio_url'), 'tool')
+  assert.equal(classifyFailure(null, 'insufficient credits'), 'payment')
+  assert.equal(classifyFailure({ code: 'payment_required' }, 'request rejected'), 'payment')
+  assert.equal(classifyFailure({ error: { code: 'provider_error' } }, 'provider mentions payment in passing'), 'tool')
+  assert.equal(classifyFailure({ status_code: 402 }, ''), 'payment')
+})
+
+test('async polling never returns one of the render\'s own inputs, however nested', async () => {
+  const nested = { image_url: IMG, refs: [{ audio: AUD }] }
+  assert.deepEqual(collectInputUrls({ a: nested, b: [IMG, { c: AUD }] }).sort(), [IMG, IMG, AUD, AUD].sort())
+  const client = stubClient({
+    run_capability: [ok({ status: 'submitted', job_id: 'mjob_abcdef123456' })],
+    get_create_media: [ok({ status: 'done' }, `Job done. image_url=${IMG} audio=${AUD}`)],
+  })
+  await assert.rejects(dispatchRender(client, { capability: 'talking-head', inputs: nested, poll: noSleep }), e => e.kind === 'no-media')
+  const direct = stubClient({ get_create_media: [ok({ status: 'done' }, `image ${IMG}`)] })
+  await assert.rejects(pollJob(direct, 'mjob_abcdef123456', { ...noSleep, inputUrls: [{ deep: [IMG] }] }), e => e.kind === 'no-media')
+  const reported = stubClient({ get_create_media: [ok({ status: 'done', inputs: { refs: [{ image_url: IMG }] } }, `made from ${IMG}`)] })
+  await assert.rejects(pollJob(reported, 'mjob_abcdef123456', noSleep), e => e.kind === 'no-media')
+  const inline = stubClient({ run_capability: [ok({ ok: true }, `refs ${AUD}`)] })
+  await assert.rejects(dispatchRender(inline, { capability: 'x-cap', inputs: nested }), e => e.kind === 'no-media')
+})
+
+test('an unusable cost estimate is dropped rather than recorded', async () => {
+  for (const bad of ['0.84', -1, Number.NaN, Infinity, { usd: 1 }]) {
+    const client = stubClient({ run_capability: [ok({ ok: true, url: OUT, cost_usd_estimated: bad })] })
+    assert.equal((await dispatchRender(client, TH)).costUsdEstimated, null, String(bad))
+  }
+  const queued = stubClient({ run_capability: [ok({ status: 'submitted', job_id: 'mjob_abcdef123456', cost_usd_estimated: 0.84 })], get_create_media: [ok({ status: 'done', url: OUT, cost_usd_estimated: 'lots' })] })
+  assert.equal((await dispatchRender(queued, { ...TH, poll: noSleep })).costUsdEstimated, 0.84)
+})
+
+test('served() reports substitution, and a text-only job reports its capability', async () => {
+  assert.equal(served({ capability_used: 'lipsync' }, 'talking-head'), 'lipsync')
+  assert.equal(served(null, 'talking-head'), 'talking-head')
+  const client = stubClient({
+    run_capability: [text(LOGGED_QUEUED)],
+    get_create_media: [text('Media job mjob_93244be79885: done\nCapability: face-swap-video\nOutput: https://cdn.test/out.mp4')],
+  })
+  assert.equal((await dispatchRender(client, { ...TH, poll: noSleep })).servedCapability, 'face-swap-video')
+})
+
+// --- closure fixes: fetch-bytes --------------------------------------------------------
+
+const stream = (chunks, { failAfter = false } = {}) => {
+  const queue = [...chunks]
+  return new ReadableStream({
+    pull(c) {
+      if (queue.length) return c.enqueue(queue.shift())
+      if (failAfter) c.error(new TypeError('terminated'))
+      else c.close()
+    },
+  })
+}
+const fakeRes = (body, headers = {}, status = 200) => ({ ok: status < 400, status, headers: new Headers(headers), body })
+
+test('an undefined, null or NaN maxBytes never switches the size cap off', async () => {
+  const fetch = async () => fakeRes(stream([new Uint8Array(10)]), { 'content-length': String(600 * 1024 * 1024) })
+  for (const maxBytes of [undefined, null]) {
+    await assert.rejects(sha256OfUrl('https://h.test/a.mp4', { maxBytes, fetch }), /over the 536870912-byte limit/)
+  }
+  await assert.rejects(sha256OfUrl('https://h.test/a.mp4', { maxBytes: Number('nope'), fetch }), e => e instanceof FetchBytesError && /maxBytes/.test(e.message))
+  await assert.rejects(sha256OfUrl('https://h.test/a.mp4', { timeoutMs: -5, fetch }), /timeoutMs/)
+})
+
+test('the byte cap is one budget across every retry', async () => {
+  let sent = 0
+  const fetch = async () => { sent += 600; return fakeRes(stream([new Uint8Array(600)], { failAfter: true })) }
+  await assert.rejects(sha256OfUrl('https://h.test/a.mp4', { maxBytes: 1000, attempts: 4, fetch, sleep: async () => {} }), /budget/)
+  assert.ok(sent <= 1200, `sent ${sent} bytes`)
+})
+
+test('the timeout is one deadline across every retry', async () => {
+  const fetch = (_u, { signal }) => new Promise((_, reject) => signal.addEventListener('abort', () => reject(signal.reason)))
+  const t0 = Date.now()
+  await assert.rejects(sha256OfUrl('https://h.test/a.mp4', { timeoutMs: 150, attempts: 4, backoffMs: 0, fetch }), /timed out/)
+  assert.ok(Date.now() - t0 < 450, `took ${Date.now() - t0}ms`)
+})
+
+test('a response with no body fails once instead of being retried', async () => {
+  let hits = 0
+  const fetch = async () => { hits++; return fakeRes(null, {}, 204) }
+  await assert.rejects(sha256OfUrl('https://h.test/a.mp4', { fetch, sleep: async () => {} }), /no body/)
+  assert.equal(hits, 1)
+})
+
+test('verifyMedia and hashUrl pass fetch options through', async () => {
+  let calls = 0
+  const fetch = async () => { calls++; return fakeRes(stream([new Uint8Array(10)]), { 'content-length': '5000' }) }
+  await assert.rejects(verifyMedia({}, {}, 'https://h.test/a.mp4', { fetchOptions: { fetch, maxBytes: 100 } }), /over the 100-byte limit/)
+  assert.equal(calls, 1)
+  const small = async () => fakeRes(stream([new Uint8Array([1, 2, 3])]))
+  assert.equal(await hashUrl('https://h.test/a.mp4', { fetch: small }), createHash('sha256').update(Buffer.from([1, 2, 3])).digest('hex'))
+})
+
+// --- closure fixes: pending records -----------------------------------------------------
+
+test('a rerun cannot overwrite a submitted, rendered or recorded pending record', () => {
+  const dir = join(mkdtempSync(join(tmpdir(), 'mandate-pending-')), 'pending')
+  try {
+    const store = pendingStore(dir)
+    const key = renderKey({ grantId: 'urn:g', capability: 'x' })
+    store.create({ key, status: 'dispatching' })
+    store.create({ key, status: 'dispatching', again: true })
+    store.save({ ...store.load(key), status: 'failed' })
+    store.create({ key, status: 'dispatching' })
+    for (const status of ['submitted', 'rendered', 'recorded']) {
+      store.save({ key, status, jobId: 'mjob_aaaaaaaaaaaa' })
+      assert.throws(() => store.create({ key, status: 'dispatching' }), e => e instanceof PendingConflictError && e.status === status && e.existing.jobId === 'mjob_aaaaaaaaaaaa')
+      assert.equal(store.load(key).status, status)
+    }
+    store.create({ key, status: 'dispatching' }, { overwrite: true })
+    assert.equal(store.load(key).status, 'dispatching')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('a derivation attempt keeps its asset name, ual, tx hash and mayHaveSent across retries', () => {
+  const dir = join(mkdtempSync(join(tmpdir(), 'mandate-pending-')), 'pending')
+  try {
+    const store = pendingStore(dir)
+    const key = renderKey({ grantId: 'urn:g', capability: 'y' })
+    const name = 'derivation-0123456789abcdef-fedcba9876543210'
+    const id = 'urn:mandate:derivation:0123456789abcdef:fedcba9876543210'
+    const tx = `0x${'ab'.repeat(32)}`
+    store.save({ key, status: 'rendered' })
+    store.noteDerivationAttempt(key, { id, name, stage: 'started' })
+    store.noteDerivationAttempt(key, { stage: 'publish-transport', ual: 'did:dkg:base:84532/0xabc/7', txHash: tx, mayHaveSent: true })
+    const after = store.noteDerivationAttempt(key, { stage: 'unbound', mayHaveSent: false })
+    assert.deepEqual(after.derivationAttempt, { id, name, ual: 'did:dkg:base:84532/0xabc/7', txHash: tx, stage: 'unbound', mayHaveSent: true })
+    assert.deepEqual(store.load(key).derivationAttempt, after.derivationAttempt)
+    assert.throws(() => store.noteDerivationAttempt(key, { name: 'derivation-0123456789abcdef-0000000000000000' }), /must reuse/)
+    assert.throws(() => mergeDerivationAttempt(null, { txHash: '0xnope' }), /tx hash/)
+    assert.throws(() => mergeDerivationAttempt(null, { ual: `did:dkg:x${ESC}[2J` }), /ual/)
+    assert.throws(() => mergeDerivationAttempt(null, { name: '../x' }), /asset name/)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
   }
 })

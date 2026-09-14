@@ -13,6 +13,8 @@
  */
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { asIri, asString } from './rdf-term.mjs'
+import { DKG, metaForUalsQuery, vmPrefix } from './queries.mjs'
 
 export class DkgHttpError extends Error {
   constructor(message, { status, path, body } = {}) {
@@ -23,8 +25,25 @@ export class DkgHttpError extends Error {
   }
 }
 
+/** The node's auth token could not be found or read, so nothing can be asked of the node. */
+export class NodeTokenError extends Error {}
+
 /** A read returned more rows than the caller allowed; the result is incomplete, so nothing may be concluded from it. */
 export class ReadTruncatedError extends Error {}
+
+/**
+ * A response body was larger than the client allows. It extends
+ * ReadTruncatedError on purpose: a reader must treat an unread body exactly like
+ * a truncated one and conclude nothing from it.
+ */
+export class ResponseTooLargeError extends ReadTruncatedError {
+  constructor(message, { status, path, limit } = {}) {
+    super(message)
+    this.status = status
+    this.path = path
+    this.limit = limit
+  }
+}
 
 /**
  * A write stopped before its asset was confirmed on-chain.
@@ -36,8 +55,12 @@ export class ReadTruncatedError extends Error {}
  * spent instead of retrying blind and paying twice.
  */
 export class DkgWriteError extends Error {
-  constructor(message, { stage, status, body, ual = null, txHash = null, mayHaveSent = false } = {}) {
+  constructor(message, { name, stage, status, body, ual = null, txHash = null, mayHaveSent = false } = {}) {
     super(message)
+    // `name` is the asset name, so a caller can save it and resume the same
+    // asset instead of minting a new one. It shadows Error#name only when given.
+    if (typeof name === 'string' && name) this.name = name
+    this.assetName = typeof name === 'string' ? name : null
     this.stage = stage
     this.status = status
     this.body = body
@@ -46,6 +69,7 @@ export class DkgWriteError extends Error {
     this.mayHaveSent = mayHaveSent
   }
 }
+DkgWriteError.prototype.name = 'DkgWriteError'
 
 const expandHome = p => p.replace(/^~(?=$|\/)/, process.env.HOME ?? '')
 
@@ -58,6 +82,41 @@ export function readToken(home) {
 
 const ASSET_NAME = /^[^\s/<>"{}|^`\\]{1,256}$/
 
+/** A chain-confirmed UAL. A tentative, local-only publish gets a `/t<opId>` suffix and never matches. */
+const CONFIRMED_UAL = /^did:dkg:[a-z0-9]+:\d+\/(0x[0-9a-fA-F]{40})\/(\d+)$/
+
+/** Largest response body read by default. Real query answers are a few MiB at the 5000-row limit. */
+export const MAX_RESPONSE_BYTES = 32 * 1024 * 1024
+
+const bareHex = v => typeof v === 'string' ? v.trim().toLowerCase().replace(/^0x/, '') : ''
+
+/** Read a response body, stopping at `limit` bytes. Returns null when the body is larger. */
+async function readCapped(res, limit) {
+  const declared = Number(res.headers?.get?.('content-length'))
+  if (Number.isFinite(declared) && declared > limit) {
+    await res.body?.cancel?.().catch(() => {})
+    return null
+  }
+  if (!res.body?.getReader) {
+    const text = await res.text()
+    return Buffer.byteLength(text) > limit ? null : text
+  }
+  const reader = res.body.getReader()
+  const chunks = []
+  let bytes = 0
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    bytes += value.byteLength
+    if (bytes > limit) {
+      await reader.cancel().catch(() => {})
+      return null
+    }
+    chunks.push(value)
+  }
+  return Buffer.concat(chunks).toString('utf8')
+}
+
 export class DkgNode {
   /**
    * @param {object} o
@@ -67,9 +126,13 @@ export class DkgNode {
    * @param {string} [o.token]  injected token (tests, or a token from elsewhere)
    * @param {Function} [o.fetch] injected fetch
    * @param {number} [o.timeoutMs]
+   * @param {number} [o.maxResponseBytes] responses larger than this are refused, not read
    */
-  constructor({ home, port, name, token, fetch: fetchImpl, timeoutMs = 60000, host = '127.0.0.1' } = {}) {
+  constructor({ home, port, name, token, fetch: fetchImpl, timeoutMs = 60000, host = '127.0.0.1', maxResponseBytes = MAX_RESPONSE_BYTES } = {}) {
     if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error(`invalid DKG node port: ${port}`)
+    // An undefined or NaN limit must not quietly turn the cap off.
+    if (!Number.isInteger(maxResponseBytes) || maxResponseBytes < 1) throw new Error(`invalid maxResponseBytes: ${maxResponseBytes}`)
+    this.maxResponseBytes = maxResponseBytes
     this.home = home ? expandHome(home) : null
     this.port = port
     this.name = name ?? `dkg:${port}`
@@ -81,17 +144,17 @@ export class DkgNode {
 
   get token() {
     if (this._token) return this._token
-    if (!this.home) throw new Error(`${this.name}: no auth token and no DKG home to read one from`)
+    if (!this.home) throw new NodeTokenError(`${this.name}: no auth token and no DKG home to read one from`)
     try {
       this._token = readToken(this.home)
     } catch (e) {
-      throw new Error(`${this.name}: cannot read ${join(this.home, 'auth.token')} (${e.code ?? e.message}). `
+      throw new NodeTokenError(`${this.name}: cannot read ${join(this.home, 'auth.token')} (${e.code ?? e.message}). `
         + 'Is the node initialised and has it been started once?')
     }
     return this._token
   }
 
-  async request(method, path, body, { auth = true, timeoutMs = this.timeoutMs, okStatuses } = {}) {
+  async request(method, path, body, { auth = true, timeoutMs = this.timeoutMs, okStatuses, maxBytes = this.maxResponseBytes } = {}) {
     const headers = { accept: 'application/json' }
     if (auth) headers.authorization = `Bearer ${this.token}`
     if (body !== undefined) headers['content-type'] = 'application/json'
@@ -107,7 +170,19 @@ export class DkgNode {
       const code = e?.cause?.code ?? e?.name
       throw new DkgHttpError(`${this.name} unreachable at ${this.base} (${code ?? e.message})`, { status: 0, path })
     }
-    const text = await res.text()
+    let text
+    try {
+      text = await readCapped(res, maxBytes)
+    } catch (e) {
+      // A body cut off mid-read (socket drop, timeout) is a transport failure,
+      // so a publish caller reconciles rather than trusting a partial answer.
+      const code = e?.cause?.code ?? e?.name
+      throw new DkgHttpError(`${this.name} ${method} ${path}: the response was cut off (${code ?? e.message})`, { status: 0, path })
+    }
+    if (text === null) {
+      throw new ResponseTooLargeError(`${this.name} ${method} ${path} -> ${res.status}: the response is larger than ${maxBytes} bytes; refusing to read it`,
+        { status: res.status, path, limit: maxBytes })
+    }
     let parsed
     try { parsed = text ? JSON.parse(text) : null } catch { parsed = text }
     if (okStatuses ? okStatuses.includes(res.status) : res.ok) return { status: res.status, body: parsed }
@@ -182,89 +257,183 @@ export class DkgNode {
    * the chain has confirmed it and it is bound to the context graph.
    *
    * Names must be unique: create is get-or-create on the node, and re-sealing
-   * an existing name with different content fails.
+   * an existing name with different content fails. Without `resume` an
+   * existing name is refused. With `resume` it is continued from the stage the
+   * node reports (wm-sealed: share and publish; swm-shared: publish;
+   * vm-confirmed: verified, never published again). Resuming continues the
+   * content already sealed under that name, not `quads`: a retry is meant to
+   * finish the earlier write, and the seal cannot be changed anyway.
    */
-  async sealShareAnchor({ name, contextGraphId, quads, expectAuthor, shareRetries = 3, sleep = ms => new Promise(r => setTimeout(r, ms)) }) {
-    if (!ASSET_NAME.test(name)) throw new DkgWriteError(`invalid asset name: ${JSON.stringify(name)}`, { stage: 'create' })
-    if (!Array.isArray(quads) || quads.length === 0) throw new DkgWriteError('no quads to write', { stage: 'create' })
+  async sealShareAnchor({ name, contextGraphId, quads, expectAuthor, resume = false, shareRetries = 3, sleep = ms => new Promise(r => setTimeout(r, ms)) }) {
+    if (typeof name !== 'string' || !ASSET_NAME.test(name)) throw new DkgWriteError(`invalid asset name: ${JSON.stringify(name)}`, { name, stage: 'create' })
+    if (!Array.isArray(quads) || quads.length === 0) throw new DkgWriteError('no quads to write', { name, stage: 'create' })
 
-    if (await this.descriptor(name, contextGraphId)) {
-      throw new DkgWriteError(`asset ${name} already exists in ${contextGraphId}; names must be unique`, { stage: 'create' })
+    const existing = await this.descriptor(name, contextGraphId)
+    if (existing && !resume) {
+      throw new DkgWriteError(`asset ${name} already exists in ${contextGraphId}; names must be unique`, { name, stage: 'create' })
     }
+    if (existing) return this.#resume(existing, { name, contextGraphId, expectAuthor, shareRetries, sleep })
 
-    const created = await this.#stage('create', () =>
+    const created = await this.#stage('create', name, () =>
       this.request('POST', '/api/knowledge-assets', { contextGraphId, name, quads, finalize: true }, { okStatuses: [201] }))
     if (created.body?.status !== 'wm-sealed' || !created.body?.merkleRoot) {
-      throw new DkgWriteError(`asset ${name} was not sealed (status ${created.body?.status ?? 'unknown'})`, { stage: 'create', status: created.status, body: created.body })
+      throw new DkgWriteError(`asset ${name} was not sealed (status ${created.body?.status ?? 'unknown'})`, { name, stage: 'create', status: created.status, body: created.body })
     }
     const authorAddress = String(created.body.authorAddress ?? '').toLowerCase()
     if (expectAuthor && authorAddress !== String(expectAuthor).toLowerCase()) {
-      throw new DkgWriteError(`asset ${name} was sealed by ${authorAddress || 'an unknown author'}, expected ${expectAuthor}`, { stage: 'author', body: created.body })
+      throw new DkgWriteError(`asset ${name} was sealed by ${authorAddress || 'an unknown author'}, expected ${expectAuthor}`, { name, stage: 'author', body: created.body })
     }
+    const sealed = { merkleRoot: created.body.merkleRoot, authorAddress, assertionUri: created.body.assertionUri ?? null }
+    await this.#share(name, contextGraphId, { shareRetries, sleep })
+    return this.#publish(name, contextGraphId, sealed)
+  }
 
+  /** Continue an existing asset, or refuse when its state cannot be trusted. */
+  async #resume(d, { name, contextGraphId, expectAuthor, shareRetries, sleep }) {
+    const refuse = reason => {
+      throw new DkgWriteError(`asset ${name} cannot be resumed: ${reason}; it will not be published again`, { name, stage: 'resume-refused', body: d, ual: d?.publishedUal ?? null })
+    }
+    const authorAddress = String(d.agentAddress ?? '').toLowerCase()
+    if (expectAuthor && authorAddress !== String(expectAuthor).toLowerCase()) {
+      refuse(`its record belongs to ${authorAddress || 'an unknown author'}, expected ${expectAuthor}`)
+    }
+    if (d.status === 'wm-sealed' || d.status === 'swm-shared') {
+      const pointer = d.status === 'wm-sealed' ? d.wmCurrentAssertion : d.swmCurrentAssertion
+      if (!/^[0-9a-f]{64}$/.test(bareHex(pointer))) refuse(`the node reports ${d.status} without a sealed assertion`)
+      // A sealed draft never carries a published UAL; one that does is a
+      // publish the node recorded inconsistently.
+      if (d.publishedUal || d.vmCurrentAssertion) refuse(`the node reports ${d.status} but also a published assertion`)
+      const sealed = { merkleRoot: `0x${bareHex(pointer)}`, authorAddress, assertionUri: d.assertionGraph ?? null }
+      // swm-shared goes straight to publish. If an earlier publish may have
+      // sent a transaction the node has not yet recorded, publishing again
+      // could mint twice; the caller must not ask to resume such an asset.
+      if (d.status === 'wm-sealed') await this.#share(name, contextGraphId, { shareRetries, sleep })
+      return { ...(await this.#publish(name, contextGraphId, sealed)), resumed: true }
+    }
+    if (d.status === 'vm-confirmed') {
+      const vm = bareHex(d.vmCurrentAssertion)
+      const wm = bareHex(d.wmCurrentAssertion)
+      if (vm && wm && vm !== wm) refuse('its working copy has changed since it was published')
+      let anchor
+      try {
+        anchor = await this.#confirmAnchor(contextGraphId, { ual: d.publishedUal, merkleRoot: null, descriptor: d, author: expectAuthor ?? authorAddress })
+      } catch (e) {
+        refuse(e.message)
+      }
+      return { name, ual: anchor.ual, txHash: null, resumed: true }
+    }
+    refuse(`the node reports status ${d.status ?? 'unknown'}`)
+  }
+
+  async #share(name, contextGraphId, { shareRetries, sleep }) {
     const sharePath = `/api/knowledge-assets/${encodeURIComponent(name)}/swm/share`
     for (let attempt = 0; ; attempt++) {
       try {
         const shared = await this.request('POST', sharePath, { contextGraphId })
         if (shared.body?.swmShared !== true) {
-          throw new DkgWriteError(`asset ${name} was not shared to SWM`, { stage: 'share', status: shared.status, body: shared.body })
+          throw new DkgWriteError(`asset ${name} was not shared to SWM`, { name, stage: 'share', status: shared.status, body: shared.body })
         }
-        break
+        return
       } catch (e) {
         // The one documented transient: the node reports a promote prerequisite
         // as temporarily unavailable. Anything else fails immediately.
         const transient = e instanceof DkgHttpError && e.status === 500 && /temporarily unavailable/i.test(String(e.body?.error ?? ''))
         if (e instanceof DkgWriteError) throw e
         if (!transient || attempt >= shareRetries) {
-          throw new DkgWriteError(`sharing ${name} failed: ${e.message}`, { stage: 'share', status: e.status, body: e.body })
+          throw new DkgWriteError(`sharing ${name} failed: ${e.message}`, { name, stage: 'share', status: e.status, body: e.body })
         }
         await sleep(1500 * 2 ** attempt)
       }
     }
+  }
 
+  async #publish(name, contextGraphId, { merkleRoot, authorAddress, assertionUri }) {
     const publishPath = `/api/knowledge-assets/${encodeURIComponent(name)}/vm/publish`
     let published
     try {
       published = await this.request('POST', publishPath, { contextGraphId }, { okStatuses: [200, 207], timeoutMs: Math.max(this.timeoutMs, 480000) })
     } catch (e) {
-      if (e instanceof DkgHttpError && (e.status === 503 || e.status === 504 || e.status === 0)) {
+      const lost = (e instanceof DkgHttpError && (e.status === 503 || e.status === 504 || e.status === 0)) || e instanceof ResponseTooLargeError
+      if (lost) {
         // The node may have sent a transaction before losing its chain
         // connection. Retrying could mint twice, so reconcile from the node's
-        // own lifecycle record instead.
-        const d = await this.descriptor(name, contextGraphId).catch(() => null)
-        if (d?.status === 'vm-confirmed' && d.publishedUal) {
-          return { name, ual: d.publishedUal, txHash: null, merkleRoot: created.body.merkleRoot, authorAddress, reconciled: true }
+        // own records instead. The lifecycle descriptor alone is not proof: the
+        // node writes the same vm-confirmed descriptor for a tentative,
+        // local-only publish. So success also needs a confirmed UAL, the
+        // sealed merkle root, and a confirmed anchor in the graph's _meta.
+        let d = null
+        let why
+        try {
+          d = await this.descriptor(name, contextGraphId)
+          if (d?.status !== 'vm-confirmed') throw new Error(`the node reports status ${d?.status ?? 'unknown'}`)
+          const anchor = await this.#confirmAnchor(contextGraphId, { ual: d.publishedUal, merkleRoot, descriptor: d, author: authorAddress })
+          return { name, ual: anchor.ual, txHash: anchor.txHash, merkleRoot, authorAddress, assertionUri, reconciled: true }
+        } catch (err) {
+          why = err.message
         }
-        throw new DkgWriteError(`publishing ${name} did not confirm (${e.message}); a transaction may have been sent — check the node before retrying`,
-          { stage: 'publish-transport', status: e.status, body: e.body, mayHaveSent: true })
+        throw new DkgWriteError(`publishing ${name} did not confirm (${e.message}; ${why}); a transaction may have been sent — check the node before retrying`,
+          { name, stage: 'publish-transport', status: e.status, body: e.body, ual: d?.publishedUal ?? null, mayHaveSent: true })
       }
-      throw new DkgWriteError(`publishing ${name} failed: ${e.message}`, { stage: 'publish', status: e.status, body: e.body })
+      throw new DkgWriteError(`publishing ${name} failed: ${e.message}`, { name, stage: 'publish', status: e.status, body: e.body })
     }
     const b = published.body ?? {}
     if (published.status === 207) {
       throw new DkgWriteError(`asset ${name} was minted on-chain but not bound to ${contextGraphId}: ${b.contextGraphError ?? b.error ?? 'unknown error'}`,
-        { stage: 'unbound', status: 207, body: b, ual: b.ual ?? null, txHash: b.txHash ?? null })
+        { name, stage: 'unbound', status: 207, body: b, ual: b.ual ?? null, txHash: b.txHash ?? null })
     }
     if (b.status !== 'confirmed' || !b.ual) {
-      throw new DkgWriteError(`asset ${name} publish returned status ${b.status ?? 'unknown'}`, { stage: 'publish', status: published.status, body: b, ual: b.ual ?? null, txHash: b.txHash ?? null })
+      throw new DkgWriteError(`asset ${name} publish returned status ${b.status ?? 'unknown'}`, { name, stage: 'publish', status: published.status, body: b, ual: b.ual ?? null, txHash: b.txHash ?? null })
     }
     return {
       name,
       ual: b.ual,
       txHash: b.txHash ?? null,
       blockNumber: b.blockNumber ?? null,
-      merkleRoot: b.merkleRoot ?? created.body.merkleRoot,
+      merkleRoot: b.merkleRoot ?? merkleRoot,
       authorAddress,
-      assertionUri: created.body.assertionUri ?? null,
+      assertionUri,
     }
   }
 
-  async #stage(stage, fn) {
+  /**
+   * Prove a published UAL from the node's own records, or throw saying why.
+   *
+   * The UAL must be chain-confirmed (not tentative) and published by `author`;
+   * the descriptor's VM pointer must equal the sealed merkle root when both are
+   * known; and `<cg>/_meta` must hold exactly one confirmed status for it with
+   * the assertion graph the UAL derives.
+   */
+  async #confirmAnchor(contextGraphId, { ual, merkleRoot, descriptor, author }) {
+    const m = typeof ual === 'string' ? ual.match(CONFIRMED_UAL) : null
+    if (!m) throw new Error(`the recorded UAL ${JSON.stringify(ual ?? null)} is not a chain-confirmed UAL`)
+    const publisher = m[1].toLowerCase()
+    if (author && publisher !== String(author).toLowerCase()) throw new Error(`the recorded UAL ${ual} was not published by ${author}`)
+    const vm = bareHex(descriptor?.vmCurrentAssertion)
+    if (merkleRoot && vm && vm !== bareHex(merkleRoot)) throw new Error(`the published assertion ${vm} is not the one sealed (${bareHex(merkleRoot)})`)
+
+    let rows
+    try {
+      rows = await this.queryJson(metaForUalsQuery(contextGraphId, [ual], { limit: 50 }), { contextGraphId, max: 50 })
+    } catch (e) {
+      throw new Error(`its anchor could not be read (${e.message})`)
+    }
+    const values = p => rows.filter(r => asIri(r.s) === ual && asIri(r.p) === p).map(r => r.o)
+    if (!values(`${DKG}kaUal`).map(asIri).includes(ual)) throw new Error(`no anchor for ${ual} in the graph's _meta`)
+    const statuses = values(`${DKG}status`).map(asString)
+    if (statuses.length !== 1 || statuses[0] !== 'confirmed') throw new Error(`the anchor for ${ual} has status ${statuses.join(',') || 'missing'}`)
+    const expectedGraph = `${vmPrefix(contextGraphId)}${publisher}/${m[2]}`
+    const graphs = values(`${DKG}assertionGraph`).map(asIri)
+    if (graphs.length !== 1 || graphs[0] !== expectedGraph) throw new Error(`the anchor for ${ual} names assertion graph ${graphs.join(',') || 'missing'}, expected ${expectedGraph}`)
+    const tx = values(`${DKG}transactionHash`).map(asString)
+    return { ual, txHash: tx.length === 1 ? tx[0] : null }
+  }
+
+  async #stage(stage, name, fn) {
     try {
       return await fn()
     } catch (e) {
       if (e instanceof DkgWriteError) throw e
-      throw new DkgWriteError(`${stage} failed: ${e.message}`, { stage, status: e.status, body: e.body })
+      throw new DkgWriteError(`${stage} failed: ${e.message}`, { name, stage, status: e.status, body: e.body })
     }
   }
 }

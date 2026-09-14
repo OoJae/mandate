@@ -10,6 +10,9 @@ import { mkdirSync, readFileSync, renameSync, writeFileSync, chmodSync } from 'n
 import { join } from 'node:path'
 import { homedir } from 'node:os'
 
+/** The local state file exists but cannot be read or parsed. A reader must stop, not start from empty memory. */
+export class StateReadError extends Error {}
+
 const empty = () => ({ version: 1, knownUals: {}, revocations: {} })
 
 function normalise(data) {
@@ -56,7 +59,7 @@ export function fileStateStore(dir = defaultStateDir()) {
         return normalise(JSON.parse(readFileSync(file(key), 'utf8')))
       } catch (e) {
         if (e.code === 'ENOENT') return empty()
-        throw new Error(`cannot read local state ${file(key)}: ${e.message}`)
+        throw new StateReadError(`cannot read local state ${file(key)}: ${e.message}`)
       }
     },
     save(key, record) {

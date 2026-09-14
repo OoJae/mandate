@@ -58,3 +58,12 @@ test('every predicate and class the serialisers actually emit is defined in the 
   const undefinedTerms = [...emitted].filter(i => !inOntology.has(i))
   assert.deepEqual(undefinedTerms, [])
 })
+
+test('the spec page names the DKG-anchored copy as the fixed version, never a web path', () => {
+  const page = readFileSync(new URL('../docs/ns/v1/index.html', import.meta.url), 'utf8')
+  const anchored = JSON.parse(readFileSync(new URL('../docs/evidence/ontology-1.1.0.json', import.meta.url), 'utf8'))
+  assert.ok(page.includes(anchored.ual), 'the 1.1.0 anchor UAL is on the page')
+  assert.doesNotMatch(page, /fixed at <code>https?:/)
+  const version = quads.find(q => q.predicate.value === 'http://www.w3.org/2002/07/owl#versionInfo').object.value
+  if (version !== anchored.version) assert.match(page, new RegExp(`${version.replace(/\./g, '\\.')}.*not anchored`))
+})

@@ -8,6 +8,7 @@
  * request time to the string "--execute" while still dispatching a paid render.
  */
 import { asDecimal, asDateTime, isSafeIri, isSubject, normSha256 } from '../src/rdf-term.mjs'
+import { PROHIBITED_USE_CLASSES } from '../src/policy.mjs'
 
 export const EXIT = Object.freeze({
   OK: 0,
@@ -41,13 +42,35 @@ export class UsageError extends Error {}
 
 const TOKEN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
 
+// The same term patterns src/rdf.mjs writes. Checked while parsing, so a grant
+// that could never be written fails before a consent clip is recorded and paid
+// to transcribe, not after.
+const CAPABILITY = /^[a-z0-9][a-z0-9-]{1,63}$/
+const USE_CLASS = /^[a-z][a-z0-9-]{0,31}$/
+const TERRITORY = /^[A-Z]{2}$/
+
+const splitList = (v, flag) => {
+  const items = v.split(',').map(s => s.trim())
+  if (items.some(i => !TOKEN.test(i))) throw new UsageError(`--${flag} expects a comma-separated list of names, got ${JSON.stringify(v)}`)
+  return items
+}
+const termList = (pattern, what) => (v, flag) => {
+  const items = splitList(v, flag)
+  const bad = items.filter(i => !pattern.test(i))
+  if (bad.length) throw new UsageError(`--${flag} expects ${what}, got ${bad.map(b => JSON.stringify(b)).join(', ')}`)
+  return items
+}
+
 const TYPES = {
   string: v => v,
   bool: () => true,
-  list: (v, flag) => {
-    const items = v.split(',').map(s => s.trim())
-    if (items.some(i => !TOKEN.test(i))) throw new UsageError(`--${flag} expects a comma-separated list of names, got ${JSON.stringify(v)}`)
-    return items
+  list: splitList,
+  capabilities: termList(CAPABILITY, 'lowercase capability names like talking-head'),
+  useClasses: termList(USE_CLASS, 'lowercase use classes like advertising'),
+  territories: termList(TERRITORY, 'ISO 3166-1 alpha-2 country codes in capitals, like GB'),
+  territory: (v, flag) => {
+    if (!TERRITORY.test(v)) throw new UsageError(`--${flag} expects an ISO 3166-1 alpha-2 country code in capitals, like GB, got ${JSON.stringify(v)}`)
+    return v
   },
   decimal: (v, flag) => {
     if (Number.isNaN(asDecimal(v))) throw new UsageError(`--${flag} expects a plain non-negative number like 5 or 4.25, got ${JSON.stringify(v)}`)
@@ -95,7 +118,7 @@ export const COMMANDS = {
   consent: 'capture a consent clip through a phone link and check its spoken scope',
   render: 'resolve grants, decide, and only with --execute dispatch the render',
   revoke: 'revoke a grant, as the grantor that published it',
-  verify: 'check a delivered file from its bytes alone',
+  verify: 'check a delivered file against the grants and derivations recorded on the DKG, by its bytes or hash',
   'blast-radius': 'everything produced under a grant',
   record: 'finish recording a render whose derivation did not commit (lists pending renders without --pending)',
 }
@@ -103,24 +126,25 @@ export const COMMANDS = {
 /** [name, type, commands, help, {required, default}] */
 export const FLAGS = [
   ['help', 'bool', ['*'], 'show help'],
+  ['version', 'bool', ['*'], 'print the version'],
   ['json', 'bool', ['*'], 'print one machine-readable result object'],
 
   ['subject', 'string', ['grant'], 'the depicted person: a name (prefixed with this node\'s address) or a full subject', { required: ['grant'] }],
   ['subject', 'subject', ['render'], 'subject as 0x<grantor address>:<name>', { required: ['render'] }],
-  ['capability', 'list', ['grant', 'consent'], 'Livepeer capabilities the grant permits', { required: ['grant'] }],
+  ['capability', 'capabilities', ['grant', 'consent'], 'Livepeer capabilities the grant permits', { required: ['grant'] }],
   ['capability', 'string', ['render'], 'the Livepeer capability to dispatch', { required: ['render'] }],
-  ['use-class', 'list', ['grant', 'consent'], 'permitted use classes, e.g. advertising', { required: ['grant', 'consent'] }],
+  ['use-class', 'useClasses', ['grant', 'consent'], 'permitted use classes, e.g. advertising', { required: ['grant', 'consent'] }],
   ['use-class', 'string', ['render'], 'the use class of this render', { required: ['render'] }],
-  ['territory', 'list', ['grant', 'consent'], 'ISO country codes the grant covers; omit for unrestricted'],
-  ['territory', 'string', ['render'], 'the ISO country code this render is for'],
-  ['forbid', 'list', ['grant'], 'use classes to forbid explicitly (adult and deceptive impersonation are always forbidden)'],
+  ['territory', 'territories', ['grant', 'consent'], 'ISO country codes the grant covers, in capitals; omit for unrestricted (anywhere)'],
+  ['territory', 'territory', ['render'], 'the ISO country code this render is for, in capitals'],
+  ['forbid', 'useClasses', ['grant'], `use classes to forbid explicitly. These declared labels are always refused, whatever a grant says: ${PROHIBITED_USE_CLASSES.join(', ')} (and any label containing one as a hyphenated word). Only the label is checked, never the prompt or media`],
   ['max-spend', 'decimal', ['grant'], 'lifetime spend ceiling in USD across renders under this grant'],
   ['valid-from', 'iso', ['grant'], 'grant start time (default now)'],
   ['valid-until', 'iso', ['grant'], 'grant end time (default 90 days)'],
   ['with-consent', 'bool', ['grant'], 'capture a consent clip on a phone before granting'],
   ['consent-kind', enumOf(['video', 'audio']), ['grant', 'consent'], 'what the phone link records (default video)'],
-  ['force', 'bool', ['grant'], 'grant even if the spoken consent does not mention every requested term'],
-  ['yes', 'bool', ['grant', 'revoke'], 'publish without the typed confirmation (required when not on a terminal)'],
+  ['force', 'bool', ['grant'], 'grant even if the spoken consent does not mention every requested term. Never overrides a failed transcription, a missing first-person consent or a contradiction; a forced grant is published without the clip hash'],
+  ['yes', 'bool', ['grant', 'revoke'], 'publish without the typed "publish" confirmation (required when not on a terminal). Never skips confirming a consent clip\'s transcript and unchecked terms'],
 
   ['seconds', 'decimal', ['render'], 'expected output duration in seconds; required for a cost estimate on per-second capabilities'],
   ['at', 'iso', ['render'], 'decide as of this time (dry runs only; refused with --execute)'],
@@ -149,6 +173,13 @@ function flagFor(command, name) {
 
 export function parseArgs(argv) {
   const args = [...argv]
+  // Conventional spellings of help and version, which exit 0 like --help.
+  if (args[0] === 'help' || args[0] === '-h') {
+    if (args.length > 2 || (args[1] !== undefined && !COMMANDS[args[1]])) throw new UsageError(`unknown command ${JSON.stringify(args[1])}`)
+    return { command: args[1] ?? null, flags: { help: true } }
+  }
+  if (args.length === 1 && (args[0] === '-v' || args[0] === '--version')) return { command: null, flags: { version: true } }
+  if (args.includes('-h')) args[args.indexOf('-h')] = '--help'
   const command = args[0] && !args[0].startsWith('--') ? args.shift() : null
   if (command && !COMMANDS[command]) throw new UsageError(`unknown command ${JSON.stringify(command)}`)
   const flags = {}
@@ -177,7 +208,7 @@ export function parseArgs(argv) {
     const coerce = typeof type === 'function' ? type : TYPES[type]
     flags[camel(name)] = coerce(value, name)
   }
-  if (command && !flags.help) {
+  if (command && !flags.help && !flags.version) {
     for (const [n, , cmds, , opts] of FLAGS) {
       if (opts?.required?.includes(command) && cmds.includes(command) && flags[camel(n)] === undefined) {
         throw new UsageError(`${command} requires --${n}`)
@@ -199,7 +230,8 @@ export function helpText(command) {
   lines.push(`mandate ${command} — ${COMMANDS[command]}`, '', 'Flags:')
   for (const [n, type, cmds, help, opts] of FLAGS) {
     if (!cmds.includes(command) && !cmds.includes('*')) continue
-    const t = type === 'bool' ? '' : ` <${typeof type === 'function' ? 'value' : type}>`
+    const shown = { capabilities: 'list', useClasses: 'list', territories: 'list', territory: 'code' }
+    const t = type === 'bool' ? '' : ` <${typeof type === 'function' ? 'value' : shown[type] ?? type}>`
     const req = opts?.required?.includes(command) ? ' (required)' : ''
     lines.push(`  --${n}${t}`.padEnd(30) + ` ${help}${req}`)
   }

@@ -12,15 +12,23 @@
  * must be anchored by a confirmed `_meta` record whose UAL derives it, and it
  * must contain exactly the number of triples the anchor declares.
  *
- * Self-declared `mandate:grantor` and `mandate:stateAuthor` values are checked
- * against that publisher; disagreement makes the object a forgery, reported
- * with the graph and UAL it came from.
+ * Self-declared `mandate:grantor` values are checked against that publisher;
+ * disagreement makes the object a forgery, reported with the graph and UAL it
+ * came from. A grantor's own state assertion about its own grant is different:
+ * whatever else is wrong with it, it counts as a revocation (fail-closed), and
+ * its problems are reported alongside it.
+ *
+ * Every forgery carries `trusted`: whether it sits where a trusted party
+ * publishes — a trusted producer's prefix in a derivations graph, or the
+ * prefix of the address owning the grant or subject it claims in a grants
+ * graph. A trusted party's unreadable record is its own record, so the gate
+ * and the verifier must not treat it as if it were not there.
  */
 import * as V from './vocab.mjs'
 import { DKG, PROV_ATTRIBUTED, vmPrefix } from './queries.mjs'
 import {
   parseCell, asIri, asString, asDecimal, asInteger, asDateTime, agentAddress, subjectAddress,
-  isSha256, isSafeIri, normAddress,
+  isSha256, isSafeIri, normAddress, XSD,
 } from './rdf-term.mjs'
 
 const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type'
@@ -164,15 +172,23 @@ export function checkReturnedGraphs({ anchors, contentRows }) {
 /* Objects                                                                     */
 /* ------------------------------------------------------------------------- */
 
-/** Group rows into objects per graph, then per subject. Never merges across Knowledge Assets. */
-export function objectsByGraph(contentRows) {
+/**
+ * Group rows into objects per graph, then per subject. Never merges across
+ * Knowledge Assets.
+ *
+ * An object cell that does not parse is kept as an invalid term, never dropped:
+ * dropping it would turn a present-but-odd `maxSpendUsd` or `state` into a
+ * missing one, which reads as "no ceiling" or "no revocation". Rows whose graph,
+ * subject or predicate cannot be read are returned in `unreadableRows`.
+ */
+export function objectsByGraph(contentRows, unreadableRows = []) {
   const graphs = new Map()
   for (const row of contentRows) {
     const g = asIri(row.g)
     const s = asIri(row.s)
     const p = asIri(row.p)
-    const o = parseCell(row.o)
-    if (!g || !s || !p || !o || o.type === 'invalid') continue
+    const o = parseCell(row.o) ?? { type: 'invalid', value: '' }
+    if (!g || !s || !p) { unreadableRows.push(row); continue }
     if (!graphs.has(g)) graphs.set(g, new Map())
     const subjects = graphs.get(g)
     if (!subjects.has(s)) subjects.set(s, { graph: g, id: s, props: new Map() })
@@ -245,22 +261,56 @@ function buildGrant(obj, anchor) {
   return grant
 }
 
-function buildState(obj, anchor) {
-  const raw = single(obj, V.state, asString)
+/** The one IRI a GrantState names in `stateOf`, or null when that cannot be read. */
+function readStateOf(obj) {
+  const values = obj.props.get(V.stateOf) ?? []
+  return values.length === 1 && values[0].type === 'iri' ? values[0].value : null
+}
+
+/**
+ * A state assertion by the publisher that owns the grant it names.
+ *
+ * Revocation is terminal and fail-closed: the state is "active" only when the
+ * value is exactly the plain string "active" and nothing else about the object
+ * is wrong. Any other value, and any malformed object — an offset-less or
+ * repeated stateAt, a missing or mismatched stateAuthor, a typed or IRI state —
+ * counts as revoked, with its problems listed. The grantor is the only party
+ * who can write here, so a mistake in its own revocation must not un-revoke.
+ */
+function buildState(obj, anchor, stateOf) {
+  const problems = []
+  const one = (predicate, { required = true } = {}) => {
+    const values = obj.props.get(predicate) ?? []
+    if (values.length === 0) { if (required) problems.push(`missing ${localName(predicate)}`); return undefined }
+    if (values.length > 1) { problems.push(`${values.length} values for ${localName(predicate)}`); return undefined }
+    return values[0]
+  }
+  const stateCell = one(V.state)
+  const plain = stateCell?.type === 'literal' && !stateCell.lang && (!stateCell.datatype || stateCell.datatype === `${XSD}string`)
+  if (stateCell && !plain) problems.push('state is not a plain string')
+  const raw = plain ? stateCell.value : null
+  const authorCell = one(V.stateAuthor)
+  const stateAuthor = authorCell?.type === 'iri' ? authorCell.value : null
+  if (authorCell && agentAddress(stateAuthor) !== anchor.publisher) {
+    problems.push(`stateAuthor ${stateAuthor ?? JSON.stringify(String(authorCell.value).slice(0, 80))} does not name ${anchor.publisher}`)
+  }
+  const atCell = one(V.stateAt, { required: false })
+  const stateAt = atCell ? asIso(atCell) : null
+  if (atCell && Number.isNaN(stateAt)) problems.push('invalid stateAt')
   return {
     id: obj.id,
     ual: anchor.ual,
     txHash: anchor.txHash,
     graph: obj.graph,
     publisher: anchor.publisher,
-    stateOf: single(obj, V.stateOf, asIri),
-    // Revocation is terminal and fail-closed: any value other than exactly
-    // "active" counts as revoked, and "active" itself changes nothing.
-    state: raw === 'active' ? 'active' : 'revoked',
-    stateAuthor: single(obj, V.stateAuthor, asIri),
-    stateAt: single(obj, V.stateAt, asIso, { required: false }) ?? null,
+    stateOf,
+    state: raw === 'active' && problems.length === 0 ? 'active' : 'revoked',
+    stateAuthor,
+    stateAt: typeof stateAt === 'string' ? stateAt : null,
     materializedVersion: anchor.materializedVersion,
     tier: 'vm',
+    malformed: problems.length ? true : undefined,
+    problems,
   }
 }
 
@@ -284,12 +334,21 @@ function buildDerivation(obj, anchor, trustedProducers) {
     authorizedUnder,
     jobId: single(obj, V.sessionId, asString, { required: false }) ?? null,
     billedUsd: obj.props.has(V.billedUsd) ? single(obj, V.billedUsd, asDecimal) : null,
-    derivedAt: single(obj, V.derivedAt, asIso, { required: false }) ?? null,
+    // Required: the verifier judges the render against the grant's window, and
+    // a missing date must not read as "inside it".
+    derivedAt: single(obj, V.derivedAt, asIso),
   }
 }
 
+const VM_PATH = /\/_verifiable_memory\/(0x[0-9a-f]{40})\/\d+$/
+
 /**
  * Reduce one context graph's rows to accepted objects and forgeries.
+ *
+ * `unreadable` lists what cannot be judged at all: rows with an unreadable
+ * graph, subject or predicate, objects with an unreadable rdf:type, and state
+ * assertions whose `stateOf` cannot be read. In a read of the grantor's or a
+ * trusted producer's own prefix, any of these makes the read inconsistent.
  *
  * @param {object} o
  * @param {'grants'|'derivations'} o.role
@@ -303,19 +362,43 @@ export function reduceSlice({ role, anchors, contentRows, trustedProducers = [] 
   const derivations = []
   const forgeries = []
   const warnings = []
+  const unreadable = []
   const trusted = trustedProducers.map(normAddress).filter(Boolean)
+  const unreadableRows = []
+  const objects = objectsByGraph(contentRows, unreadableRows)
+  for (const row of unreadableRows) {
+    unreadable.push({ graph: typeof row.g === 'string' ? row.g : null, id: null, ual: anchors.get(asIri(row.g))?.ual ?? null, reason: 'a row with an unreadable graph, subject or predicate' })
+  }
 
-  for (const obj of objectsByGraph(contentRows)) {
+  for (const obj of objects) {
     const anchor = anchors.get(obj.graph)
     const types = typesOf(obj)
+    // Who sits at this path, from the path itself, so an unanchored graph is still placed.
+    const pathPublisher = anchor?.publisher ?? obj.graph.match(VM_PATH)?.[1] ?? null
+    const claims = {
+      subject: claimed(obj, V.subject), stateOf: claimed(obj, V.stateOf),
+      outputSha256: claimed(obj, V.outputSha256).map(v => v.toLowerCase()), authorizedUnder: claimed(obj, V.authorizedUnder),
+      billedUsd: claimed(obj, V.billedUsd),
+    }
+    const isTrusted = () => {
+      if (!pathPublisher) return false
+      if (role === 'derivations') return trusted.includes(pathPublisher)
+      const owners = [
+        ...claims.subject.map(subjectAddress),
+        ...claims.stateOf.map(grantIriAddress),
+        types.includes(V.LikenessGrant) ? grantIriAddress(obj.id) : null,
+      ]
+      return owners.includes(pathPublisher)
+    }
     const report = (kind, detail) => forgeries.push({
       kind, detail, id: obj.id, graph: obj.graph, ual: anchor?.ual ?? null, txHash: anchor?.txHash ?? null,
-      publisher: anchor?.publisher ?? null,
-      claims: {
-        subject: claimed(obj, V.subject), stateOf: claimed(obj, V.stateOf),
-        outputSha256: claimed(obj, V.outputSha256).map(v => v.toLowerCase()), authorizedUnder: claimed(obj, V.authorizedUnder),
-      },
+      publisher: anchor?.publisher ?? null, trusted: isTrusted(), claims,
     })
+    if ((obj.props.get(RDF_TYPE) ?? []).some(t => t.type !== 'iri')) {
+      unreadable.push({ graph: obj.graph, id: obj.id, ual: anchor?.ual ?? null, reason: `${obj.id} has an unreadable rdf:type` })
+      if (anchor) report('malformed', 'unreadable rdf:type')
+      continue
+    }
     if (!types.some(t => t.startsWith(V.NS))) continue
     if (!anchor) { report('unanchored', 'no confirmed anchor for this graph'); continue }
 
@@ -331,15 +414,26 @@ export function reduceSlice({ role, anchors, contentRows, trustedProducers = [] 
         grants.push(g)
       } else if (types.includes(V.GrantState)) {
         if (role !== 'grants') { report('misplaced-state', `a state assertion in a ${role} graph is never accepted`); continue }
-        const s = buildState(obj, anchor)
-        const owner = grantIriAddress(s.stateOf)
+        const stateOf = readStateOf(obj)
+        if (stateOf === null) {
+          unreadable.push({ graph: obj.graph, id: obj.id, ual: anchor.ual, reason: `state ${obj.id} has an unreadable stateOf` })
+          report('malformed', 'unreadable stateOf')
+          continue
+        }
+        const owner = grantIriAddress(stateOf)
         if (!owner) { warnings.push(`ignored ${obj.id} in ${anchor.ual}: refers to a non-current grant id`); continue }
-        if (owner !== s.publisher) { report('state-not-by-grantor', `published by ${s.publisher} for a grant belonging to ${owner}`); continue }
-        if (agentAddress(s.stateAuthor) !== s.publisher) { report('state-author-mismatch', `mandate:stateAuthor names ${s.stateAuthor} but ${s.publisher} published it`); continue }
-        states.push(s)
+        if (owner !== anchor.publisher) { report('state-not-by-grantor', `published by ${anchor.publisher} for a grant belonging to ${owner}`); continue }
+        const st = buildState(obj, anchor, stateOf)
+        if (st.malformed) warnings.push(`state ${obj.id} in ${anchor.ual} is malformed (${st.problems.join('; ')}); it counts as a revocation of ${stateOf}`)
+        states.push(st)
       } else if (types.includes(V.Derivation)) {
         if (role !== 'derivations') { report('misplaced-derivation', `a derivation in a ${role} graph is never accepted`); continue }
-        if (!DERIVATION_IRI.test(obj.id)) { warnings.push(`ignored ${obj.id} in ${anchor.ual}: not a current-format derivation id`); continue }
+        if (!DERIVATION_IRI.test(obj.id)) {
+          // A trusted producer's own record is never only a warning, whatever its id looks like.
+          if (isTrusted()) report('legacy-format', 'not a current-format derivation id')
+          else warnings.push(`ignored ${obj.id} in ${anchor.ual}: not a current-format derivation id`)
+          continue
+        }
         const d = buildDerivation(obj, anchor, trusted)
         if (!d.id.startsWith(`urn:mandate:derivation:${d.outputSha256.slice(0, 16)}:`)) { report('derivation-id-mismatch', 'id does not match outputSha256'); continue }
         derivations.push(d)
@@ -349,5 +443,5 @@ export function reduceSlice({ role, anchors, contentRows, trustedProducers = [] 
       report('malformed', e.message)
     }
   }
-  return { grants, states, derivations, forgeries, warnings }
+  return { grants, states, derivations, forgeries, warnings, unreadable }
 }

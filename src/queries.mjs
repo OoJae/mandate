@@ -5,6 +5,10 @@
  * triples — so the resolver can check each graph against the triple count its
  * on-chain anchor declares. GRAPH ?g stays at the top level: the node's scoped
  * query route rejects GRAPH variables nested inside UNION.
+ *
+ * Prefix and `_meta` reads are ordered and paged (LIMIT/OFFSET), so a publisher
+ * with thousands of Knowledge Assets can still be read in full. Discovery
+ * queries use DISTINCT, so repeating a marker triple does not multiply rows.
  */
 import { assertSafeIri, normAddress, isSha256, literalTerm } from './rdf-term.mjs'
 import * as V from './vocab.mjs'
@@ -34,6 +38,16 @@ export const vmPublisherPrefix = (id, address) => {
 
 const str = s => JSON.stringify(s)
 
+/**
+ * LIMIT one row more than a page holds, so the caller can tell whether another
+ * page follows, and OFFSET past the pages already read.
+ */
+function page(limit, offset) {
+  if (!Number.isSafeInteger(limit) || limit < 1) throw new Error(`invalid query limit: ${limit}`)
+  if (!Number.isSafeInteger(offset) || offset < 0) throw new Error(`invalid query offset: ${offset}`)
+  return ` LIMIT ${limit + 1}${offset ? ` OFFSET ${offset}` : ''}`
+}
+
 const metaPredicates = () => META_PREDICATES.map(p => `<${p}>`).join(', ')
 
 /**
@@ -41,7 +55,7 @@ const metaPredicates = () => META_PREDICATES.map(p => `<${p}>`).join(', ')
  * trusts. With `publisher`, only that address's KAs — so nobody else publishing
  * into an open context graph can grow the read past its limit.
  */
-export function metaQuery(contextGraphId, { limit, publisher }) {
+export function metaQuery(contextGraphId, { limit, publisher, offset = 0 }) {
   const only = publisher === undefined ? '' : (() => {
     const a = normAddress(publisher)
     if (!a) throw new Error(`invalid publisher address: ${publisher}`)
@@ -51,7 +65,7 @@ export function metaQuery(contextGraphId, { limit, publisher }) {
   GRAPH <${cgIri(contextGraphId)}/_meta> { ?s ?p ?o }
   FILTER(STRSTARTS(STR(?s), "did:dkg:"))${only}
   FILTER(?p IN (${metaPredicates()}))
-} LIMIT ${limit + 1}`
+} ORDER BY ?s ?p ?o${page(limit, offset)}`
 }
 
 const UAL_IRI = /^did:dkg:[a-z0-9]+:\d+\/0x[0-9a-fA-F]{40}\/\d+$/
@@ -74,20 +88,24 @@ export function graphCountQuery(prefix) {
 }`
 }
 
-/** Every triple of every Verifiable Memory graph under a prefix. */
-export function prefixContentQuery(prefix, { limit }) {
+/** Every triple of every Verifiable Memory graph under a prefix, one ordered page at a time. */
+export function prefixContentQuery(prefix, { limit, offset = 0 }) {
   return `SELECT ?g ?s ?p ?o WHERE {
   GRAPH ?g { ?s ?p ?o }
   FILTER(STRSTARTS(STR(?g), ${str(prefix)}))
-} LIMIT ${limit + 1}`
+} ORDER BY ?g ?s ?p ?o${page(limit, offset)}`
 }
 
 /**
  * Every triple of each Verifiable Memory graph under `prefix` that contains a
  * matching marker triple. One KA per graph, so this returns whole KAs.
+ *
+ * DISTINCT matters: without it a graph holding k marker triples returns every
+ * triple k times, and a small asset from anyone could push the query past its
+ * row limit.
  */
 function markedContentQuery(prefix, markerPredicate, markerObject, { limit }) {
-  return `SELECT ?g ?s ?p ?o WHERE {
+  return `SELECT DISTINCT ?g ?s ?p ?o WHERE {
   GRAPH ?g { ?m <${markerPredicate}> ${markerObject} . ?s ?p ?o }
   FILTER(STRSTARTS(STR(?g), ${str(prefix)}))
 } LIMIT ${limit + 1}`
@@ -110,16 +128,28 @@ export function derivationsByGrantQuery(prefix, grantId, opts) {
 export function stateSubjectsQuery(contextGraphId, grantIds, { limit }) {
   const ids = [].concat(grantIds)
   if (!ids.length) throw new Error('stateSubjectsQuery needs at least one grant id')
-  return `SELECT ?g ?s ?o ?v WHERE {
+  return `SELECT DISTINCT ?g ?s ?o ?v WHERE {
   GRAPH ?g { ?s <${V.stateOf}> ?o . OPTIONAL { ?s <${V.state}> ?v } }
   FILTER(STRSTARTS(STR(?g), ${str(`${cgIri(contextGraphId)}/`)}))
   FILTER(?o IN (${ids.map(id => `<${assertSafeIri(id, 'grantId')}>`).join(', ')}))
 } LIMIT ${limit + 1}`
 }
 
+/**
+ * One merged-view graph (`<cg>/context/<id>`) of a context graph, if the node
+ * holds any. Live v10.0.16 nodes materialise merged views only for data they
+ * published themselves, so a node without any cannot be expected to show one.
+ */
+export function mergedViewProbeQuery(contextGraphId) {
+  return `SELECT ?g WHERE {
+  GRAPH ?g { ?s ?p ?o }
+  FILTER(STRSTARTS(STR(?g), ${str(`${cgIri(contextGraphId)}/context/`)}))
+} LIMIT 1`
+}
+
 /** Grant-shaped rows for a subject, anywhere in the context graph — for forgery reporting. */
 export function grantSubjectsQuery(contextGraphId, subject, { limit }) {
-  return `SELECT ?g ?s WHERE {
+  return `SELECT DISTINCT ?g ?s WHERE {
   GRAPH ?g { ?s <${V.subject}> ${literalTerm(subject, { field: 'subject' })} }
   FILTER(STRSTARTS(STR(?g), ${str(`${cgIri(contextGraphId)}/`)}))
 } LIMIT ${limit + 1}`

@@ -33,3 +33,21 @@ test('ids and hashes that would break out of an IRI or literal are refused', () 
   assert.throws(() => Q.derivationsBySha256Query(p, 'F'.repeat(64), { limit: 1 }), /sha256/)
   assert.throws(() => Q.metaForUalsQuery(CG, ['did:dkg:base:84532/x> ?p ?o'], { limit: 1 }), /valid UALs/)
 })
+
+test('prefix and _meta reads are ordered and paged, so a large publisher can be read in full', () => {
+  const p = Q.vmPublisherPrefix(CG, ANA)
+  for (const build of [o => Q.prefixContentQuery(p, o), o => Q.metaQuery(CG, { ...o, publisher: ANA })]) {
+    assert.match(build({ limit: 100 }), /ORDER BY \?\w+ \?\w+ \?\w+( \?\w+)? LIMIT 101$/)
+    assert.match(build({ limit: 100, offset: 300 }), /ORDER BY .* LIMIT 101 OFFSET 300$/)
+    assert.throws(() => build({ limit: 100, offset: -1 }), /invalid query offset/)
+    assert.throws(() => build({ limit: 0 }), /invalid query limit/)
+  }
+})
+
+test('discovery queries are DISTINCT, so repeated marker triples cannot multiply rows', () => {
+  const p = Q.vmPrefix(CG)
+  assert.match(Q.derivationsBySha256Query(p, 'a'.repeat(64), { limit: 1 }), /^SELECT DISTINCT \?g \?s \?p \?o/)
+  assert.match(Q.derivationsByGrantQuery(p, `urn:mandate:grant:${ANA}:ana:0000000000000001`, { limit: 1 }), /^SELECT DISTINCT/)
+  assert.match(Q.stateSubjectsQuery(CG, [`urn:mandate:grant:${ANA}:ana:0000000000000001`], { limit: 1 }), /^SELECT DISTINCT \?g \?s \?o \?v/)
+  assert.match(Q.grantSubjectsQuery(CG, `${ANA}:ana`, { limit: 1 }), /^SELECT DISTINCT \?g \?s/)
+})

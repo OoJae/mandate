@@ -53,3 +53,33 @@ test('help is generated from the flag table and lists every exit code', () => {
   for (const [n, , cmds] of FLAGS) if (cmds.includes('render')) assert.match(render, new RegExp(`--${n}\\b`))
   assert.doesNotThrow(() => parseArgs(['render', '--help']))
 })
+
+test('help, -h and --version parse as requests for help or the version, not unknown commands', () => {
+  assert.deepEqual(parseArgs(['help']), { command: null, flags: { help: true } })
+  assert.deepEqual(parseArgs(['help', 'render']), { command: 'render', flags: { help: true } })
+  assert.deepEqual(parseArgs(['-h']), { command: null, flags: { help: true } })
+  assert.equal(parseArgs(['render', '-h']).flags.help, true)
+  assert.equal(parseArgs(['--version']).flags.version, true)
+  assert.throws(() => parseArgs(['help', 'destroy']), /unknown command/)
+})
+
+test('grant terms are checked against the patterns a grant is written with, before anything is captured', () => {
+  const grant = extra => parseArgs(['grant', '--subject', 'ana', '--capability', 'talking-head', '--use-class', 'advertising', ...extra])
+  assert.throws(() => grant(['--territory', 'gb']), /in capitals, like GB/)
+  assert.throws(() => grant(['--territory', 'GBR']), /in capitals/)
+  assert.throws(() => parseArgs(['grant', '--subject', 'ana', '--capability', 'Talking-Head', '--use-class', 'advertising']), /lowercase capability/)
+  assert.throws(() => parseArgs(['grant', '--subject', 'ana', '--capability', 'talking-head', '--use-class', 'Advertising']), /lowercase use classes/)
+  assert.throws(() => grant(['--forbid', 'Political']), /lowercase use classes/)
+  assert.deepEqual(grant(['--territory', 'GB,US']).flags.territory, ['GB', 'US'])
+  assert.throws(() => parseArgs(['consent', '--use-class', 'advertising', '--territory', 'uk']), /in capitals/)
+})
+
+test('help text does not overclaim: verify reads the graph, the deny list is labels only, --force and --yes say what they never skip', () => {
+  assert.doesNotMatch(helpText(), /bytes alone/)
+  assert.match(helpText(), /verify .*recorded on the DKG/)
+  const grant = helpText('grant')
+  for (const label of ['adult', 'sexual', 'nsfw', 'deceptive-impersonation']) assert.match(grant, new RegExp(`\\b${label}\\b`))
+  assert.match(grant, /Only the label is checked/)
+  assert.match(grant, /--force .*Never overrides a failed transcription/)
+  assert.match(grant, /--yes .*Never skips confirming a consent clip/)
+})

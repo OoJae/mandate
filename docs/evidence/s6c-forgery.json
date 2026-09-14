@@ -123,11 +123,12 @@
   ],
   "reads": {
     "producer": {
-      "ms": 9096,
+      "ms": 9546,
       "g1Revoked": true,
       "consistency": {
         "ok": true,
         "reason": null,
+        "reasons": [],
         "attempts": 1
       },
       "grants": [
@@ -144,7 +145,18 @@
       ],
       "forgeries": [
         {
+          "kind": "legacy-format",
+          "trusted": true,
+          "id": "urn:mandate:derivation:48a2c16d22920ce5",
+          "publisher": "0x8eaa4857b22dddbfb5ebc476087fec39336e0cb5",
+          "ual": "did:dkg:base:84532/0x8eaa4857b22dddbfb5ebc476087fec39336e0cb5/1",
+          "txHash": "0x8d9803140b8e2115e7cf5c9d621ceae5eb949f1e5ce9e48b5015139591a1b581",
+          "anchored": null,
+          "detail": "not a current-format derivation id"
+        },
+        {
           "kind": "misplaced-state",
+          "trusted": true,
           "id": "urn:mandate:state:a4fd01c01f7ce0b8",
           "publisher": "0x8eaa4857b22dddbfb5ebc476087fec39336e0cb5",
           "ual": "did:dkg:base:84532/0x8eaa4857b22dddbfb5ebc476087fec39336e0cb5/3",
@@ -154,6 +166,7 @@
         },
         {
           "kind": "misplaced-grant",
+          "trusted": true,
           "id": "urn:mandate:grant:0xed1eeb64cac09874257f05fd6b51a55695ad0b69:ana-s6c:7f61d7c7afd56459",
           "publisher": "0x8eaa4857b22dddbfb5ebc476087fec39336e0cb5",
           "ual": "did:dkg:base:84532/0x8eaa4857b22dddbfb5ebc476087fec39336e0cb5/4",
@@ -163,6 +176,7 @@
         },
         {
           "kind": "misplaced-grant",
+          "trusted": true,
           "id": "urn:mandate:grant:0xed1eeb64cac09874257f05fd6b51a55695ad0b69:ana-s6c:a509f68bf982c495",
           "publisher": "0x8eaa4857b22dddbfb5ebc476087fec39336e0cb5",
           "ual": "did:dkg:base:84532/0x8eaa4857b22dddbfb5ebc476087fec39336e0cb5/6",
@@ -185,11 +199,12 @@
       }
     },
     "grantor": {
-      "ms": 7490,
+      "ms": 9322,
       "g1Revoked": true,
       "consistency": {
         "ok": true,
         "reason": null,
+        "reasons": [],
         "attempts": 1
       },
       "grants": [
@@ -206,7 +221,18 @@
       ],
       "forgeries": [
         {
+          "kind": "legacy-format",
+          "trusted": true,
+          "id": "urn:mandate:derivation:48a2c16d22920ce5",
+          "publisher": "0x8eaa4857b22dddbfb5ebc476087fec39336e0cb5",
+          "ual": "did:dkg:base:84532/0x8eaa4857b22dddbfb5ebc476087fec39336e0cb5/1",
+          "txHash": "0x8d9803140b8e2115e7cf5c9d621ceae5eb949f1e5ce9e48b5015139591a1b581",
+          "anchored": null,
+          "detail": "not a current-format derivation id"
+        },
+        {
           "kind": "misplaced-state",
+          "trusted": true,
           "id": "urn:mandate:state:a4fd01c01f7ce0b8",
           "publisher": "0x8eaa4857b22dddbfb5ebc476087fec39336e0cb5",
           "ual": "did:dkg:base:84532/0x8eaa4857b22dddbfb5ebc476087fec39336e0cb5/3",
@@ -216,6 +242,7 @@
         },
         {
           "kind": "misplaced-grant",
+          "trusted": true,
           "id": "urn:mandate:grant:0xed1eeb64cac09874257f05fd6b51a55695ad0b69:ana-s6c:7f61d7c7afd56459",
           "publisher": "0x8eaa4857b22dddbfb5ebc476087fec39336e0cb5",
           "ual": "did:dkg:base:84532/0x8eaa4857b22dddbfb5ebc476087fec39336e0cb5/4",
@@ -225,6 +252,83 @@
         },
         {
           "kind": "misplaced-grant",
+          "trusted": true,
+          "id": "urn:mandate:grant:0xed1eeb64cac09874257f05fd6b51a55695ad0b69:ana-s6c:a509f68bf982c495",
+          "publisher": "0x8eaa4857b22dddbfb5ebc476087fec39336e0cb5",
+          "ual": "did:dkg:base:84532/0x8eaa4857b22dddbfb5ebc476087fec39336e0cb5/6",
+          "txHash": "0x564112634c5fa49e654c379f80ab339d5e0cdb97c3715760d57492c61a943e0d",
+          "anchored": null,
+          "detail": "a grant in a derivations graph is never accepted"
+        }
+      ],
+      "decisions": {
+        "talkingHead": {
+          "permit": true,
+          "clause": null,
+          "grantId": "urn:mandate:grant:0xed1eeb64cac09874257f05fd6b51a55695ad0b69:ana-s6c:8d37a4205f8391d7"
+        },
+        "faceSwap": {
+          "permit": false,
+          "clause": "capability-permitted",
+          "grantId": "urn:mandate:grant:0xed1eeb64cac09874257f05fd6b51a55695ad0b69:ana-s6c:8d37a4205f8391d7"
+        }
+      }
+    },
+    "verifier": {
+      "ms": 9585,
+      "g1Revoked": true,
+      "consistency": {
+        "ok": true,
+        "reason": null,
+        "reasons": [],
+        "attempts": 1
+      },
+      "grants": [
+        "urn:mandate:grant:0xed1eeb64cac09874257f05fd6b51a55695ad0b69:ana-s6c:f5b751b4b13bb895",
+        "urn:mandate:grant:0xed1eeb64cac09874257f05fd6b51a55695ad0b69:ana-s6c:8d37a4205f8391d7"
+      ],
+      "states": [
+        {
+          "id": "urn:mandate:state:c3b1b6d13dab51f7",
+          "stateOf": "urn:mandate:grant:0xed1eeb64cac09874257f05fd6b51a55695ad0b69:ana-s6c:f5b751b4b13bb895",
+          "publisher": "0xed1eeb64cac09874257f05fd6b51a55695ad0b69",
+          "ual": "did:dkg:base:84532/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/29"
+        }
+      ],
+      "forgeries": [
+        {
+          "kind": "legacy-format",
+          "trusted": true,
+          "id": "urn:mandate:derivation:48a2c16d22920ce5",
+          "publisher": "0x8eaa4857b22dddbfb5ebc476087fec39336e0cb5",
+          "ual": "did:dkg:base:84532/0x8eaa4857b22dddbfb5ebc476087fec39336e0cb5/1",
+          "txHash": "0x8d9803140b8e2115e7cf5c9d621ceae5eb949f1e5ce9e48b5015139591a1b581",
+          "anchored": null,
+          "detail": "not a current-format derivation id"
+        },
+        {
+          "kind": "misplaced-state",
+          "trusted": true,
+          "id": "urn:mandate:state:a4fd01c01f7ce0b8",
+          "publisher": "0x8eaa4857b22dddbfb5ebc476087fec39336e0cb5",
+          "ual": "did:dkg:base:84532/0x8eaa4857b22dddbfb5ebc476087fec39336e0cb5/3",
+          "txHash": "0xaedeab9cf4456c117d851c4fa52e7eb6de2af8bd60bab5f8ef7b013720deebd0",
+          "anchored": null,
+          "detail": "a state assertion in a derivations graph is never accepted"
+        },
+        {
+          "kind": "misplaced-grant",
+          "trusted": true,
+          "id": "urn:mandate:grant:0xed1eeb64cac09874257f05fd6b51a55695ad0b69:ana-s6c:7f61d7c7afd56459",
+          "publisher": "0x8eaa4857b22dddbfb5ebc476087fec39336e0cb5",
+          "ual": "did:dkg:base:84532/0x8eaa4857b22dddbfb5ebc476087fec39336e0cb5/4",
+          "txHash": null,
+          "anchored": null,
+          "detail": "a grant in a derivations graph is never accepted"
+        },
+        {
+          "kind": "misplaced-grant",
+          "trusted": true,
           "id": "urn:mandate:grant:0xed1eeb64cac09874257f05fd6b51a55695ad0b69:ana-s6c:a509f68bf982c495",
           "publisher": "0x8eaa4857b22dddbfb5ebc476087fec39336e0cb5",
           "ual": "did:dkg:base:84532/0x8eaa4857b22dddbfb5ebc476087fec39336e0cb5/6",
@@ -247,5 +351,22 @@
       }
     }
   },
-  "finishedAt": "2026-09-13T15:59:20.557Z"
+  "finishedAt": "2026-09-14T09:41:11.739Z",
+  "readFrom": [
+    {
+      "label": "producer",
+      "name": "mandate-producer",
+      "port": 9202
+    },
+    {
+      "label": "grantor",
+      "name": "mandate-grantor",
+      "port": 9201
+    },
+    {
+      "label": "verifier",
+      "name": "mandate-verifier",
+      "port": 9203
+    }
+  ]
 }

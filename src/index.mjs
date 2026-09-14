@@ -21,7 +21,7 @@ export { grantToQuads, stateToQuads, derivationToQuads, grantToTurtle, stateToTu
 export { verifyKnowledge, blastRadius, CLEAR, TAINTED, UNKNOWN, INCONCLUSIVE } from './verify-core.mjs'
 export { readKnowledge, readPublisher, READ_DEFAULTS } from './resolve.mjs'
 export { anchorsFromMeta, checkConsistency, reduceSlice } from './provenance.mjs'
-export { memoryStateStore, fileStateStore } from './state-store.mjs'
+export { memoryStateStore, fileStateStore, StateReadError } from './state-store.mjs'
 export { makeSubject, subjectAddress, TermError, InvalidIriError, UnpublishableLiteralError } from './rdf-term.mjs'
 export { reconcile } from './derivation.mjs'
 export { checkSpokenScope } from './scope.mjs'

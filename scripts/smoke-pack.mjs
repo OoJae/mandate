@@ -59,18 +59,18 @@ try {
       { stateOf: grant.id, state: 'active', tier: 'vm', publisher: PRODUCER }] }))
     const partial = decide(request, k({ consistency: { ok: false, reason: 'graph omitted' } }))
     const v = verifyKnowledge(k({ derivations: [{ id: 'urn:mandate:derivation:aaaaaaaaaaaaaaaa:0000000000000001',
-      outputSha256: 'a'.repeat(64), servedCapability: 'talking-head', authorizedUnder: grant.id, publisher: PRODUCER, trusted: true }] }),
+      outputSha256: 'a'.repeat(64), servedCapability: 'talking-head', authorizedUnder: grant.id, derivedAt: '2026-09-13T00:00:00Z', publisher: PRODUCER, trusted: true }] }),
       'a'.repeat(64), { now: '2026-09-13T00:00:00Z' })
     const ttl = readFileSync(new URL(import.meta.resolve('mandate-consent/vocab/mandate.ttl')), 'utf8')
     console.log(JSON.stringify({ permit: ok.permit, forgedClause: forged.clause, unrevokedClause: unrevoked.clause,
-      partialClause: partial.clause, verdict: v.verdict, clear: CLEAR, ns: NS, ttlHasNs: ttl.includes(NS) }))
+      partialClause: partial.clause, verdict: v.verdict, verdictReason: v.reason, clear: CLEAR, ns: NS, ttlHasNs: ttl.includes(NS) }))
   `], { cwd: app })
   const r = JSON.parse(core.trim())
   check('core imports with no peers and permits a valid grant', r.permit === true)
   check('core refuses a grant published by anyone but its subject', r.forgedClause === 'grant-exists')
   check('core keeps a revocation against a forged "active"', r.unrevokedClause === 'not-revoked')
   check('core refuses on an incomplete read', r.partialClause === 'read-inconsistent')
-  check('core verifies from bytes', r.verdict === r.clear)
+  check('core verifies from bytes', r.verdict === r.clear, r.verdict === r.clear ? '' : `${r.verdict}: ${r.verdictReason}`)
   check('vocabulary ships under the owned namespace', r.ttlHasNs && r.ns === 'https://oojae.github.io/mandate/ns/v1#')
 
   let help = ''

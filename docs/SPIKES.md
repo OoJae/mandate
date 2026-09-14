@@ -11,12 +11,12 @@ Sections are in the order they were run. Scratch output from the early spikes we
 | Spike | Result | Where |
 |---|---|---|
 | S1 Livepeer capability registry | GREEN | below |
-| S2 Consent capture link | GREEN (link minted; a real upload and transcription run in `demo/full.mjs --consent`) | below |
+| S2 Consent capture link | GREEN for the link only: a link was minted and its page loaded. No real upload or transcription is committed; the phone capture in `demo/full.mjs --consent` is pending | below |
 | S3 DKG v10 install | GREEN | below |
 | S4 Two independent parties | GREEN | below |
 | S5 Testnet anchoring | GREEN after manual funding | "S5 revisited" |
 | S6 Author attestation, S6b forging it from the producer's node | GREEN: the producer's node refuses to seal as the grantor | "S6" |
-| S6c Forgery of graph *content* from the producer's node | GREEN against 0.2.0; 0.1.0 accepted it | "S6c" |
+| S6c Forgery of graph *content* from the producer's node | GREEN against 0.2.0 on the grantor's and producer's nodes. That 0.1.0 would accept the same forgeries is shown by replaying them against 0.1.0's resolver in tests; no live 0.1.0 read of these assets was recorded | "S6c" |
 | S7 Live render | GREEN inline (`sync-lipsync-v3`, 103 s); async worker abandons at ~128 s | "S7" |
 | Graph omission in `/api/query` | reproduced on both nodes; handled by merged, checked reads | "DKG v10.0.16 leaves whole named graphs out" |
 | Read-only verifier node | GREEN, no funded wallet | "A third, read-only verifier node" |
@@ -144,6 +144,14 @@ The grantor's listen port is random (`listenPort: 0`) and is printed in its `dae
 
 ## M1 proven against live DKG data
 
+> **Superseded as evidence, kept as it was run (12 Sep, 0.1.0).** Scenario E below
+> does not show forgery rejection. The forger wrote its **own** DID as
+> `stateAuthor`, the assertion was sealed and shared but never anchored, under the
+> old `mandate.build` namespace, and it was judged by the 0.1.0 resolver, which
+> compared `stateAuthor`. A forger that wrote the grantor's DID would have been
+> accepted, which is what the adversarial study found. The run against 0.2.0 is
+> "S6c" below.
+
 Five scenarios, run end to end against two real DKG v10 testnet daemons. No
 mocks anywhere in this path.
 
@@ -212,11 +220,12 @@ node, passing Ana's address as `authorAgentAddress`:
     is not a registered local agent on this node
 ```
 
-The node will not sign for an agent whose key it does not hold. Two consequences
-worth stating plainly in the README:
+The node will not sign for an agent whose key it does not hold. Two consequences:
 
-1. The "written by the depicted person, not the renderer" claim is enforced by
-   the node, not merely asserted by the schema.
+1. A seal naming the grantor as author cannot be produced from the producer's
+   node. That is all this shows. It does not stop the producer writing a triple
+   that *names* the grantor, which 0.1.0 believed; 0.2.0 attributes every object
+   to the address in its anchored Verifiable Memory path instead (S6c).
 2. It only holds because the grantor runs a **separate daemon**. The red-team
    warning about custodial mode is real — a single node with two registered
    agents would hold both keys, and the claim would collapse. Mandate uses two
@@ -297,14 +306,16 @@ flakiness. Only the single success beat depends on a render completing.
 
 The async path is unusable, but **the inline path works**. `sync-lipsync-v3`
 (`fal-ai/sync-lipsync/v3/image-to-video`, $0.13997/s) completed inline in **103
-seconds** and returned a real MP4. Full loop, no mocks anywhere:
+seconds** and returned a real MP4. The loop below used real services, on 0.1.0, but
+**the render was not gated**: the spike called the capability directly, and the
+derivation edge was written by the spike script afterwards, not by a gate.
 
 1. `flux-schnell` generates a **synthetic** reference portrait (~$0.003)
 2. `inworld-tts` generates the speech
 3. `sync-lipsync-v3` renders the video inline — real MP4, ~$0.84
 4. The derivation edge is committed to the DKG, content-addressed
    `sha256 48a2c16d22920ce5ab051987c435bf5517e80bb7c1f50eb4b1b2e98efdbd9b88`
-5. A third party, given **only the URL**, hashes the bytes and returns
+5. A third party, given the URL and the configured graph ids, hashes the bytes and returns
    **`CLEAR — authorised by did:dkg:agent:0xeD1e…0B69 under urn:mandate:grant:cara-9d2f,
    served by "sync-lipsync-v3"`**
 6. Cara revokes on her own node
@@ -327,8 +338,13 @@ hash.
 
 **A read concurrent with a share can return a partial view.** One render
 transiently saw zero grants and refused with `grant-exists` instead of
-`not-revoked`. This is the correct direction and is now a test: **the gate fails
-closed.** A partial or failed read produces a refusal, never a permit.
+`not-revoked`. That one happened to fail closed. 0.2.0 makes an empty, partial or
+failed read refuse by construction (every graph is checked against its anchor's
+declared triple count and the node's graph count; `test/resolve.test.mjs`). One case
+still permits: a read that is complete but comes from a node that has not yet
+received a later revocation. The freshness check against the chain head catches that
+once the revocation is bound on-chain, and only when the node's admin token lets it
+run.
 
 **Unpriced capabilities report unknown, not zero.** `sync-lipsync-v3` was
 initially missing from the local price table and a refusal claimed `$0.0000`
@@ -400,9 +416,9 @@ After publishing the revocation to VM, polling the producer's own node:
 ```
 
 13s of that is chain confirmation; the rest is durable sync. The sub-two-second
-figure only ever held on a single node. Across two independent parties the honest
-number is **~50–60 seconds**, and the README states it rather than the flattering
-one.
+figure only ever held on a single node. This one run put the window at about 49 s
+after confirmation; the later runs below measured less, so no single figure is
+claimed.
 
 ---
 
@@ -425,9 +441,11 @@ UAL above this section is superseded.
 
 Anchor-to-refusal on the producer's node, stated precisely (these runs used 0.1.0):
 
-- **4 s** in `e2e-dana-5i66`: the first poll after the revocation anchored was
-  already refused, so the true figure is somewhere under 4 s.
-- **27 s** in `e2e-dana-w0io`, under the old `mandate.build` namespace.
+- **At most 4 s after the revoke command returned** in `e2e-dana-5i66` (grant `…/12`,
+  revocation `…/13`): the first poll after that was already refused. The log records
+  it as "4s from revoke command returning".
+- **27 s after the revoke command returned** in `e2e-dana-w0io` (grant `…/10`,
+  revocation `…/11`), under the old `mandate.build` namespace.
 - **About 49 s** in the earlier SWM-versus-VM run above: the refusal came at +62 s
   after the revoke command started, of which about 13 s was chain confirmation. That
   run left no separate log.
@@ -632,15 +650,22 @@ to name the grantor or its subject, and use the grantor's own id format:
 | b | a grant for `ana-s6c`, `grantor` = the grantor's DID, permitting `face-swap-video`, $1000 ceiling | `…0cb5/4` | `0xd18895bd…aa3adf` |
 | c | a grant for `ana-s6c`, `grantor` = the producer, permitting `face-swap-video` | `…0cb5/6` | `0x56411263…a943e0d` |
 
-**Result, from all three nodes** (the verifier was added in Phase 8 and has never
-published anything):
+**Result.** The committed record ([`s6c-forgery.txt`](evidence/s6c-forgery.txt))
+holds reads from all three nodes, re-recorded on 14 Sep with `--reread`. The
+verifier has never published anything.
 
 | Request | Grantor node | Producer node | Verifier node |
 |---|---|---|---|
 | `talking-head` for `ana-s6c` | PERMITTED under G2 only | PERMITTED under G2 only | PERMITTED under G2 only |
 | `face-swap-video` for `ana-s6c` | REFUSED `capability-permitted` | REFUSED `capability-permitted` | REFUSED `capability-permitted` |
 | G1 revoked? | yes, despite (a) | yes, despite (a) | yes, despite (a) |
-| forgeries reported | 3, with UAL and publisher | 3, with UAL and publisher | 3, with UAL and publisher |
+| forgeries reported | 3, with UAL and publisher (plus `legacy-format` `…0cb5/1`, below) | the same | the same |
+
+Under the current resolver the same reads list a fourth rejected record, `…0cb5/1`:
+the producer's own derivation from the 0.1.0 media run, whose id is in the 0.1.0
+format. A trusted producer's record that cannot be read is now a trusted
+`legacy-format` record rather than a warning, so a file it names verifies
+`TAINTED / MALFORMED`. The three forgeries are still rejected.
 
 Three more things this run established:
 
@@ -695,4 +720,4 @@ What it took, for anyone repeating it:
   in about ten minutes.
 
 The verifier then resolved the S6c subject in 16 s with the same verdict as the
-other two nodes (table above).
+other two nodes (table above); that read was observed, not saved.

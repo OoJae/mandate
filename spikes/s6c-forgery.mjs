@@ -4,7 +4,9 @@
  * The adversarial study showed v0.1.0 believed self-declared authors: a
  * producer could write a state naming the grantor and un-revoke a grant, or
  * write a grant naming the grantor and have it permitted. This spike does
- * exactly that on Base Sepolia, then reads the result back from both nodes.
+ * exactly that on Base Sepolia, then reads the result back from every node:
+ * the producer's, the grantor's, and the read-only verifier's when
+ * MANDATE_VERIFIER_PORT is set.
  *
  *   1. The grantor (CLI, its own node) grants G1 and G2 for subject ana-s6c,
  *      and revokes G1.
@@ -15,7 +17,7 @@
  *        c. a grant for ana-s6c naming itself as grantor, in the grants graph
  *      (a) and (c) target the grants graph; if this node cannot write there, the
  *      refusal is recorded and they go to the derivations graph instead.
- *   3. Both nodes resolve the subject. Expected: talking-head PERMITTED under G2
+ *   3. Each node resolves the subject. Expected: talking-head PERMITTED under G2
  *      only, face-swap-video REFUSED, G1 still revoked, and every forgery
  *      reported with its UAL and transaction.
  *
@@ -25,7 +27,7 @@
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { writeFileSync, readFileSync } from 'node:fs'
-import { GRANTOR, PRODUCER, grantsCg, derivationsCg, readConfig } from '../bin/config.mjs'
+import { GRANTOR, PRODUCER, VERIFIER, grantsCg, derivationsCg, readConfig } from '../bin/config.mjs'
 import { readKnowledge } from '../src/resolve.mjs'
 import { decide, revocationOf } from '../src/gate.mjs'
 import { memoryStateStore } from '../src/state-store.mjs'
@@ -70,7 +72,7 @@ const REREAD = process.argv.includes('--reread')
 let g1, g2, r1
 if (REREAD) {
   Object.assign(evidence, JSON.parse(readFileSync('docs/evidence/s6c-forgery.json', 'utf8')), { reads: {} })
-  log.push(...readFileSync('docs/evidence/s6c-forgery.txt', 'utf8').split('\n').filter(l => !/^\s|^$|node, resolved|^wrote|not synced/.test(l)))
+  log.push(...readFileSync('docs/evidence/s6c-forgery.txt', 'utf8').split('\n').filter(l => !/^\s|^$|node, resolved|^wrote|not synced|^re-read at|^read from/.test(l)))
   g1 = { out: evidence.grantor.G1 }
   say(`\nre-read at ${new Date().toISOString()}`)
 }
@@ -136,15 +138,20 @@ for (const p of plans) {
 
 }
 
-/* 3. Both nodes resolve */
+/* 3. Every node resolves, the verifier too when one is configured */
 const cfg = () => ({ ...readConfig(), stateStore: memoryStateStore() })
 const expectForgeries = evidence.forgeries.filter(f => f.attempts.some(a => a.ok)).length
 const summarise = (k, d) => ({
   consistency: k.consistency, grants: k.grants.map(g => g.id), states: k.states.map(s => ({ id: s.id, stateOf: s.stateOf, publisher: s.publisher, ual: s.ual })),
-  forgeries: k.forgeries.map(f => ({ kind: f.kind, id: f.id, publisher: f.publisher, ual: f.ual, txHash: f.txHash, anchored: f.anchored ?? null, detail: f.detail })),
+  forgeries: k.forgeries.map(f => ({ kind: f.kind, trusted: f.trusted ?? null, id: f.id, publisher: f.publisher, ual: f.ual, txHash: f.txHash, anchored: f.anchored ?? null, detail: f.detail })),
   decisions: d,
 })
-for (const [label, node] of [['producer', PRODUCER()], ['grantor', grantorNode]]) {
+const verifierNode = VERIFIER()
+const readers = [['producer', PRODUCER()], ['grantor', grantorNode], ...(verifierNode ? [['verifier', verifierNode]] : [])]
+// Record which nodes were read, so the evidence never claims a node it did not ask.
+evidence.readFrom = readers.map(([label, node]) => ({ label, name: node.name, port: node.port }))
+say(`read from ${evidence.readFrom.map(r => `${r.label} :${r.port}`).join(', ')}${verifierNode ? '' : ' (MANDATE_VERIFIER_PORT is not set, so no verifier node)'}`)
+for (const [label, node] of readers) {
   const t = Date.now()
   let k
   for (;;) {
@@ -162,7 +169,8 @@ for (const [label, node] of [['producer', PRODUCER()], ['grantor', grantorNode]]
   say(`  talking-head     ${d.talkingHead.permit ? `PERMITTED under ${d.talkingHead.grantId}` : `REFUSED ${d.talkingHead.clause}`}`)
   say(`  face-swap-video  ${d.faceSwap.permit ? `PERMITTED under ${d.faceSwap.grantId}` : `REFUSED ${d.faceSwap.clause}`}`)
   say(`  G1 revoked       ${g1Revoked}`)
-  for (const f of k.forgeries) say(`  forgery ${f.kind.padEnd(22)} ${f.publisher}  ${f.ual}  tx ${f.txHash ?? 'unread'}`)
+  if (!k.consistency.ok) say(`  read inconsistent: ${k.consistency.reason}`)
+  for (const f of k.forgeries) say(`  forgery ${f.kind.padEnd(22)} ${f.trusted ? 'trusted ' : ''}${f.publisher}  ${f.ual}  tx ${f.txHash ?? 'unread'}`)
   evidence.reads[label] = { ms: Date.now() - t, g1Revoked, ...summarise(k, {
     talkingHead: { permit: d.talkingHead.permit, clause: d.talkingHead.clause, grantId: d.talkingHead.grantId },
     faceSwap: { permit: d.faceSwap.permit, clause: d.faceSwap.clause, grantId: d.faceSwap.grantId },
@@ -173,4 +181,4 @@ evidence.finishedAt = new Date().toISOString()
 writeFileSync('docs/evidence/s6c-forgery.json', JSON.stringify(evidence, null, 2))
 writeFileSync('docs/evidence/s6c-forgery.txt', log.join('\n') + '\n')
 if (!REREAD) writeFileSync('test/fixtures/live/s6c-producer-writes.json', JSON.stringify(recorded, null, 2))
-say('\nwrote docs/evidence/s6c-forgery.{json,txt} and test/fixtures/live/s6c-producer-writes.json')
+say(`\nwrote docs/evidence/s6c-forgery.{json,txt}${REREAD ? '' : ' and test/fixtures/live/s6c-producer-writes.json'}`)

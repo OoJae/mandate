@@ -1,0 +1,9 @@
+{
+  "note": "get_upload for a capture link that expired with no file, captured before the nemotron-asr run on /api/mcp/raw.",
+  "structuredContent": {
+    "status": "expired",
+    "token": "23db6e65438e3934922a3c17",
+    "human_summary": "That upload link expired — I can make a new one."
+  },
+  "text": "Upload session 23db6e65438e3934922a3c17 expired with no file received. Call request_upload for a fresh link."
+}

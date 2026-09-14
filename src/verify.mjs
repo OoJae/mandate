@@ -20,20 +20,30 @@ import { sha256OfUrl } from './fetch-bytes.mjs'
 export { CLEAR, TAINTED, UNKNOWN, INCONCLUSIVE, verifyKnowledge } from './verify-core.mjs'
 export { FetchBytesError } from './fetch-bytes.mjs'
 
-/** SHA-256 of the bytes behind an http(s) URL, streamed with a size cap and timeout. */
-export async function hashUrl(url, opts) {
-  return (await sha256OfUrl(url, opts)).sha256
+/**
+ * SHA-256 of the bytes behind an http(s) URL, streamed with a size cap and timeout.
+ * `opts` go to sha256OfUrl unchanged: maxBytes, timeoutMs, attempts, fetch.
+ */
+export async function hashUrl(url, opts = {}) {
+  return (await sha256OfUrl(url, opts ?? {})).sha256
 }
 
 /**
- * Verify a delivered file from its bytes alone.
+ * Verify a delivered file from its bytes, the configured grants and derivations
+ * graphs, and the producers this verifier trusts. The file itself carries no
+ * metadata that is believed; everything else comes from those graphs.
  *
  * `node` should be the verifier's own node, not the producer's. `cfg` is the
  * readKnowledge configuration: the grants graph, the derivations graphs, and
  * which producers' edges the verifier believes.
+ *
+ * `mediaUrl` is fetched from wherever it points, redirects included. If it
+ * comes from an uploader, run this where it cannot reach internal services, or
+ * pass `fetchOptions.fetch` that enforces an allow-list (see fetch-bytes.mjs).
+ * `fetchOptions` also sets maxBytes, timeoutMs and attempts.
  */
-export async function verifyMedia(node, cfg, mediaUrl, { now = new Date().toISOString() } = {}) {
-  const sha256 = await hashUrl(mediaUrl)
+export async function verifyMedia(node, cfg, mediaUrl, { now = new Date().toISOString(), fetchOptions = {} } = {}) {
+  const sha256 = await hashUrl(mediaUrl, fetchOptions)
   const k = await readKnowledge(node, cfg, { sha256 })
   return verifyKnowledge(k, sha256, { now })
 }

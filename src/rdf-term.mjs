@@ -26,7 +26,7 @@ const MAX_CELL = 4096
 
 const DECIMAL = /^(0|[1-9]\d*)(\.\d+)?$/
 const INTEGER = /^(0|[1-9]\d*)$/
-const DATETIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d{1,9})?)?(Z|[+-]\d{2}:\d{2})$/
+const DATETIME = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(\.\d{1,9})?)?(?:Z|[+-](\d{2}):(\d{2}))$/
 const ADDRESS = /^0x[0-9a-fA-F]{40}$/
 const AGENT_DID = /^did:dkg:agent:(0x[0-9a-fA-F]{40})$/
 const SUBJECT = /^(0x[0-9a-f]{40}):([a-z0-9][a-z0-9-]{0,62})$/
@@ -121,16 +121,31 @@ function literalLexical(cell, allowedTypes) {
 
 /** Strict non-negative decimal. Anything else — "1e3", "-1", " ", "0x10" — is NaN. */
 export function asDecimal(cell) {
-  let v
-  if (typeof cell === 'number') v = Number.isFinite(cell) && cell >= 0 ? formatDecimal(cell) : null
-  else if (typeof cell === 'string' && DECIMAL.test(cell)) v = cell
-  else v = literalLexical(cell, [`${XSD}decimal`, `${XSD}integer`])
+  // A number is already a value; formatting it first would round a sub-micro amount to 0.
+  if (typeof cell === 'number') return Number.isFinite(cell) && cell >= 0 ? cell : NaN
+  const v = typeof cell === 'string' && DECIMAL.test(cell) ? cell : literalLexical(cell, [`${XSD}decimal`, `${XSD}integer`])
   return v !== null && DECIMAL.test(v) ? Number(v) : NaN
 }
 
-/** Plain positional notation; never exponent form, trailing zeros only trimmed after the point. */
+/**
+ * Plain positional notation with at most six decimal places (whole micro-dollars),
+ * never exponent form, trailing zeros only trimmed after the point.
+ *
+ * A value with more precision is rounded UP, so a positive amount is never
+ * written as 0 and a billed amount is never under-recorded. Deliberate
+ * trade-off: a spend ceiling given with sub-micro precision is raised by less
+ * than one micro-dollar, which the gate cannot see anyway because it compares
+ * whole micro-dollars. Binary noise such as 0.8400000000000001 is not
+ * precision and is not rounded up.
+ */
 function formatDecimal(n) {
   let s = n.toFixed(6)
+  if (!DECIMAL.test(s)) throw new TermError(`${n} is too large to write as a plain decimal`)
+  const shortfall = n - Number(s)
+  if (shortfall > Math.max(1e-12, n * 4 * Number.EPSILON)) {
+    const m = (BigInt(s.replace('.', '')) + 1n).toString().padStart(7, '0')
+    s = `${m.slice(0, -6)}.${m.slice(-6)}`
+  }
   if (s.includes('.')) s = s.replace(/0+$/, '').replace(/\.$/, '')
   return s
 }
@@ -140,10 +155,23 @@ export function asInteger(cell) {
   return v !== null && INTEGER.test(v) ? Number(v) : NaN
 }
 
-/** ISO-8601 with an explicit offset, as epoch milliseconds; otherwise NaN. */
+/**
+ * ISO-8601 with an explicit offset, as epoch milliseconds; otherwise NaN.
+ *
+ * Every field is range-checked. Date.parse rolls impossible dates forward, so
+ * 2026-02-31 would silently become 3 March and a validity window would end on a
+ * day nobody wrote. Hour 24 and leap second 60 are refused too: the writer
+ * never emits them.
+ */
 export function asDateTime(cell) {
   const v = typeof cell === 'string' && !cell.startsWith('"') ? cell : literalLexical(cell, [`${XSD}dateTime`])
-  return v !== null && DATETIME.test(v) ? Date.parse(v) : NaN
+  const m = typeof v === 'string' ? v.match(DATETIME) : null
+  if (!m) return NaN
+  const [year, month, day, hour, minute, second, offH, offM] = [m[1], m[2], m[3], m[4], m[5], m[6] ?? '0', m[8] ?? '0', m[9] ?? '0'].map(Number)
+  const leap = (year % 4 === 0 && year % 100 !== 0) || year % 400 === 0
+  const days = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][month - 1]
+  if (!days || day < 1 || day > days || hour > 23 || minute > 59 || second > 59 || offH > 14 || offM > 59) return NaN
+  return Date.parse(v)
 }
 
 /* ------------------------------------------------------------------------- */
@@ -249,7 +277,7 @@ export function decimalTerm(value, field = 'decimal') {
 export function dateTimeTerm(value, field = 'dateTime') {
   const ms = value instanceof Date ? value.getTime() : asDateTime(String(value))
   if (!Number.isFinite(ms)) {
-    throw new TermError(`${field} must be ISO-8601 with an explicit offset (e.g. 2026-12-31T23:59:00Z), got ${JSON.stringify(value)}`)
+    throw new TermError(`${field} must be a real ISO-8601 date and time with an explicit offset (e.g. 2026-12-31T23:59:00Z), got ${JSON.stringify(value)}`)
   }
   return literalTerm(new Date(ms).toISOString(), { field, datatype: `${XSD}dateTime` })
 }

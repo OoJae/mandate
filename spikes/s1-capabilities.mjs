@@ -5,11 +5,14 @@
  * Connects keyless to the live Livepeer Agent MCP endpoint, enumerates the tool
  * surfaces, and calls describe_capability on every capability in the gated set.
  *
- * Writes spikes/out/s1-*.json as committed fixtures.
+ * Writes spikes/out/s1-report.json. That directory is scratch output and is not
+ * committed (.gitignore); the results are summarised in docs/SPIKES.md.
  */
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
-import { writeFileSync } from 'node:fs'
+import { mkdirSync, writeFileSync } from 'node:fs'
+
+mkdirSync('spikes/out', { recursive: true })
 
 const BASE = 'https://agent.livepeer.org/api/mcp'
 const KEY = process.env.LIVEPEER_AGENT_KEY // optional; keyless demo works without

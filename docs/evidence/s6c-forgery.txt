@@ -8,20 +8,32 @@ G1 revoked in 108616ms  did:dkg:base:84532/0xed1eeb64cac09874257f05fd6b51a55695a
 (c) refused in 0xeD1eeB64CaC09874257F05Fd6B51A55695ad0B69/mandate-grants at share: sharing forgery-c-8665404b845dee95 failed: mandate-producer POST /api/knowledge-assets/forgery-c-8665404b845dee95/swm/share -> 500: A promote prerequisite is te
 (c) anchored in 0x8EaA4857B22dddbfb5ebC476087FEc39336e0CB5/mandate-derivations in 98676ms  did:dkg:base:84532/0x8eaa4857b22dddbfb5ebc476087fec39336e0cb5/6  tx 0x564112634c5fa49e654c379f80ab339d5e0cdb97c3715760d57492c61a943e0d
 
-re-read at 2026-09-13T15:59:03.970Z
+re-read at 2026-09-14T09:40:43.285Z
+read from producer :9202, grantor :9201, verifier :9203
 
-producer node, resolved after 9096ms
+producer node, resolved after 9545ms
   talking-head     PERMITTED under urn:mandate:grant:0xed1eeb64cac09874257f05fd6b51a55695ad0b69:ana-s6c:8d37a4205f8391d7
   face-swap-video  REFUSED capability-permitted
   G1 revoked       true
-  forgery misplaced-state        0x8eaa4857b22dddbfb5ebc476087fec39336e0cb5  did:dkg:base:84532/0x8eaa4857b22dddbfb5ebc476087fec39336e0cb5/3  tx 0xaedeab9cf4456c117d851c4fa52e7eb6de2af8bd60bab5f8ef7b013720deebd0
-  forgery misplaced-grant        0x8eaa4857b22dddbfb5ebc476087fec39336e0cb5  did:dkg:base:84532/0x8eaa4857b22dddbfb5ebc476087fec39336e0cb5/4  tx unread
-  forgery misplaced-grant        0x8eaa4857b22dddbfb5ebc476087fec39336e0cb5  did:dkg:base:84532/0x8eaa4857b22dddbfb5ebc476087fec39336e0cb5/6  tx 0x564112634c5fa49e654c379f80ab339d5e0cdb97c3715760d57492c61a943e0d
+  forgery legacy-format          trusted 0x8eaa4857b22dddbfb5ebc476087fec39336e0cb5  did:dkg:base:84532/0x8eaa4857b22dddbfb5ebc476087fec39336e0cb5/1  tx 0x8d9803140b8e2115e7cf5c9d621ceae5eb949f1e5ce9e48b5015139591a1b581
+  forgery misplaced-state        trusted 0x8eaa4857b22dddbfb5ebc476087fec39336e0cb5  did:dkg:base:84532/0x8eaa4857b22dddbfb5ebc476087fec39336e0cb5/3  tx 0xaedeab9cf4456c117d851c4fa52e7eb6de2af8bd60bab5f8ef7b013720deebd0
+  forgery misplaced-grant        trusted 0x8eaa4857b22dddbfb5ebc476087fec39336e0cb5  did:dkg:base:84532/0x8eaa4857b22dddbfb5ebc476087fec39336e0cb5/4  tx unread
+  forgery misplaced-grant        trusted 0x8eaa4857b22dddbfb5ebc476087fec39336e0cb5  did:dkg:base:84532/0x8eaa4857b22dddbfb5ebc476087fec39336e0cb5/6  tx 0x564112634c5fa49e654c379f80ab339d5e0cdb97c3715760d57492c61a943e0d
 
-grantor node, resolved after 7490ms
+grantor node, resolved after 9321ms
   talking-head     PERMITTED under urn:mandate:grant:0xed1eeb64cac09874257f05fd6b51a55695ad0b69:ana-s6c:8d37a4205f8391d7
   face-swap-video  REFUSED capability-permitted
   G1 revoked       true
-  forgery misplaced-state        0x8eaa4857b22dddbfb5ebc476087fec39336e0cb5  did:dkg:base:84532/0x8eaa4857b22dddbfb5ebc476087fec39336e0cb5/3  tx 0xaedeab9cf4456c117d851c4fa52e7eb6de2af8bd60bab5f8ef7b013720deebd0
-  forgery misplaced-grant        0x8eaa4857b22dddbfb5ebc476087fec39336e0cb5  did:dkg:base:84532/0x8eaa4857b22dddbfb5ebc476087fec39336e0cb5/4  tx unread
-  forgery misplaced-grant        0x8eaa4857b22dddbfb5ebc476087fec39336e0cb5  did:dkg:base:84532/0x8eaa4857b22dddbfb5ebc476087fec39336e0cb5/6  tx 0x564112634c5fa49e654c379f80ab339d5e0cdb97c3715760d57492c61a943e0d
+  forgery legacy-format          trusted 0x8eaa4857b22dddbfb5ebc476087fec39336e0cb5  did:dkg:base:84532/0x8eaa4857b22dddbfb5ebc476087fec39336e0cb5/1  tx 0x8d9803140b8e2115e7cf5c9d621ceae5eb949f1e5ce9e48b5015139591a1b581
+  forgery misplaced-state        trusted 0x8eaa4857b22dddbfb5ebc476087fec39336e0cb5  did:dkg:base:84532/0x8eaa4857b22dddbfb5ebc476087fec39336e0cb5/3  tx 0xaedeab9cf4456c117d851c4fa52e7eb6de2af8bd60bab5f8ef7b013720deebd0
+  forgery misplaced-grant        trusted 0x8eaa4857b22dddbfb5ebc476087fec39336e0cb5  did:dkg:base:84532/0x8eaa4857b22dddbfb5ebc476087fec39336e0cb5/4  tx unread
+  forgery misplaced-grant        trusted 0x8eaa4857b22dddbfb5ebc476087fec39336e0cb5  did:dkg:base:84532/0x8eaa4857b22dddbfb5ebc476087fec39336e0cb5/6  tx 0x564112634c5fa49e654c379f80ab339d5e0cdb97c3715760d57492c61a943e0d
+
+verifier node, resolved after 9584ms
+  talking-head     PERMITTED under urn:mandate:grant:0xed1eeb64cac09874257f05fd6b51a55695ad0b69:ana-s6c:8d37a4205f8391d7
+  face-swap-video  REFUSED capability-permitted
+  G1 revoked       true
+  forgery legacy-format          trusted 0x8eaa4857b22dddbfb5ebc476087fec39336e0cb5  did:dkg:base:84532/0x8eaa4857b22dddbfb5ebc476087fec39336e0cb5/1  tx 0x8d9803140b8e2115e7cf5c9d621ceae5eb949f1e5ce9e48b5015139591a1b581
+  forgery misplaced-state        trusted 0x8eaa4857b22dddbfb5ebc476087fec39336e0cb5  did:dkg:base:84532/0x8eaa4857b22dddbfb5ebc476087fec39336e0cb5/3  tx 0xaedeab9cf4456c117d851c4fa52e7eb6de2af8bd60bab5f8ef7b013720deebd0
+  forgery misplaced-grant        trusted 0x8eaa4857b22dddbfb5ebc476087fec39336e0cb5  did:dkg:base:84532/0x8eaa4857b22dddbfb5ebc476087fec39336e0cb5/4  tx unread
+  forgery misplaced-grant        trusted 0x8eaa4857b22dddbfb5ebc476087fec39336e0cb5  did:dkg:base:84532/0x8eaa4857b22dddbfb5ebc476087fec39336e0cb5/6  tx 0x564112634c5fa49e654c379f80ab339d5e0cdb97c3715760d57492c61a943e0d
