@@ -21,9 +21,25 @@ export class StateReadError extends Error {}
 export class ConfigError extends Error {}
 
 /**
+ * The user's home directory, for the default Mandate home and for every `~`
+ * expansion. os.homedir() hands back HOME exactly as set, so an empty or
+ * relative HOME (`HOME=` in a container or service unit) would make ~/.mandate
+ * a path under the working directory, and a folder someone sent could then
+ * supply the env file, the local state and the pending records. That is a
+ * ConfigError, never a path.
+ */
+export function homeDirectory() {
+  const home = homedir()
+  if (typeof home !== 'string' || !isAbsolute(home)) {
+    throw new ConfigError('HOME is empty or relative; set MANDATE_HOME to an absolute path')
+  }
+  return home
+}
+
+/**
  * A path taken from a setting such as MANDATE_HOME or MANDATE_ENV_FILE, made
  * absolute without looking at the working directory. A leading `~` or `~/` is
- * the user's home directory (a quoted export, or a line in an env file, leaves
+ * the user's home directory (see homeDirectory; a quoted export, or a line in an env file, leaves
  * it unexpanded). Unset or empty gives undefined. Anything still relative after
  * that is a ConfigError: resolving it against the working directory would let
  * whatever folder Mandate is run from (a delivery with its own `~/.mandate/.env`)
@@ -32,7 +48,7 @@ export class ConfigError extends Error {}
 export function absoluteSettingPath(value, name) {
   if (value === undefined || value === null || value === '') return undefined
   const expanded = /^~(?=$|\/)/.test(value) || (sep === '\\' && /^~\\/.test(value))
-    ? homedir() + value.slice(1)
+    ? homeDirectory() + value.slice(1)
     : value
   if (!isAbsolute(expanded)) {
     throw new ConfigError(`${name} must be an absolute path (or start with ~/), got ${JSON.stringify(value)}; a relative path would be read from whatever directory Mandate is run in`)
@@ -42,10 +58,10 @@ export function absoluteSettingPath(value, name) {
 
 /**
  * Mandate's home directory: MANDATE_HOME (see absoluteSettingPath), else
- * ~/.mandate. The env file, local state and pending renders all live under it,
+ * ~/.mandate (see homeDirectory). The env file, local state and pending renders all live under it,
  * so every one of them must use this.
  */
-export const mandateHome = (env = process.env) => absoluteSettingPath(env.MANDATE_HOME, 'MANDATE_HOME') ?? join(homedir(), '.mandate')
+export const mandateHome = (env = process.env) => absoluteSettingPath(env.MANDATE_HOME, 'MANDATE_HOME') ?? join(homeDirectory(), '.mandate')
 
 const empty = () => ({ version: 1, knownUals: {}, revocations: {} })
 

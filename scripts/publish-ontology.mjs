@@ -8,8 +8,13 @@
  *   add --env-path <path> to read settings from that file (default ~/.mandate/.env)
  *
  * Writes the UAL and transaction to docs/evidence/ontology-<version>.json.
+ *
+ * The ontology it reads and the evidence it writes are this repository's,
+ * found from the script's own location: run from any other folder (a delivery
+ * someone sent, holding its own vocab/mandate.ttl), it still publishes Mandate's.
  */
 import { readFileSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { Parser } from 'n3'
 import { GRANTOR, loadScriptEnv } from '../bin/config.mjs'
 import { literalTerm, agentAddress } from '../src/rdf-term.mjs'
@@ -18,8 +23,9 @@ import { txLink } from '../bin/ui.mjs'
 // The CLI's env file; a .env in the working directory is never read.
 loadScriptEnv()
 
+const REPO = join(import.meta.dirname, '..')
 const OWL_VERSION = 'http://www.w3.org/2002/07/owl#versionInfo'
-const ttl = readFileSync('vocab/mandate.ttl', 'utf8')
+const ttl = readFileSync(join(REPO, 'vocab', 'mandate.ttl'), 'utf8')
 const parsed = new Parser().parse(ttl)
 const version = parsed.find(q => q.predicate.value === OWL_VERSION)?.object.value
 if (!version) throw new Error('vocab/mandate.ttl has no owl:versionInfo')
@@ -42,5 +48,5 @@ const name = `mandate-ontology-${version.replace(/\./g, '-')}-${Date.now().toStr
 const t0 = Date.now()
 const r = await grantor.sealShareAnchor({ name, contextGraphId: 'ontology', quads, expectAuthor: author })
 const record = { version, triples: quads.length, name, ual: r.ual, txHash: r.txHash, explorer: txLink(r.ual, r.txHash), merkleRoot: r.merkleRoot, publishedAt: new Date().toISOString(), ms: Date.now() - t0 }
-writeFileSync(`docs/evidence/ontology-${version}.json`, `${JSON.stringify(record, null, 2)}\n`)
+writeFileSync(join(REPO, 'docs', 'evidence', `ontology-${version}.json`), `${JSON.stringify(record, null, 2)}\n`)
 console.log(JSON.stringify(record, null, 2))

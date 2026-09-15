@@ -1171,6 +1171,41 @@ test('a reading followed by a question mark from any script is never confirmed, 
   }
 })
 
+test('strike and overlay marks, private-use and unassigned code points are words of their own that block a reading; accents are still dropped', () => {
+  const req = { capability: ['talking-head'], useClass: ['advertising'], territory: ['GB'], validUntil: '2026-12-13T00:00:00Z', maxSpendUsd: 5 }
+  const script = consentScript(req)
+  const hex = c => [...c].map(x => `U+${x.codePointAt(0).toString(16)}`).join(' ')
+  assert.equal(checkSpokenScope(script, req).confirmed, true)
+  // "consent" struck through, letter by letter or as a whole, or joined by a grapheme joiner.
+  const strike = m => [...'consent'].map(ch => `${ch}${m}`).join('')
+  const variants = [
+    ...['̴', '̵', '̶', '̷', '̸'].map(m => [m, script.replace('consent', strike(m))]),
+    ...['̴', '̵', '̶', '̷', '̸', '͏', '⃒', '⃥'].map(m => [m, script.replace('consent', `consent${m}`)]),
+    ['͏', script.replace('consent', 'con͏sent')],
+  ]
+  // Private use (Co), a noncharacter and a code point no Unicode version assigns (Cn), beside the reading and inside it.
+  for (const c of ['', '\u{f0000}', '\u{10fffd}', '￿', '\u{e0080}', '\u{3fffd}']) {
+    variants.push([c, `${script} ${c}`], [c, `${script}${c}`], [c, script.replace('likeness', `likeness${c}`)], [c, `${c} ${script}`])
+  }
+  for (const [mark, t] of variants) {
+    const r = checkSpokenScope(t, req)
+    assert.equal(r.confirmed, false, `${hex(mark)} in ${JSON.stringify(t)}`)
+    assert.equal(r.scriptMatch.matched, false, `${hex(mark)} in ${JSON.stringify(t)}`)
+    assert.ok(r.scriptMatch.extra.some(w => w.includes(mark)), `${hex(mark)} is a word of its own: ${JSON.stringify(r.scriptMatch.extra)}`)
+  }
+  assert.deepEqual(scriptWords('c̶o̶n'), ['c', '̶', 'o', '̶', 'n'])
+  assert.deepEqual(scriptWords('ab'), ['a', '', 'b'])
+  // Accented letters, precomposed or already decomposed, still read as their plain letters.
+  assert.deepEqual(scriptWords('Côte d’Ivoire, São Tomé, Curaçao, Åland, Việt Nam, Réunion, Zürich, Kraków'), ['cote', 'd', 'ivoire', 'sao', 'tome', 'curacao', 'aland', 'viet', 'nam', 'reunion', 'zurich', 'krakow'])
+  assert.deepEqual(scriptWords('Côte São Tomé Curaçao'), ['cote', 'sao', 'tome', 'curacao'])
+  const places = { capability: ['talking-head'], useClass: ['advertising'], territory: ['CI', 'ST', 'AX', 'RE', 'CW', 'MX'], validUntil: '2026-12-13T00:00:00Z', maxSpendUsd: 5 }
+  const accented = consentScript(places)
+  assert.match(accented, /Côte d’Ivoire/)
+  assert.match(accented, /São Tomé/)
+  assert.equal(checkSpokenScope(accented, places).confirmed, true)
+  assert.equal(checkSpokenScope(accented.normalize('NFD'), places).confirmed, true)
+})
+
 test('punctuation is closed-world: only a short list of harmless marks is dropped, every other one blocks a reading', () => {
   const req = { capability: ['sync-lipsync-v3'], useClass: ['advertising'], territory: ['GB'], validUntil: '2026-12-13T00:00:00Z', maxSpendUsd: 5 }
   const script = consentScript(req)

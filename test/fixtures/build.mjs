@@ -5,6 +5,7 @@
  */
 import { grantToQuads, stateToQuads, derivationToQuads } from '../../src/rdf.mjs'
 import { DKG, PROV_ATTRIBUTED, vmPrefix } from '../../src/queries.mjs'
+import { UNTIL_Z } from './dates.mjs'
 
 export const GRANTS_CG = '0xeD1eeB64CaC09874257F05Fd6B51A55695ad0B69/mandate-grants'
 export const DERIVS_CG = '0x8EaA4857B22dddbfb5ebC476087FEc39336e0CB5/mandate-derivations'
@@ -50,7 +51,7 @@ export const grant = (over = {}) => {
     forbidsUseClass: over.forbidsUseClass ?? ['political'],
     territory: over.territory ?? ['GB'],
     validFrom: over.validFrom ?? '2026-09-01T00:00:00Z',
-    validUntil: over.validUntil ?? '2026-12-01T00:00:00Z',
+    validUntil: over.validUntil ?? UNTIL_Z,
     maxSpendUsd: over.maxSpendUsd === undefined ? 5 : over.maxSpendUsd,
   }
 }

@@ -506,10 +506,21 @@ function numbersToDigits(t) {
   return out
 }
 
+/**
+ * The combining marks dropped after NFKD: exactly the accents that precomposed
+ * letters decompose into (é, ç, å, ã, ệ, ő, ǫ...), so an accented place name
+ * reads as its plain letters. Every other mark stays, and the closed world below
+ * makes it a word of its own that blocks a match: overlays and strikes
+ * (U+0334 to U+0338, as in a struck-through c̶o̶n̶s̶e̶n̶t̶ or consent̸), the grapheme
+ * joiner U+034F, and any mark no precomposed letter uses. U+0338 is in some
+ * decompositions (≠, ≮) but over a letter it strikes the word out, so it stays.
+ */
+const ACCENT_MARKS = /[\u0300-\u030c\u030f\u0311\u0313\u0314\u031b\u0323-\u0328\u032d\u032e\u0330\u0331\u0333\u0342\u0345]/g
+
 /** Words of one piece of speech, in the one canonical form both sides are compared in. */
 export function scriptWords(text) {
   // The Greek question mark folds to ";" under NFKD, so it is read as a question mark first.
-  const s = ` ${String(text ?? '').replace(/\u037e/g, ' ? ').toLowerCase().normalize('NFKD').replace(/[\u0300-\u036f]/g, '')} `
+  const s = ` ${String(text ?? '').replace(/\u037e/g, ' ? ').toLowerCase().normalize('NFKD').replace(ACCENT_MARKS, '')} `
     .replace(/&/g, ' and ')
     // "US$5" is US dollars; a bare "$5" is dollars of no named country.
     .replace(/\b(?:us|usa|u\.s\.a?\.?)\s*\$\s*(\d[\d,]*(?:\.\d+)?)/g, ' $1 usd ')
@@ -534,11 +545,15 @@ export function scriptWords(text) {
     .replace(/[.,;:!'"\u00ab\u00bb\u2018-\u201f\u2039\u203a\u2010-\u2015()[\]-]/g, ' ')
     .replace(/\p{P}/gu, p => ` ${p} `)
     // Closed world: a letter, digit, symbol or mark that did not fold to a-z0-9
-    // (Cyrillic, CJK, Arabic, Devanagari, small capitals, emoji, a cross mark)
-    // is never thrown away. Each run of them is one word, so it is extra and
-    // blocks the match: a refusal in another script cannot sit beside a reading.
-    .replace(/(?:(?![a-z0-9])[\p{L}\p{N}\p{S}\p{M}])+/gu, run => ` ${run} `)
-    .replace(/[^a-z0-9\p{L}\p{N}\p{S}\p{M}\p{P}]+/gu, ' ')
+    // (Cyrillic, CJK, Arabic, Devanagari, small capitals, emoji, a cross mark, a
+    // strike-through overlay), a private-use character (\p{Co}), a code point
+    // this Node's Unicode tables do not assign (\p{Cn}: a newer emoji on an older
+    // Node) or a lone surrogate (\p{Cs}) is never thrown away. Each run of them is
+    // one word, so it is extra and blocks the match: a refusal in another script,
+    // or a character nothing here can read, cannot sit beside a reading. Only
+    // spaces, controls and format characters (\p{Z}, \p{Cc}, \p{Cf}) separate words.
+    .replace(/(?:(?![a-z0-9])[\p{L}\p{N}\p{S}\p{M}\p{Co}\p{Cn}\p{Cs}])+/gu, run => ` ${run} `)
+    .replace(/[^a-z0-9\p{L}\p{N}\p{S}\p{M}\p{P}\p{Co}\p{Cn}\p{Cs}]+/gu, ' ')
   let t = s.trim().split(' ').filter(Boolean)
   t = t.flatMap(w => ({ lipsync: ['lip', 'sync'], lipsyncing: ['lip', 'syncing'], faceswap: ['face', 'swap'], st: ['saint'] })[w] ?? [w])
   t = numbersToDigits(t)

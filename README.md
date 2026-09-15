@@ -366,6 +366,13 @@ locks (`pending/`) all use this one resolved home. `--env-path` is your own comm
 so a relative path there is resolved from the working directory (after the same `~`
 expansion).
 
+The home directory itself must be absolute. Node reads it from `HOME` exactly as set, so
+with `HOME` empty or relative (`HOME=` in a container or a service unit, `HOME=.`) the
+default `~/.mandate`, and every `~` in `MANDATE_HOME`, `MANDATE_ENV_FILE`, `--env-path` or
+a DKG node home, would land under the working directory. That is exit 1 ("HOME is empty
+or relative; set MANDATE_HOME to an absolute path") before the command runs. An absolute
+`MANDATE_HOME` (and an absolute `--env-path`) works whatever `HOME` is.
+
 **A `.env` in the working directory is never read.** A folder someone sent you (a
 delivery holding a video and a `.env`) must not be able to change which producers you
 trust, which graphs you read, where local state lives, or whether the freshness check
@@ -434,6 +441,21 @@ Off a terminal it exits 3 before any link is requested, with or without `--yes`.
 link, because the script never states those and they must be typed; otherwise on a
 terminal with `--json` it needs `--yes` (else exit 1, also before any link).
 
+Everything else that could stop the grant is checked before a link is requested too, so
+no clip is recorded or paid to transcribe for a grant that could not be published: the
+terms, the grants graph, the whole configuration (a missing `MANDATE_DERIVATIONS_CG` is
+exit 1 here, even though a plain grant does not need it), and a consistent read of this
+grantor's anchored grants for the clip-reuse check below (a stale or incomplete read is
+exit 9, `NOT STARTED`). Only the comparison of the clip's hash with those grants waits for
+the clip.
+
+**A grant backed by a clip never starts before the clip.** The script names only the end
+date, so a start in the past would let the clip vouch for renders made before the person
+said anything. A `--valid-from` earlier than now is exit 1 before any link. Without
+`--valid-from` the grant starts when the clip arrives, and a `--valid-from` that was still
+ahead when the command began but passed while the clip was being recorded moves to that
+moment too (with a notice). A grant without `--with-consent` may still start in the past.
+
 **Consent is confirmed automatically only when the transcript is a reading of that
 script.** Both are put in one canonical form first (case, hyphens and a few
 meaningless marks ignored; `lipsync` and `lip-sync`, `U.K.` and `UK`, `13th of December` and
@@ -455,7 +477,12 @@ typographic quotes and apostrophes, hyphens and dashes, parentheses, square brac
 an ellipsis are ignored. Every other punctuation mark (any question mark, `/`, `*`, `%`,
 `@`, `#`, `_`, `{`, `¡`) counts as an extra word, and so does any run of letters, digits or
 symbols that does not fold to a-z or 0-9 (another script, an emoji), so a question or a
-word in another language beside the script blocks the match. The refusal heuristics must also hear an
+word in another language beside the script blocks the match. Accents are dropped only
+where a precomposed letter carries them (`Côte d’Ivoire` reads as `cote d ivoire`); any
+other combining mark is a word of its own, so a word struck through (`c̶o̶n̶s̶e̶n̶t̶`, or
+`consent̸`) or split by a grapheme joiner blocks the match. So does a private-use character
+or a code point the running Node's Unicode tables do not assign (an emoji newer than that
+Node). Only spaces, control and format characters separate words without counting. The refusal heuristics must also hear an
 affirmative first-person consent in it. Anything else is **not confirmed**, however
 consent-like it sounds.
 No list of refusal phrasings is complete, which is why nothing but the script can pass
@@ -486,13 +513,13 @@ What happens next:
   unrestricted territory. A grant confirmed this way is published **without** the clip
   hash; the hash stays in the command's result.
 - **A clip is consent for the capture it was recorded for, never for another grant.**
-  After the transcript check and before any question, the clip's SHA-256 is compared with
-  the `consentClipSha256` of every grant this grantor has anchored in its grants graph (any
-  subject, revoked or not). A match is refused (exit 3, "Record a new clip"), with the
-  grant it already backs in `usedBy`, and nothing is published: a kept recording, or a
-  replay of one, never turns withdrawn consent into a fresh machine-verified grant. When
-  the grants graph cannot be read consistently the check cannot be made, and it is exit 9
-  with nothing published.
+  This grantor's anchored grants are read before the link is requested; after the
+  transcript check and before any question, the clip's SHA-256 is compared with the
+  `consentClipSha256` of every one of them (any subject, revoked or not). A match is
+  refused (exit 3, "Record a new clip"), with the grant it already backs in `usedBy`, and
+  nothing is published: a kept recording, or a replay of one, never turns withdrawn
+  consent into a fresh machine-verified grant. When the grants graph cannot be read
+  consistently the check cannot be made, and it is exit 9 before any link is requested.
 - A clip that never arrives, or a failed transcription, is exit 3, and `--force` never
   overrides it.
 
@@ -584,8 +611,11 @@ decide one at a time.** On one machine (processes sharing one `MANDATE_HOME`):
   VM pause keeps its lease and carries on when resumed, and any other run of that key
   meanwhile exits 5. A lock or lease file that cannot be parsed, or that names another
   host, is taken over only once it is an hour old. Trade-off: a crashed process whose pid
-  has since been reused by a live process leaves its lease (or lock) in place until that
-  process exits or someone removes the file.
+  has since been reused by a live process leaves its lease (or lock) file in place until
+  that process exits or someone removes the file. Once the lease is taken, the lease is
+  what keeps other runs out: a render killed mid-dispatch (Ctrl-C) leaves its record
+  `dispatching` with its pid, and a rerun holding the key's lease resumes it (under the
+  same idempotency key) even if that pid now belongs to an unrelated live process.
 - Every pending record carries a `revision`. A write from a copy of the record loaded
   before another write landed, or from a process that no longer holds the key's lease, is
   refused (exit 5) and writes nothing, so a recorded status or a derivation attempt is never
@@ -710,7 +740,9 @@ consent clip is evidence bound to the grant by SHA-256.
   grants. A re-encoded or trimmed copy has a new hash and is not caught; a clip first used
   for a grant a person confirmed (published without the hash) cannot be matched; and a
   grant published moments ago that the grantor's node has not yet shown in a read could be
-  missed.
+  missed. The grants are read before the link is requested, so a grant anchored while
+  this clip was being recorded and transcribed (another `grant --with-consent` running at
+  the same time with the same file) is not among them.
 - **The deny list is incomplete.** It refuses common honest labels (`undressing`,
   `topless`, `stripper`, `bdsm`, `impostor`, `catfishing`), but `lingerie`, `boudoir`,
   `scam`, `fraud` and `voice-clone` pass today. A grant's `permitsUseClass` list is the

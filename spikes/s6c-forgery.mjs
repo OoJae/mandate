@@ -24,10 +24,14 @@
  *   node spikes/s6c-forgery.mjs            (spends ~6 Base Sepolia publishes)
  *   node spikes/s6c-forgery.mjs --reread   (step 3 only, from the saved evidence)
  *   add --env-path <path> to read settings from that file (default ~/.mandate/.env)
+ *
+ * The CLI it runs and the evidence it reads and writes are this repository's,
+ * found from the script's own location, never from the working directory.
  */
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { writeFileSync, readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { GRANTOR, PRODUCER, VERIFIER, grantsCg, derivationsCg, readConfig, loadScriptEnv } from '../bin/config.mjs'
 import { readKnowledge } from '../src/resolve.mjs'
 import { decide, revocationOf } from '../src/gate.mjs'
@@ -39,6 +43,9 @@ import * as V from '../src/vocab.mjs'
 // The CLI's env file (--env-path, MANDATE_ENV_FILE or ~/.mandate/.env), handed on to every CLI call.
 const envFile = loadScriptEnv()
 const run = promisify(execFile)
+const REPO = join(import.meta.dirname, '..')
+const MANDATE_BIN = join(REPO, 'bin', 'mandate.mjs')
+const EVIDENCE = join(REPO, 'docs', 'evidence')
 const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type'
 const log = []
 const say = (...parts) => { const line = parts.join(' '); log.push(line); console.log(line) }
@@ -47,7 +54,7 @@ const evidence = { startedAt: new Date().toISOString(), grantor: {}, forgeries: 
 async function cli(args) {
   const t = Date.now()
   try {
-    const { stdout } = await run(process.execPath, ['bin/mandate.mjs', ...args, ...(envFile.path ? ['--env-path', envFile.path] : []), '--yes', '--json'], { maxBuffer: 1 << 24 })
+    const { stdout } = await run(process.execPath, [MANDATE_BIN, ...args, ...(envFile.path ? ['--env-path', envFile.path] : []), '--yes', '--json'], { maxBuffer: 1 << 24 })
     return { code: 0, ms: Date.now() - t, out: JSON.parse(stdout) }
   } catch (e) {
     return { code: e.code, ms: Date.now() - t, out: e.stdout ? JSON.parse(e.stdout) : { error: e.message } }
@@ -74,8 +81,8 @@ const SUBJECT = `${ana}:ana-s6c`
 const REREAD = process.argv.includes('--reread')
 let g1, g2, r1
 if (REREAD) {
-  Object.assign(evidence, JSON.parse(readFileSync('docs/evidence/s6c-forgery.json', 'utf8')), { reads: {} })
-  log.push(...readFileSync('docs/evidence/s6c-forgery.txt', 'utf8').split('\n').filter(l => !/^\s|^$|node, resolved|^wrote|not synced|^re-read at|^read from/.test(l)))
+  Object.assign(evidence, JSON.parse(readFileSync(join(EVIDENCE, 's6c-forgery.json'), 'utf8')), { reads: {} })
+  log.push(...readFileSync(join(EVIDENCE, 's6c-forgery.txt'), 'utf8').split('\n').filter(l => !/^\s|^$|node, resolved|^wrote|not synced|^re-read at|^read from/.test(l)))
   g1 = { out: evidence.grantor.G1 }
   say(`\nre-read at ${new Date().toISOString()}`)
 }
@@ -181,7 +188,7 @@ for (const [label, node] of readers) {
 }
 
 evidence.finishedAt = new Date().toISOString()
-writeFileSync('docs/evidence/s6c-forgery.json', JSON.stringify(evidence, null, 2))
-writeFileSync('docs/evidence/s6c-forgery.txt', log.join('\n') + '\n')
-if (!REREAD) writeFileSync('test/fixtures/live/s6c-producer-writes.json', JSON.stringify(recorded, null, 2))
+writeFileSync(join(EVIDENCE, 's6c-forgery.json'), JSON.stringify(evidence, null, 2))
+writeFileSync(join(EVIDENCE, 's6c-forgery.txt'), log.join('\n') + '\n')
+if (!REREAD) writeFileSync(join(REPO, 'test', 'fixtures', 'live', 's6c-producer-writes.json'), JSON.stringify(recorded, null, 2))
 say(`\nwrote docs/evidence/s6c-forgery.{json,txt}${REREAD ? '' : ' and test/fixtures/live/s6c-producer-writes.json'}`)

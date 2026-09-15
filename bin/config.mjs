@@ -24,12 +24,11 @@
  */
 import { existsSync, readFileSync, statSync } from 'node:fs'
 import { parseEnv } from 'node:util'
-import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { DkgNode } from '../src/dkg.mjs'
 import { contextGraphAddress } from '../src/resolve.mjs'
 import { assertContextGraphId } from '../src/queries.mjs'
-import { fileStateStore, ConfigError, absoluteSettingPath, mandateHome } from '../src/state-store.mjs'
+import { fileStateStore, ConfigError, absoluteSettingPath, mandateHome, homeDirectory } from '../src/state-store.mjs'
 import { normAddress } from '../src/rdf-term.mjs'
 
 export const ENV_KEY = /^(MANDATE_[A-Z0-9_]+|LIVEPEER_AGENT_KEY)$/
@@ -61,7 +60,7 @@ export function loadEnvFile(path, env = process.env) {
  * (after the same `~` expansion, for the `--env-path=~/x` form a shell leaves).
  */
 export function envFileLocation({ flag, env = process.env } = {}) {
-  if (typeof flag === 'string' && flag) return { path: resolve(flag.replace(/^~(?=$|\/)/, () => homedir())), source: '--env-path', explicit: true }
+  if (typeof flag === 'string' && flag) return { path: resolve(flag.replace(/^~(?=$|\/)/, () => homeDirectory())), source: '--env-path', explicit: true }
   const named = absoluteSettingPath(env.MANDATE_ENV_FILE, 'MANDATE_ENV_FILE')
   if (named) return { path: named, source: 'MANDATE_ENV_FILE', explicit: true }
   return { path: join(mandateHome(env), '.env'), source: 'MANDATE_HOME', explicit: false }

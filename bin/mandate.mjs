@@ -293,6 +293,12 @@ async function cmdGrant(flags, out, prompter) {
   const validUntil = flags.validUntil ?? new Date(now + 90 * 864e5).toISOString()
   if (Date.parse(validUntil) <= Date.parse(validFrom)) throw new UsageError(`--valid-until ${validUntil} must be after the start ${validFrom}`)
   if (Date.parse(validUntil) <= now) throw new UsageError(`--valid-until ${validUntil} has already passed; the grant could never be used`)
+  // A grant backed by a consent clip never starts before the clip is recorded:
+  // the script names only the end date, so an earlier start would let the clip
+  // hash vouch for renders made before the person said anything.
+  if (flags.withConsent && Date.parse(validFrom) < now) {
+    throw new UsageError(`--valid-from ${validFrom} is in the past; a grant with a consent clip cannot start before the clip is recorded. Leave --valid-from out (the grant then starts when the clip arrives) or give a time from now on`)
+  }
 
   const nonce = nonce16()
   const grant = {
@@ -310,8 +316,10 @@ async function cmdGrant(flags, out, prompter) {
   }
   // Everything that could stop the publish is checked before a consent clip is
   // recorded and paid to transcribe: the terms can be written (a placeholder
-  // stands in for the clip hash), there is a graph to write them to, and the
-  // confirmations this run needs can be given.
+  // stands in for the clip hash), there is a graph to write them to, the start
+  // is not in the past, the confirmations this run needs can be given, and
+  // (below) the configuration and the grants the clip-reuse check compares with
+  // can be read.
   grantToQuads({ ...grant, consentClipSha256: '0'.repeat(64) })
   const cg = grantsCgFor(address)
   // Checked before the --yes rule, so a consent grant off a terminal is always
@@ -336,6 +344,15 @@ async function cmdGrant(flags, out, prompter) {
 
   let consent = null
   let consentSummary = null
+  // The clip-reuse check needs the configured graphs and a consistent read of
+  // this grantor's grants. Both are done now, before a clip is requested or
+  // paid to transcribe; only the hash comparison waits for the clip.
+  const history = flags.withConsent ? await readClipHistory(grantor, subject) : null
+  if (history && history.code !== EXIT.OK) {
+    out.line(c.yellow(`\n  NOT STARTED — ${history.reason}. No clip was requested and nothing was published.\n`))
+    out.result({ granted: false, reason: 'consent clip reuse not checked', detail: history.reason, usedBy: [] })
+    return history.code
+  }
   if (flags.withConsent) {
     await livepeer()
     // The one object both the printed script and the transcript check are built
@@ -351,11 +368,20 @@ async function cmdGrant(flags, out, prompter) {
     // from an earlier grant, revoked or not) is refused, so withdrawn consent is
     // never republished as fresh. Checked against this grantor's anchored grants;
     // a grant confirmed by hand carries no clip hash and cannot be matched.
-    const reuse = await clipAlreadyUsed(grantor, subject, r.consent?.sha256)
+    const reuse = clipAlreadyUsed(history, r.consent?.sha256)
     if (reuse.code !== EXIT.OK) {
       out.line((reuse.code === EXIT.INCONCLUSIVE ? c.yellow : c.red)(`\n  NOT PUBLISHED — ${reuse.reason}. Nothing was published.\n`))
       out.result({ granted: false, reason: reuse.code === EXIT.INCONCLUSIVE ? 'consent clip reuse not checked' : 'consent clip reused', detail: reuse.reason, usedBy: reuse.usedBy, consent: r.summary })
       return reuse.code
+    }
+    // The grant starts no earlier than the clip that backs it (see --valid-from above).
+    const capturedAt = Date.now()
+    if (Date.parse(grant.validFrom) < capturedAt) {
+      if (flags.validFrom !== undefined) out.notice(c.yellow(`\n  --valid-from ${grant.validFrom} passed while the clip was recorded; the grant starts when the clip arrived.`))
+      grant.validFrom = new Date(capturedAt).toISOString()
+    }
+    if (Date.parse(grant.validUntil) <= capturedAt) {
+      throw new UsageError(`--valid-until ${grant.validUntil} passed while the clip was recorded; nothing was published`)
     }
     const questions = consentQuestions(r.consent, grant, r.scriptMatched)
     if (questions.length && (!prompter.possible() || out.json)) {
@@ -418,20 +444,30 @@ async function cmdGrant(flags, out, prompter) {
 }
 
 /**
- * Whether a consent clip already backs a grant this grantor anchored, as
- * { code, reason, usedBy }: OK when it does not, CONSENT_UNCONFIRMED when it
- * does, INCONCLUSIVE when the grants graph could not be read completely (a clip
- * that cannot be shown unused is not published).
+ * This grantor's anchored grants for the clip-reuse check, read before a clip is
+ * requested: { code, reason, grants, states }. INCONCLUSIVE when the graphs
+ * could not be read completely (a clip that cannot be shown unused is not
+ * published, so there is no point recording one). readConfig() is part of it,
+ * so a missing MANDATE_DERIVATIONS_CG stops the grant here too.
  */
-async function clipAlreadyUsed(grantor, subject, sha256) {
+async function readClipHistory(grantor, subject) {
+  const k = await readKnowledge(grantor, readConfig(), { subject })
+  if (!k.consistency.ok) {
+    return { code: EXIT.INCONCLUSIVE, reason: `cannot check whether a consent clip already backs a grant: ${clean(k.consistency.reason, 300)}`, grants: [], states: [] }
+  }
+  return { code: EXIT.OK, reason: null, grants: k.grants, states: k.states }
+}
+
+/**
+ * Whether a consent clip already backs one of the grants in `history` (from
+ * readClipHistory), as { code, reason, usedBy }: OK when it does not,
+ * CONSENT_UNCONFIRMED when it does, INCONCLUSIVE when the clip has no usable hash.
+ */
+function clipAlreadyUsed(history, sha256) {
   if (typeof sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(sha256)) {
     return { code: EXIT.INCONCLUSIVE, reason: 'the consent clip has no usable sha256, so it cannot be checked against earlier grants', usedBy: [] }
   }
-  const k = await readKnowledge(grantor, readConfig(), { subject })
-  if (!k.consistency.ok) {
-    return { code: EXIT.INCONCLUSIVE, reason: `cannot check whether this consent clip already backs a grant: ${clean(k.consistency.reason, 300)}`, usedBy: [] }
-  }
-  const usedBy = k.grants.filter(g => g?.consentClipSha256 === sha256).map(g => ({ id: g.id, subject: g.subject, ual: g.ual ?? null, revoked: revocationOf(g, k.states).revoked === true }))
+  const usedBy = history.grants.filter(g => g?.consentClipSha256 === sha256).map(g => ({ id: g.id, subject: g.subject, ual: g.ual ?? null, revoked: revocationOf(g, history.states).revoked === true }))
   if (!usedBy.length) return { code: EXIT.OK, reason: null, usedBy }
   return {
     code: EXIT.CONSENT_UNCONFIRMED,

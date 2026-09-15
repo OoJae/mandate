@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { judgeRun, exitCodeFor, runMutant, runQueue, parseArgs, parseShard, selectShard } from '../scripts/mutation-check.mjs'
@@ -504,6 +504,29 @@ test('ci: installs run no scripts, and the test and mutation jobs run what they 
   // The sizing comment names roughly the real count.
   const claimed = Number(/# About (\d+) mutants/.exec(ciText)?.[1])
   assert.ok(Math.abs(claimed - total) <= 50, `the ci.yml comment says about ${claimed} mutants; there are ${total}`)
+})
+
+// scripts/mutations.json held this many entries when this was written. Removing a
+// guard's entry has to change this number too, so it shows up as a test edit.
+const MIN_MUTANTS = 638
+
+test('ci: what npm test and npm run test:mutation resolve to is the whole suite and the whole check, on the Node each job names', () => {
+  // The workflows run `npm test` and `npm run test:mutation`; the commands behind them live in package.json.
+  const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
+  assert.equal(pkg.scripts.test, 'node --test test/*.test.mjs')
+  assert.equal(pkg.scripts['test:mutation'], 'node scripts/mutation-check.mjs')
+  // npm runs pre and post scripts around both on its own.
+  for (const name of ['pretest', 'posttest', 'pretest:mutation', 'posttest:mutation']) assert.ok(!(name in pkg.scripts), `package.json has ${name}`)
+  // A repository .npmrc can change how npm runs them (script-shell=true makes every script a no-op).
+  assert.equal(existsSync(new URL('../.npmrc', import.meta.url)), false, 'no .npmrc at the repository root')
+  // Each matrix entry really runs its own Node; the mutation job runs one fixed release.
+  const setupOf = job => job.steps.filter(s => actionOf(s) === 'actions/setup-node')
+  assert.equal(setupOf(ci.jobs.test).length, 1)
+  assert.deepEqual(setupOf(ci.jobs.test)[0].with, { 'node-version': '${{ matrix.node }}' })
+  assert.equal(setupOf(ci.jobs.mutation).length, 1)
+  assert.deepEqual(setupOf(ci.jobs.mutation)[0].with, { 'node-version': '24' })
+  const total = JSON.parse(readFileSync(new URL('../scripts/mutations.json', import.meta.url), 'utf8')).mutants.length
+  assert.ok(total >= MIN_MUTANTS, `scripts/mutations.json has ${total} entries, fewer than the ${MIN_MUTANTS} recorded here`)
 })
 
 // Each action at the commit of the release its comment names, checked against the tags

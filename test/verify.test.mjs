@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { verifyKnowledge, blastRadius, CLEAR, TAINTED, UNKNOWN, INCONCLUSIVE } from '../src/verify-core.mjs'
 import * as V from '../src/vocab.mjs'
 import { ANA, PRODUCER, STRANGER, grant, grantKa, revocationKa, derivation, derivationKa, knowledgeOf } from './fixtures/build.mjs'
+import { UNTIL, UNTIL_DAY, afterUntil } from './fixtures/dates.mjs'
 
 const SHA = 'f'.repeat(64)
 const NOW = '2026-09-12T10:00:00Z'
@@ -74,7 +75,7 @@ test('TAINTED / UNAUTHORISED when the serving capability was never permitted', a
 })
 
 test('TAINTED / EXPIRED once the grant has expired, distinct from revoked', async () => {
-  const r = verifyKnowledge(await knowledgeOf([grantKa(g), edge()]), SHA, { now: '2027-01-01T00:00:00Z' })
+  const r = verifyKnowledge(await knowledgeOf([grantKa(g), edge()]), SHA, { now: afterUntil(31) })
   assert.equal(r.verdict, TAINTED)
   assert.equal(r.subStatus, 'EXPIRED')
 })
@@ -140,7 +141,7 @@ const withGrant = async over => {
 }
 
 test('an unreadable validity date on the grant is TAINTED / MALFORMED', async () => {
-  for (const over of [{ validUntil: 'not-a-date' }, { validUntil: '2026-12-01T00:00:00' }, { validUntil: new Date('2026-12-01T00:00:00Z') },
+  for (const over of [{ validUntil: 'not-a-date' }, { validUntil: `${UNTIL_DAY}T00:00:00` }, { validUntil: new Date(UNTIL) },
     { validUntil: '' }, { validFrom: 'soon' }, { validUntil: '2026-02-31T00:00:00Z' }]) {
     const r = verifyKnowledge(await withGrant(over), SHA, { now: NOW })
     assert.equal(r.verdict, TAINTED, JSON.stringify(over))
@@ -158,7 +159,7 @@ test('a trusted edge with no readable render time is TAINTED / MALFORMED', async
 })
 
 test('TAINTED / UNAUTHORISED when the producer records the render after the grant expired, even if now is inside the window', async () => {
-  const r = verifyKnowledge(await knowledgeOf([grantKa(g), edge({ derivedAt: '2026-12-15T00:00:00Z' })]), SHA, { now: LATER })
+  const r = verifyKnowledge(await knowledgeOf([grantKa(g), edge({ derivedAt: afterUntil(14) })]), SHA, { now: LATER })
   assert.equal(r.verdict, TAINTED)
   assert.equal(r.subStatus, 'UNAUTHORISED')
   assert.match(r.reason, /after grant .* expired/)
@@ -241,7 +242,7 @@ test('rejected and malformed state assertions about a cited grant are reported',
 test('verdict reasons say what EXPIRED and CLEAR do and do not establish', async () => {
   const k = await knowledgeOf([grantKa(g), edge()])
   assert.match(verifyKnowledge(k, SHA, { now: NOW }).reason, /does not check use class, territory, prohibited uses or the spend ceiling/)
-  assert.match(verifyKnowledge(k, SHA, { now: '2027-01-01T00:00:00Z' }).reason, /producer's own claim/)
+  assert.match(verifyKnowledge(k, SHA, { now: afterUntil(31) }).reason, /producer's own claim/)
 })
 
 test('blast radius counts unreadable trusted records and totals exactly', () => {
@@ -286,11 +287,11 @@ test('NOT_YET_VALID when now is before validFrom, even if the producer records a
 })
 
 test('the headline is the most serious sub-status, whichever edge sorts first', async () => {
-  const g2 = grant({ permitsCapability: ['talking-head'], validUntil: '2027-06-01T00:00:00Z' })
+  const g2 = grant({ permitsCapability: ['talking-head'], validUntil: afterUntil(365) })
   const k = await knowledgeOf([grantKa(g), grantKa(g2), revocationKa(g2.id), edge(), edge({ authorizedUnder: g2.id })])
   // UALs set so the EXPIRED edge (under g) sorts before the REVOKED one (under g2).
   const derivations = k.derivations.map(d => ({ ...d, ual: d.authorizedUnder === g.id ? 'did:dkg:base:84532/a/1' : 'did:dkg:base:84532/b/1' }))
-  const r = verifyKnowledge({ ...k, derivations }, SHA, { now: '2027-01-01T00:00:00Z' })
+  const r = verifyKnowledge({ ...k, derivations }, SHA, { now: afterUntil(31) })
   assert.deepEqual(r.judgements.map(j => j.subStatus), ['EXPIRED', 'REVOKED'])
   assert.equal(r.subStatus, 'REVOKED')
   assert.equal(r.grantId, g2.id)

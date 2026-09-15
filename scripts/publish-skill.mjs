@@ -9,10 +9,14 @@
  * exposes; if publish_skill rejects them, its error names the problem. Override
  * with --task a,b --domain a,b --persona a,b --scope episode|epic|story.
  *
+ * The skill body is this repository's skills/likeness-consent.md, found from the
+ * script's own location, never from the working directory.
+ *
  * Refuses to publish without a key: a keyless publish may create a skill no one
  * can later update or delete, since ownership is verified by API key.
  */
 import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { loadScriptEnv } from '../bin/config.mjs'
 
 const arg = (name, def) => {
@@ -40,7 +44,7 @@ const payload = {
   domain: list('domain', 'image,video,audio'),
   persona: list('persona', 'creator'),
   scope: arg('scope', 'episode'),
-  body: readFileSync('skills/likeness-consent.md', 'utf8'),
+  body: readFileSync(join(import.meta.dirname, '..', 'skills', 'likeness-consent.md'), 'utf8'),
   version: '1.0.0',
   author: 'OoJae',
 }

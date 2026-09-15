@@ -56,7 +56,7 @@ jobs:
   mutation:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
-    # About 620 mutants (618 when this was written), split into eleven shards
+    # About 640 mutants (638 when this was written), split into eleven shards
     # that run as parallel jobs, every 11th entry each, so the ~85 mutants that
     # reach the slow cli.test phase (about 70 s each) are spread evenly: about 8
     # in one shard. A local run of 584 took 103 worker-minutes on a 10-core

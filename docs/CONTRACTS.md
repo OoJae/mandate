@@ -389,15 +389,22 @@ claiming the grant; when it is non-zero, `billedUnknown` is true.
   ceiling parts are left out when not requested; a parenthesis in a territory name is not
   spoken.
 - `scriptWords(text)` puts script and transcript in one canonical form: lowercase,
-  accents stripped, `&` to `and`, punctuation and hyphens split; a question mark (`?`,
+  NFKD with only the accents precomposed letters decompose into dropped (`ACCENT_MARKS`:
+  U+0300–U+030C, U+030F, U+0311, U+0313, U+0314, U+031B, U+0323–U+0328, U+032D, U+032E,
+  U+0330, U+0331, U+0333, U+0342, U+0345; not the U+0338 solidus, which strikes a letter
+  out), `&` to `and`, punctuation and hyphens split; a question mark (`?`,
   `¿`, `؟`, `‽`, `⸮`, the Armenian `՞`, Ethiopic `፧`, Limbu, Old Nubian, Vai, Bamum,
   Chakma and Adlam marks, anything NFKD folds to `?`, and the Greek question mark U+037E,
   matched before NFKD folds it to `;`) kept as a word of its own; punctuation is closed
   world too: only `. , ; : ! ' "`, typographic quotes, hyphens and dashes, parentheses and
   brackets are dropped (NFKD turns an ellipsis into dots first), and every other character
   Unicode classes as punctuation (`\p{P}`, for example `/`, `*`, `%`, `@` or a medieval
-  question mark) is a word of its own; every run of letters, digits, symbols or marks that
-  does not fold to a-z0-9 (another script, small capitals, emoji) kept as one word; `lipsync` to `lip sync`,
+  question mark) is a word of its own; every run of letters, digits, symbols, marks
+  (including the overlays and strikes U+0334–U+0338, the grapheme joiner U+034F and any
+  other mark not in `ACCENT_MARKS`), private-use (`\p{Co}`), unassigned (`\p{Cn}`, which
+  depends on the running Node's Unicode version) or lone-surrogate code points that does
+  not fold to a-z0-9 (another script, small capitals, emoji) kept as one word, and only
+  spaces, controls and format characters (`\p{Z}`, `\p{Cc}`, `\p{Cf}`) dropped; `lipsync` to `lip sync`,
   `faceswap` to `face swap`, `St` to `saint`; `U.K.`/`UK` to `united kingdom`,
   `U.S.`/`US`/`USA` to `united states`; ordinals and number words to digits (including
   years said in pairs and "two thousand and twenty six"), except that a number phrase with
@@ -618,6 +625,14 @@ unreadable named file. `s6c` hands the file it loaded to every CLI call with `--
   `ConfigError` (exit 1), because it would be read from whatever directory Mandate runs in.
   `mandateHome(env)` in `src/state-store.mjs` is the one resolver for the state and pending
   directories too. **A `.env` in the working directory is never read.**
+- `homeDirectory()` in `src/state-store.mjs` is the one source of the home directory: the
+  default `~/.mandate` and every `~` expansion (`MANDATE_HOME`, `MANDATE_ENV_FILE`,
+  `--env-path`, a DKG node home in `src/dkg.mjs` and `scripts/nodes.mjs`) go through it.
+  It throws `ConfigError` ("HOME is empty or relative; set MANDATE_HOME to an absolute
+  path", exit 1) unless `os.homedir()` is absolute, since Node returns an empty or relative
+  `HOME` as it is. A DKG node home is expanded when the node is configured (`new
+  DkgNode`), so its `ConfigError` comes before any request rather than as an unreadable
+  token. An absolute `MANDATE_HOME` needs no home directory.
 - `loadMandateEnv` returns (and keeps in `envLoad`) `{ path, source, searched, loaded,
   ignored, warnings }`. An explicit file that is missing, unreadable or not a regular file
   is a `ConfigError` (exit 1); a missing default file is not, and `path` stays `null`. A
@@ -662,6 +677,18 @@ billed; the DKG stages decide exit 6 or 7 only for grants and revocations.
 
 **Consent (grant).**
 
+- Before any link is requested (`request_upload`), `grant --with-consent` checks
+  everything that could stop the publish: the terms serialise, the grants graph is this
+  node's, a `--valid-from` is not in the past (exit 1: a grant with a consent clip cannot
+  start before the clip is recorded), the terminal and `--json` rules, `readConfig()`
+  (so an unset `MANDATE_DERIVATIONS_CG` is exit 1) and a consistent `readKnowledge` of the
+  grantor's grants for the clip-reuse check (`readClipHistory`; an inconsistent read is
+  exit 9, `reason: 'consent clip reuse not checked'`). Only the hash comparison
+  (`clipAlreadyUsed(history, sha256)`) runs after capture.
+- When the clip has arrived, a `validFrom` earlier than that moment (the default, which
+  is the command's start, or a `--valid-from` that passed during capture) is set to it,
+  with a notice when it was given. A `validUntil` that passed during capture is exit 1.
+  A grant without `--with-consent` may start in the past.
 - A transcript that is a reading of the consent script (`scope.confirmed` and
   `scope.scriptMatch.matched`) with nothing contradicted needs no typed answer about its
   words; only what the script never states is typed (`none` for no ceiling, `anywhere`
@@ -679,12 +706,13 @@ billed; the DKG stages decide exit 6 or 7 only for grants and revocations.
   operator types `matches`, `consents`, then each `unchecked` item (the end date as
   `YYYY-MM-DD`, the ceiling or `none`, `anywhere`), and the grant is published **without**
   `consentClipSha256`.
-- A consent clip answers one capture. Before publishing, the grantor's own anchored grants
+- A consent clip answers one capture. Before capture, the grantor's own anchored grants
   are read, and a clip whose SHA-256 already backs one of them, revoked or not and for any
   subject, is exit 3 (`reason: 'consent clip reused'`, `usedBy` naming the grant). If the
-  grants graph cannot be read consistently the grant is exit 9. A clip used for an
-  operator-confirmed grant (published without its hash), or a grant the grantor node has
-  not yet read back, cannot be matched.
+  grants graph cannot be read consistently the grant is exit 9 before capture. A clip used
+  for an operator-confirmed grant (published without its hash), a grant the grantor node
+  has not yet read back, or one anchored after that read (while this clip was being
+  captured), cannot be matched.
 - `--force` only lets unheard terms go on to that typed confirmation. It never overrides
   a failed transcription, a missing affirmative consent or a contradiction.
 - `--yes` skips only the typed "publish" confirmation, never a consent answer. A typed
@@ -810,7 +838,12 @@ mode 0700 and their files 0600, written atomically; `~/.mandate` itself is not c
   is not alive on this machine, or, when the holder cannot be judged (another host, or an
   unparseable file), once the file is older than `UNKNOWN_HOLDER_STALE_MS` (1 hour). A
   crashed holder whose pid has since been reused by a live process leaves the lock until
-  that process exits or the file is removed. Takeover happens only under
+  that process exits or the file is removed. The same pid rule is not applied to a record
+  under a held lease: `beginAttempt` refuses a `dispatching` record whose last attempt is
+  unfinished and whose pid is alive (`inFlight: true`) only while this store does not hold
+  the key's lease. Every render and record of a key holds the lease, so while it is held
+  here no other process is dispatching the key, and a live pid on a crashed attempt is a
+  reused one: the record is resumed. Takeover happens only under
   `<lock>.takeover`, and only if the file still holds what was judged stale; release removes
   it only while it holds the caller's own token. Two machines sharing one `MANDATE_HOME`
   are not protected from each other.

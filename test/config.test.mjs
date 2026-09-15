@@ -131,3 +131,68 @@ test('B7 follow-up: MANDATE_HOME set in the env file is resolved the same way, a
     rmSync(work, { recursive: true, force: true })
   }
 })
+
+test('an empty or relative HOME is a ConfigError for the default home and every ~ expansion, never a path under the working directory', async () => {
+  const { homeDirectory } = await import('../src/state-store.mjs')
+  const { DkgNode } = await import('../src/dkg.mjs')
+  const saved = { HOME: process.env.HOME, MANDATE_HOME: process.env.MANDATE_HOME }
+  const message = /HOME is empty or relative; set MANDATE_HOME to an absolute path/
+  const isConfig = e => e instanceof ConfigError && message.test(e.message)
+  try {
+    for (const bad of ['', '.', 'rel/home']) {
+      process.env.HOME = bad
+      delete process.env.MANDATE_HOME
+      assert.throws(() => homeDirectory(), isConfig, JSON.stringify(bad))
+      assert.throws(() => mandateHome({}), isConfig, JSON.stringify(bad))
+      assert.throws(() => mandateHome(), isConfig, JSON.stringify(bad))
+      assert.throws(() => defaultStateDir(), isConfig, JSON.stringify(bad))
+      assert.throws(() => defaultPendingDir(), isConfig, JSON.stringify(bad))
+      assert.throws(() => envFileLocation({ env: {} }), isConfig, JSON.stringify(bad))
+      // ~ expansion, in a setting, in --env-path and in a DKG node home.
+      assert.throws(() => absoluteSettingPath('~/.mandate', 'MANDATE_HOME'), isConfig, JSON.stringify(bad))
+      assert.throws(() => mandateHome({ MANDATE_HOME: '~/.mandate' }), isConfig, JSON.stringify(bad))
+      assert.throws(() => envFileLocation({ env: { MANDATE_ENV_FILE: '~/a.env' } }), isConfig, JSON.stringify(bad))
+      assert.throws(() => envFileLocation({ flag: '~/f.env', env: {} }), isConfig, JSON.stringify(bad))
+      assert.throws(() => new DkgNode({ port: 1, name: 'x', home: '~/.dkg-mandate-grantor' }).token, isConfig, JSON.stringify(bad))
+      // An absolute MANDATE_HOME (and an absolute --env-path) needs no home directory.
+      process.env.MANDATE_HOME = '/abs/mandate'
+      assert.equal(mandateHome(), '/abs/mandate')
+      assert.equal(defaultStateDir(), join('/abs/mandate', 'state'))
+      assert.equal(defaultPendingDir(), join('/abs/mandate', 'pending'))
+      assert.equal(envFileLocation({ flag: '/abs/f.env', env: {} }).path, '/abs/f.env')
+      process.env.MANDATE_HOME = '~/.mandate'
+      assert.throws(() => defaultStateDir(), isConfig, JSON.stringify(bad))
+    }
+  } finally {
+    for (const [k, v] of Object.entries(saved)) {
+      if (v === undefined) delete process.env[k]
+      else process.env[k] = v
+    }
+  }
+  assert.equal(homeDirectory(), homedir())
+})
+
+test('with HOME empty or relative, the CLI run in a delivery folder exits 1 and never reads its .mandate/.env', async () => {
+  const { work, home, delivery } = world()
+  try {
+    // The planted file where a relative ~/.mandate would land.
+    mkdirSync(join(delivery, '.mandate'), { recursive: true })
+    writeFileSync(join(delivery, '.mandate', '.env'), `MANDATE_GRANTS_CG=${GRANTS}\nMANDATE_DERIVATIONS_CG=${STRANGER}/fake\nMANDATE_TRUSTED_PRODUCERS=${STRANGER}\nMANDATE_CHECK_FRESHNESS=0\n`, { mode: 0o600 })
+    for (const HOME of ['', '.']) {
+      for (const extra of [{}, { MANDATE_HOME: '~/.mandate' }, { MANDATE_ENV_FILE: '~/.mandate/.env' }]) {
+        const label = JSON.stringify({ HOME, ...extra })
+        const r = await run([BIN, 'status'], { cwd: delivery, env: { HOME, ...extra } })
+        assert.equal(r.code, 1, label + r.stdout + r.stderr)
+        assert.match(r.stderr, /HOME is empty or relative; set MANDATE_HOME to an absolute path/, label)
+        assert.doesNotMatch(r.stdout + r.stderr, new RegExp(STRANGER), label)
+        assert.doesNotMatch(r.stdout + r.stderr, /FRESHNESS CHECK OFF/, label)
+      }
+      // An absolute MANDATE_HOME works whatever HOME is.
+      const ok = await run([BIN, 'status', '--json'], { cwd: delivery, env: { HOME, MANDATE_HOME: join(home, '.mandate') } })
+      assert.equal(JSON.parse(ok.stdout).config.mandateHome, join(home, '.mandate'), ok.stderr)
+      assert.doesNotMatch(ok.stdout, new RegExp(STRANGER))
+    }
+  } finally {
+    rmSync(work, { recursive: true, force: true })
+  }
+})

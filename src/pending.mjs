@@ -357,6 +357,11 @@ export function pendingStore(dir = defaultPendingDir(), { isAlive = processAlive
     const held = leases.get(key)
     if (held && readRaw(held.lock) !== held.mine) throw new PendingLeaseLostError(key)
   }
+  /** Whether this store holds the key's lease right now (acquired here and not taken over since). */
+  const holdsLease = key => {
+    const held = leases.get(key)
+    return Boolean(held) && readRaw(held.lock) === held.mine
+  }
   /**
    * Every write bumps `revision`, and load() gives a record without one
    * revision 0. A save whose record carries a revision other than the one on
@@ -445,7 +450,11 @@ export function pendingStore(dir = defaultPendingDir(), { isAlive = processAlive
      *
      * - No record: it is created, with attempt 1.
      * - Submitted with a job id, rendered or recorded: PendingConflictError.
-     * - Dispatching by a live process: PendingConflictError with inFlight.
+     * - Dispatching by a live process: PendingConflictError with inFlight,
+     *   unless this store holds the key's lease. The lease is the exclusion:
+     *   every render and record of a key holds it, so while it is held here no
+     *   other process can be dispatching the key, and a live pid on an
+     *   unfinished attempt is a crashed run's pid reused by something else.
      * - May be billed (sent with no outcome, submitted without a job id, or
      *   mayHaveStarted): resumed. The stored idempotency key is kept, and a
      *   different `record.idempotencyKey` is refused with PendingInvariantError,
@@ -468,7 +477,7 @@ export function pendingStore(dir = defaultPendingDir(), { isAlive = processAlive
           ? existing.attempts
           : [{ n: 1, legacy: true, status: existing.status ?? null, jobId: existing.jobId ?? null, idempotencyKey: existing.idempotencyKey ?? null, mayHaveStarted: mayBeBilled(existing) }]
         const last = attempts.at(-1)
-        if (existing.status === 'dispatching' && last && !last.endedAt && last.pid !== undefined && last.pid !== process.pid && isAlive(last.pid)) {
+        if (existing.status === 'dispatching' && last && !last.endedAt && last.pid !== undefined && last.pid !== process.pid && !holdsLease(record.key) && isAlive(last.pid)) {
           throw new PendingConflictError(existing, { inFlight: true })
         }
         if (existing.status === 'recorded' || existing.status === 'rendered' || (existing.status === 'submitted' && existing.jobId)) {

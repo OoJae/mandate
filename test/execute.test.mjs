@@ -717,6 +717,45 @@ test('a dispatching record is protected: a crashed one is resumed, a live one is
   }
 })
 
+test('while this store holds the lease, a crashed attempt whose pid was reused by a live process does not block resuming', () => {
+  const { dir, store, done } = tmpStore()
+  try {
+    const key = renderKey({ grantId: 'urn:g', capability: 'reused-pid' })
+    // The parent of this test process: alive, and nothing to do with the render.
+    const reused = process.ppid
+    assert.notEqual(reused, process.pid)
+    store.save({ key, idempotencyKey: key, status: 'dispatching', attempts: [{ n: 1, pid: reused, startedAt: '2026-09-14T00:00:00Z', idempotencyKey: key, sentAt: '2026-09-14T00:00:01Z' }] })
+    // Without the lease, the live pid still means another process may be dispatching.
+    assert.throws(() => store.beginAttempt({ key, idempotencyKey: key }), e => e instanceof PendingConflictError && e.inFlight === true)
+    const other = pendingStore(dir)
+    const lease = store.acquireLease(key)
+    try {
+      // Another store (standing in for another process) that does not hold the lease is still refused.
+      assert.throws(() => other.beginAttempt({ key, idempotencyKey: key }), e => e instanceof PendingConflictError && e.inFlight === true)
+      const r = store.beginAttempt({ key, idempotencyKey: key })
+      assert.equal(r.resumed, true)
+      assert.equal(r.record.idempotencyKey, key)
+      assert.equal(r.record.attempts.length, 2)
+      assert.equal(r.record.attempts[1].pid, process.pid)
+    } finally {
+      lease.release()
+    }
+    // A lease taken over by another holder is not held here: the pid check applies again.
+    const key2 = renderKey({ grantId: 'urn:g', capability: 'reused-pid-lost' })
+    store.save({ key: key2, idempotencyKey: key2, status: 'dispatching', attempts: [{ n: 1, pid: reused, startedAt: '2026-09-14T00:00:00Z', idempotencyKey: key2, sentAt: '2026-09-14T00:00:01Z' }] })
+    const lost = store.acquireLease(key2)
+    try {
+      writeFileSync(join(dir, `${key2}.json.lease`), JSON.stringify({ pid: reused, host: 'elsewhere', at: 'now', token: 'theirs' }))
+      // Refused by the live-pid rule itself, before anything is written (not by the lost-lease check on save).
+      assert.throws(() => store.beginAttempt({ key: key2, idempotencyKey: key2 }), e => e.constructor === PendingConflictError && e.inFlight === true && /another mandate process is dispatching it now/.test(e.message))
+    } finally {
+      lost.release()
+    }
+  } finally {
+    done()
+  }
+})
+
 test('a held lock is waited on and then refused; a stale one is cleared', () => {
   let alive = true
   const { dir, store, done } = tmpStore({ isAlive: () => alive })

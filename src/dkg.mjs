@@ -16,6 +16,7 @@ import { join } from 'node:path'
 import { asIri, asString, asInteger, agentAddress } from './rdf-term.mjs'
 import { DKG, PROV_ATTRIBUTED, metaForUalsQuery, vmPrefix } from './queries.mjs'
 import { anchorsFromMeta } from './provenance.mjs'
+import { homeDirectory } from './state-store.mjs'
 
 export class DkgHttpError extends Error {
   constructor(message, { status, path, body } = {}) {
@@ -107,7 +108,7 @@ export class DkgWriteError extends Error {
 }
 DkgWriteError.prototype.name = 'DkgWriteError'
 
-const expandHome = p => p.replace(/^~(?=$|\/)/, process.env.HOME ?? '')
+const expandHome = p => p.replace(/^~(?=$|\/)/, () => homeDirectory())
 
 /** auth.token carries a `#` comment line; strip it. */
 export function readToken(home) {

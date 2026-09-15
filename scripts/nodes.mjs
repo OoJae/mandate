@@ -36,8 +36,9 @@ import { grantsCgs, derivationsCgs, setupCgs, trustedProducers, loadMandateEnv }
 import { anchorsFromMeta } from '../src/provenance.mjs'
 import { metaQuery } from '../src/queries.mjs'
 import { contextGraphAddress } from '../src/resolve.mjs'
+import { homeDirectory } from '../src/state-store.mjs'
 
-const expandHome = p => p.replace(/^~(?=$|\/)/, process.env.HOME ?? '')
+const expandHome = p => p.replace(/^~(?=$|\/)/, () => homeDirectory())
 const DEFAULTS = {
   grantor: { home: '~/.dkg-mandate-grantor', port: 9201, name: 'mandate-grantor' },
   producer: { home: '~/.dkg-mandate-producer', port: 9202, name: 'mandate-producer' },

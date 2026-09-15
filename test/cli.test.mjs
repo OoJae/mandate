@@ -14,6 +14,7 @@ import { renderKey, pendingStore, grantLockPath } from '../src/pending.mjs'
 import { consentScript } from '../src/scope.mjs'
 import { EXIT_HELP } from '../bin/args.mjs'
 import { GRANTS_CG, DERIVS_CG, ANA, PRODUCER, STRANGER, derivation, derivationKa } from './fixtures/build.mjs'
+import { UNTIL, UNTIL_Z, UNTIL_DAY, UNTIL_SPOKEN, DAY_AFTER_UNTIL } from './fixtures/dates.mjs'
 import { redact, waitMs, clearFor, taintedFor, blastLine, cliArgv, nodesArgv, DEMO_ENV_FILE } from '../demo/full.mjs'
 import { cgIri } from '../src/queries.mjs'
 import * as V from '../src/vocab.mjs'
@@ -395,7 +396,7 @@ test('R9: a grant that cannot be published fails before any consent clip is requ
     [consentGrant(), { MANDATE_GRANTS_CG: `${STRANGER}/other` }],
     [consentGrant({ 'valid-until': '2020-01-01T00:00:00Z' }), {}],
     [consentGrant({ 'use-class': 'Advertising' }), {}],
-    [consentGrant({ 'valid-from': '2026-12-02T00:00:00Z', 'valid-until': '2026-12-01T00:00:00Z' }), {}],
+    [consentGrant({ 'valid-from': `${DAY_AFTER_UNTIL}T00:00:00Z`, 'valid-until': UNTIL_Z }), {}],
   ]
   for (const [args, env] of cases) {
     const r = await mandate(args, { lp, tty: true, env })
@@ -405,7 +406,7 @@ test('R9: a grant that cannot be published fails before any consent clip is requ
   assert.equal(publishes(grantor), before)
 })
 
-const until = '2026-12-01T00:00:00.000Z'
+const until = UNTIL
 const scriptFor = (over = {}) => consentScript({ capability: ['talking-head'], useClass: ['advertising'], territory: [], validUntil: until, maxSpendUsd: '5', ...over })
 const lastGrantQuads = () => grantor.calls.findLast(x => x.method === 'POST' && x.path === '/api/knowledge-assets').body.quads
 
@@ -462,7 +463,7 @@ test('D2: a transcript that is not the script needs every typed answer, which --
   const args = over => consentGrant({ subject: 'cara', 'valid-until': until, json: null, ...over })
   // --json on a terminal: the confirmation cannot be asked; exit 3, nothing published, the differences reported.
   // (With a territory: without one, --json stops before capture. The words never name GB, hence --force.)
-  const jsonMode = await mandate(args({ json: true, territory: 'GB', force: true }), { lp, tty: true, input: 'matches\nconsents\n2026-12-01\n5\n' })
+  const jsonMode = await mandate(args({ json: true, territory: 'GB', force: true }), { lp, tty: true, input: `matches\nconsents\n${UNTIL_DAY}\n5\n` })
   assert.equal(jsonMode.code, 3, jsonMode.stderr)
   assert.equal(json(jsonMode).reason, 'consent confirmation impossible')
   assert.equal(json(jsonMode).consent.scope.scriptMatch.matched, false)
@@ -470,21 +471,21 @@ test('D2: a transcript that is not the script needs every typed answer, which --
   assert.match(jsonMode.stderr, /script\s+"I consent to talking head/)
   assert.match(jsonMode.stderr, /missing\s+\S/)
   // The transcript answer alone is wrong; every later answer is right: not confirmed.
-  const noMatch = await mandate(args(), { lp, tty: true, input: 'yes\nconsents\n2026-12-01\n5\nanywhere\n' })
+  const noMatch = await mandate(args(), { lp, tty: true, input: `yes\nconsents\n${UNTIL_DAY}\n5\nanywhere\n` })
   assert.equal(noMatch.code, 3, noMatch.stdout)
   // The meaning answer alone is wrong.
-  const noMeaning = await mandate(args(), { lp, tty: true, input: 'matches\nmatches\n2026-12-01\n5\nanywhere\n' })
+  const noMeaning = await mandate(args(), { lp, tty: true, input: `matches\nmatches\n${UNTIL_DAY}\n5\nanywhere\n` })
   assert.equal(noMeaning.code, 3, noMeaning.stdout)
   // An unchecked term alone is wrong.
-  const noDate = await mandate(args(), { lp, tty: true, input: 'matches\nconsents\n2026-12-02\n5\nanywhere\n' })
+  const noDate = await mandate(args(), { lp, tty: true, input: `matches\nconsents\n${DAY_AFTER_UNTIL}\n5\nanywhere\n` })
   assert.equal(noDate.code, 3, noDate.stdout)
   // No answers at all (end of input): not confirmed.
   assert.equal((await mandate(args(), { lp, tty: true })).code, 3)
   assert.equal(publishes(grantor), before)
 
-  const ok = await mandate(args(), { lp, tty: true, input: 'matches\nconsents\n2026-12-01\n5\nanywhere\n' })
+  const ok = await mandate(args(), { lp, tty: true, input: `matches\nconsents\n${UNTIL_DAY}\n5\nanywhere\n` })
   assert.equal(ok.code, 0, ok.stdout)
-  assert.match(ok.stdout, /NOT CHECKED against the words — valid until 2026-12-01/)
+  assert.match(ok.stdout, new RegExp(`NOT CHECKED against the words — valid until ${UNTIL_DAY}`))
   assert.match(ok.stdout, /spend ceiling \$5/)
   assert.match(ok.stdout, /territory ANYWHERE/)
   assert.match(ok.stdout, /consent clip not attached/)
@@ -868,13 +869,24 @@ test('D3: a crashed legacy dispatching record is resumed under its own key and n
 
   const g2 = await newGrant('vag')
   const key2 = keyFor(g2.id)
-  // Another process that is still alive (this test runner) is dispatching it.
+  // Another process that is still alive (this test runner) is dispatching it, holding the key's lease as every dispatch does.
   store().save({ key: key2, idempotencyKey: key2, status: 'dispatching', createdAt: new Date().toISOString(), capability: 'talking-head', grantId: g2.id, attempts: [{ n: 1, pid: process.pid, startedAt: new Date().toISOString(), sentAt: new Date().toISOString() }] })
-  const live = await mandate(execArgs('vag'), { lp: renderLp('vag') })
-  assert.equal(live.code, 5, live.stdout)
-  assert.equal(json(live).inFlight, true)
-  assert.ok(!live.calls.some(x => x.name.startsWith('run_capability')))
-  store().save({ ...store().load(key2), status: 'recorded' }, { allowResolve: true })
+  const holder = store()
+  const lease = holder.acquireLease(key2)
+  try {
+    const live = await mandate(execArgs('vag'), { lp: renderLp('vag') })
+    assert.equal(live.code, 5, live.stdout)
+    assert.equal(json(live).inFlight, true)
+    assert.ok(!live.calls.some(x => x.name.startsWith('run_capability')))
+  } finally {
+    lease.release()
+  }
+  // With no lease held, the same live pid on the unfinished attempt is a crashed run's pid now
+  // used by an unrelated process: the rerun takes the lease and resumes it under its own key.
+  const resumed = await mandate(execArgs('vag'), { lp: renderLp('vag') })
+  assert.equal(resumed.code, 0, resumed.stdout)
+  assert.deepEqual(resumed.calls.filter(x => x.name === 'run_capability:talking-head').map(x => x.args.idempotency_key), [key2])
+  assert.equal(store().load(key2).status, 'recorded')
 })
 
 test('an unreadable pending record is exit 9 naming the file, not a usage error', async () => {
@@ -1510,9 +1522,9 @@ const sleepMs = ms => new Promise(r => setTimeout(r, ms))
 
 test('B2: a transcript a person must confirm is shown in full, and one too long to review is refused before any question', async () => {
   const tail = 'Actually, please delete this recording and my face, I have reconsidered all of it.'
-  const opening = 'I consent to talking head of my likeness for advertising in the UK until 1 December 2026. Spending is capped at 5 US dollars.'
+  const opening = `I consent to talking head of my likeness for advertising in the UK until ${UNTIL_SPOKEN}. Spending is capped at 5 US dollars.`
   const args = consentGrant({ subject: 'cara', territory: 'GB', 'valid-until': until, json: null })
-  const answers = 'matches\nconsents\n2026-12-01\n5\n'
+  const answers = `matches\nconsents\n${UNTIL_DAY}\n5\n`
   // Over the old 1200-character cut, with a control character and a line break inside: shown whole, the tail before the first question.
   const words = Array.from({ length: 30 }, () => 'pneumonoultramicroscopicsilicovolcanoconiosis').join(' ')
   const long = `${opening} ${words}\n${ESC}[2K ${tail}`
@@ -1880,10 +1892,14 @@ test('B7: the scripts read the same env file, never a working-directory .env, an
   assert.match(nodeFlag.stderr, /--env-path/)
 
   // publish-skill: a dry run that never reads the cwd .env, and reads a named one.
+  // A skills/likeness-consent.md in the working directory is not the body: the repository's is.
   mkdirSync(join(dir, 'skills'))
-  writeFileSync(join(dir, 'skills', 'likeness-consent.md'), readFileSync(join(repo, 'skills', 'likeness-consent.md')))
+  writeFileSync(join(dir, 'skills', 'likeness-consent.md'), 'planted skill body')
   const dry = await run('scripts/publish-skill.mjs', [])
   assert.equal(dry.code, 0, dry.stdout + dry.stderr)
+  const repoBody = readFileSync(join(repo, 'skills', 'likeness-consent.md'), 'utf8')
+  assert.match(dry.stdout, new RegExp(`^body\\s+${repoBody.length} / 20000$`, 'm'))
+  assert.doesNotMatch(dry.stdout, /^body\s+18 \//m)
   assert.match(dry.stdout, /env file: none/)
   assert.doesNotMatch(dry.stdout, /NODE_TLS_REJECT_UNAUTHORIZED/)
   writeFileSync(named, 'NODE_TLS_REJECT_UNAUTHORIZED=0\nMANDATE_READ_MAX=10\n', { mode: 0o600 })
@@ -1910,13 +1926,14 @@ test('B7: the scripts read the same env file, never a working-directory .env, an
 test('B7: publish-ontology and every spike that reads bin/config.mjs load the CLI\'s env file, never a working-directory .env', async () => {
   const dir = mkdtempSync(join(work, 'ontology-env-'))
   const repo = new URL('..', import.meta.url).pathname
+  // A vocab/mandate.ttl in the working directory (a folder someone sent) is never the one published.
   mkdirSync(join(dir, 'vocab'))
-  writeFileSync(join(dir, 'vocab', 'mandate.ttl'), readFileSync(join(repo, 'vocab', 'mandate.ttl')))
+  writeFileSync(join(dir, 'vocab', 'mandate.ttl'), '@prefix owl: <http://www.w3.org/2002/07/owl#> .\n<https://x.test/o> owl:versionInfo "9.9.9" ; <https://x.test/p> "planted" .\n')
   writeFileSync(join(dir, '.env'), 'MANDATE_GRANTOR_PORT=1\n')
   const named = join(dir, 'named.env')
   writeFileSync(named, 'MANDATE_GRANTOR_PORT=2\nNODE_OPTIONS=--require=/nonexistent\n', { mode: 0o600 })
-  const run = args => new Promise(resolve => {
-    const child = spawn(process.execPath, [join(repo, 'scripts', 'publish-ontology.mjs'), ...args], { cwd: dir, env: { PATH: process.env.PATH, HOME: dir } })
+  const run = (args, cwd = dir) => new Promise(resolve => {
+    const child = spawn(process.execPath, [join(repo, 'scripts', 'publish-ontology.mjs'), ...args], { cwd, env: { PATH: process.env.PATH, HOME: dir } })
     let stdout = ''
     let stderr = ''
     child.stdout.on('data', d => { stdout += d })
@@ -1926,6 +1943,11 @@ test('B7: publish-ontology and every spike that reads bin/config.mjs load the CL
   const plain = await run([])
   assert.equal(plain.code, 0, plain.stderr)
   assert.match(plain.stdout, /^env file: none \(looked for .*\.mandate\/\.env\)$/m)
+  const fromRepo = await run([], repo)
+  const vocabLine = fromRepo.stdout.match(/^vocab \d+\.\d+\.\d+: \d+ triples$/m)?.[0]
+  assert.ok(vocabLine, fromRepo.stdout + fromRepo.stderr)
+  assert.ok(plain.stdout.split('\n').includes(vocabLine), `the repository's ontology, not the working directory's: ${plain.stdout}`)
+  assert.doesNotMatch(plain.stdout, /9\.9\.9/)
   const flagged = await run(['--env-path', named])
   assert.equal(flagged.code, 0, flagged.stderr)
   assert.match(flagged.stdout, new RegExp(`^env file: ${named.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'm'))
@@ -1938,7 +1960,15 @@ test('B7: publish-ontology and every spike that reads bin/config.mjs load the CL
     const src = readFileSync(join(repo, f), 'utf8')
     assert.match(src, /^(?:const envFile = )?loadScriptEnv\(\)$/m, f)
   }
-  assert.match(readFileSync(join(repo, 'spikes/s6c-forgery.mjs'), 'utf8'), /\.\.\.\(envFile\.path \? \['--env-path', envFile\.path\] : \[\]\)/)
+  const s6c = readFileSync(join(repo, 'spikes/s6c-forgery.mjs'), 'utf8')
+  assert.match(s6c, /\.\.\.\(envFile\.path \? \['--env-path', envFile\.path\] : \[\]\)/)
+  // The repository scripts find their files from their own location, never the working directory.
+  assert.match(s6c, /^const REPO = join\(import\.meta\.dirname, '\.\.'\)$/m)
+  assert.match(s6c, /run\(process\.execPath, \[MANDATE_BIN, /)
+  for (const f of ['scripts/publish-ontology.mjs', 'scripts/publish-skill.mjs', 'spikes/s6c-forgery.mjs']) {
+    const src = readFileSync(join(repo, f), 'utf8')
+    assert.doesNotMatch(src, /(?:readFileSync|writeFileSync|execFile|run)\(\s*(?:process\.execPath,\s*\[\s*)?[`'"](?!\/)/, f)
+  }
 })
 
 /* A consent clip answers one capture; a suspended or stale pending run never writes over another */
@@ -1970,6 +2000,66 @@ test('consent: the same clip is refused for a new grant from the same grantor, r
   const fresh = await mandate(consentGrant({ subject: 'rep', territory: 'GB', 'valid-until': until }), { lp: consentLp(scriptFor({ territory: ['GB'] }), { tag: 'new-recording' }), tty: true })
   assert.equal(fresh.code, 0, fresh.stdout)
   assert.notEqual(json(fresh).grant.consentClipSha256, first.grant.consentClipSha256)
+})
+
+test('consent: a grant backed by a clip never starts before the clip; a past --valid-from is refused before anything is requested', async () => {
+  const before = publishes(grantor)
+  const lp = consentLp(scriptFor({ territory: ['GB'] }))
+  for (const from of ['2020-01-01T00:00:00Z', new Date(Date.now() - 60_000).toISOString()]) {
+    const r = await mandate(consentGrant({ subject: 'bea', territory: 'GB', 'valid-until': until, 'valid-from': from }), { lp, tty: true })
+    assert.equal(r.code, 1, r.stdout + r.stderr)
+    assert.match(json(r).error, /--valid-from \S+ is in the past; a grant with a consent clip cannot start before the clip is recorded/)
+    assert.deepEqual(r.calls, [], from)
+  }
+  assert.equal(publishes(grantor), before)
+  // Without --valid-from, the grant starts when the clip arrived, not when the command started.
+  const started = Date.now()
+  const ok = await mandate(consentGrant({ subject: 'bea', territory: 'GB', 'valid-until': until }), { lp: consentLp(scriptFor({ territory: ['GB'] })), tty: true })
+  assert.equal(ok.code, 0, ok.stdout + ok.stderr)
+  assert.equal(json(ok).consent.confirmedBy, 'script')
+  assert.ok(Date.parse(json(ok).grant.validFrom) >= started, json(ok).grant.validFrom)
+  // A start that was still ahead when the command began but passed while the clip was recorded moves to the clip's arrival.
+  const soon = new Date(Date.now() + 4000).toISOString()
+  const slow = { ...consentLp(scriptFor({ territory: ['GB'] })) }
+  slow.get_upload = { ...slow.get_upload, delayMs: 6000 }
+  const moved = await mandate(consentGrant({ subject: 'bea', territory: 'GB', 'valid-until': until, 'valid-from': soon }), { lp: slow, tty: true })
+  assert.equal(moved.code, 0, moved.stdout + moved.stderr)
+  assert.ok(Date.parse(json(moved).grant.validFrom) > Date.parse(soon), `${json(moved).grant.validFrom} is after ${soon}`)
+  assert.match(moved.stderr, /passed while the clip was recorded; the grant starts when the clip arrived/)
+  // A future start is kept as given.
+  const later = new Date(Date.now() + 864e5).toISOString()
+  const future = await mandate(consentGrant({ subject: 'bea', territory: 'GB', 'valid-until': until, 'valid-from': later }), { lp: consentLp(scriptFor({ territory: ['GB'] })), tty: true })
+  assert.equal(future.code, 0, future.stdout + future.stderr)
+  assert.equal(json(future).grant.validFrom, later)
+  // A plain grant (no clip) may still start in the past.
+  const plain = await mandate(grantArgs({ subject: 'bea', 'valid-from': '2020-01-01T00:00:00Z', 'valid-until': until }))
+  assert.equal(plain.code, 0, plain.stdout + plain.stderr)
+})
+
+test('consent: the configuration and the grants the clip-reuse check reads are checked before a clip is requested', async () => {
+  const before = publishes(grantor)
+  const lp = consentLp(scriptFor({ territory: ['GB'] }))
+  // No derivations graph configured: exit 1, no request_upload, nothing transcribed or published.
+  const noDerivs = await mandate(consentGrant({ subject: 'bea', territory: 'GB', 'valid-until': until }), { lp, tty: true, env: { MANDATE_DERIVATIONS_CG: undefined } })
+  assert.equal(noDerivs.code, 1, noDerivs.stdout + noDerivs.stderr)
+  assert.match(json(noDerivs).error, /MANDATE_DERIVATIONS_CG/)
+  assert.ok(!noDerivs.calls.some(x => x.name === 'request_upload'), JSON.stringify(noDerivs.calls))
+  assert.deepEqual(noDerivs.calls, [])
+  // A grants read that is not current: exit 9 before capture, not after a paid transcription.
+  grantor.scenario.staleBy = 1
+  try {
+    const stale = await mandate(consentGrant({ subject: 'bea', territory: 'GB', 'valid-until': until }), { lp, tty: true })
+    assert.equal(stale.code, 9, stale.stdout + stale.stderr)
+    assert.equal(json(stale).reason, 'consent clip reuse not checked')
+    assert.match(json(stale).detail, /cannot check whether a consent clip already backs a grant: stale view/)
+    assert.deepEqual(stale.calls, [])
+  } finally {
+    delete grantor.scenario.staleBy
+  }
+  assert.equal(publishes(grantor), before)
+  // A plain grant needs no derivations graph.
+  const plain = await mandate(grantArgs({ subject: 'bea' }), { env: { MANDATE_DERIVATIONS_CG: undefined } })
+  assert.equal(plain.code, 0, plain.stdout + plain.stderr)
 })
 
 async function submittedPendingRecord(tag, jobId) {

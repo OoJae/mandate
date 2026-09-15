@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Parser } from 'n3'
 import * as V from '../src/vocab.mjs'
+import { UNTIL_Z } from './fixtures/dates.mjs'
 
 const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type'
 const ttl = readFileSync(new URL('../vocab/mandate.ttl', import.meta.url), 'utf8')
@@ -52,7 +53,7 @@ test('every predicate and class the serialisers actually emit is defined in the 
   const quads = [
     ...grantToQuads({ id: `urn:mandate:grant:${A}:ana:0000000000000001`, grantor: `did:dkg:agent:${A}`, subject: `${A}:ana`,
       consentClipSha256: 'a'.repeat(64), consentTranscript: 'I agree', permitsCapability: ['talking-head'], permitsUseClass: ['advertising'],
-      forbidsUseClass: ['political'], territory: ['GB'], validFrom: '2026-09-01T00:00:00Z', validUntil: '2026-12-01T00:00:00Z', maxSpendUsd: 5 }, { allowTranscript: true }),
+      forbidsUseClass: ['political'], territory: ['GB'], validFrom: '2026-09-01T00:00:00Z', validUntil: UNTIL_Z, maxSpendUsd: 5 }, { allowTranscript: true }),
     ...stateToQuads({ id: 'urn:mandate:state:0000000000000001', stateOf: `urn:mandate:grant:${A}:ana:0000000000000001`, state: 'revoked', stateAuthor: `did:dkg:agent:${A}`, stateAt: '2026-09-02T00:00:00Z' }),
     ...derivationToQuads({ id: 'urn:mandate:derivation:aaaaaaaaaaaaaaaa:0000000000000001', outputSha256: 'a'.repeat(64), servedCapability: 'talking-head',
       servedModelId: 'm', loraId: 'l', jobId: 'mjob_x', authorizedUnder: `urn:mandate:grant:${A}:ana:0000000000000001`, billedUsd: 1, derivedAt: '2026-09-02T00:00:00Z' }),

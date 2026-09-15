@@ -5,6 +5,7 @@ import { isProhibitedUseClass } from '../src/policy.mjs'
 import { CLAUSES } from '../src/vocab.mjs'
 import * as V from '../src/vocab.mjs'
 import { ANA, PRODUCER, STRANGER, GRANTS_CG, ka, grant, grantKa, revocationKa, derivation, derivationKa, knowledgeOf } from './fixtures/build.mjs'
+import { UNTIL_DAY, UNTIL_Z, afterUntil } from './fixtures/dates.mjs'
 
 const SUBJECT = `${ANA}:ana`
 const req = (over = {}) => ({
@@ -89,14 +90,14 @@ test('an explicit forbid beats a permit', async () => {
 test('refuses outside the territory and outside the validity window', async () => {
   const k = await K(grantKa(grant()))
   assert.equal(decide(req({ territory: 'FR' }), k).clause, 'territory-permitted')
-  assert.equal(decide(req({ at: '2027-01-01T00:00:00Z' }), k).clause, 'validity-window')
+  assert.equal(decide(req({ at: afterUntil(31) }), k).clause, 'validity-window')
   assert.equal(decide(req({ at: '2026-08-01T00:00:00Z' }), k).clause, 'validity-window')
 })
 
 test('offsets are honoured: the same instant in two time zones decides the same', async () => {
-  const k = await K(grantKa(grant({ validUntil: '2026-12-01T00:00:00Z' })))
-  assert.equal(decide(req({ at: '2026-12-01T08:59:00+09:00' }), k).permit, true)
-  assert.equal(decide(req({ at: '2026-12-01T09:01:00+09:00' }), k).clause, 'validity-window')
+  const k = await K(grantKa(grant({ validUntil: UNTIL_Z })))
+  assert.equal(decide(req({ at: `${UNTIL_DAY}T08:59:00+09:00` }), k).permit, true)
+  assert.equal(decide(req({ at: `${UNTIL_DAY}T09:01:00+09:00` }), k).clause, 'validity-window')
 })
 
 test('refuses when the grant ceiling would be exceeded', async () => {
