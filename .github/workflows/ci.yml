@@ -56,14 +56,14 @@ jobs:
   mutation:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
-    # About 580 mutants (584 when this was written), split into ten shards that
-    # run as parallel jobs, every 10th entry each, so the ~80 mutants that reach
-    # the slow cli.test phase (about 70 s each) are spread evenly: about 8 in
-    # one shard. A local run of the whole list took 103 worker-minutes on a
-    # 10-core machine; the heaviest shard of 50 took 12. A 4-vCPU runner runs
-    # 2 workers, so that shard needs about 6 minutes plus a 1-minute baseline at
-    # local speed, and stays inside the 35-minute budget even on a runner three
-    # times slower. Not yet measured on a runner.
+    # About 620 mutants (618 when this was written), split into eleven shards
+    # that run as parallel jobs, every 11th entry each, so the ~85 mutants that
+    # reach the slow cli.test phase (about 70 s each) are spread evenly: about 8
+    # in one shard. A local run of 584 took 103 worker-minutes on a 10-core
+    # machine; the heaviest shard of 50 took 12. A 4-vCPU runner runs 2 workers,
+    # so a shard of 57 needs about 7 minutes plus a 1-minute baseline at local
+    # speed, and stays inside the 35-minute budget even on a runner three times
+    # slower. Not yet measured on a runner.
     #
     # --timeout-ms bounds each test phase of one mutant: the CLI phase takes about
     # 70 s, so 300 s leaves room for a slow runner. A hang is reported as TIMEOUT
@@ -74,7 +74,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -85,4 +85,4 @@ jobs:
           node-version: '24'
       - run: npm ci --ignore-scripts
       - name: Every security guard is protected by a failing test
-        run: npm run test:mutation -- --jobs 2 --timeout-ms 300000 --budget-minutes 35 --shard ${{ matrix.shard }}/10
+        run: npm run test:mutation -- --jobs 2 --timeout-ms 300000 --budget-minutes 35 --shard ${{ matrix.shard }}/11

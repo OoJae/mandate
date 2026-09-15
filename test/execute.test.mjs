@@ -4,13 +4,13 @@ import { createServer } from 'node:http'
 import { createHash } from 'node:crypto'
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
 import { spawn } from 'node:child_process'
-import { tmpdir } from 'node:os'
+import { tmpdir, hostname } from 'node:os'
 import { join } from 'node:path'
 import { dispatchRender, extractMediaUrl, pollJob, RenderError, collectInputUrls, served, classifyFailure } from '../src/execute.mjs'
 import { callStrict, LivepeerToolError } from '../src/livepeer.mjs'
 import { checkInputs, dispatchMode, estimateFromPricing } from '../src/capabilities.mjs'
 import { sha256OfUrl, FetchBytesError } from '../src/fetch-bytes.mjs'
-import { renderKey, pendingStore, PendingConflictError, PendingInvariantError, PendingReadError, mergeDerivationAttempt, mayBeBilled, grantLockPath } from '../src/pending.mjs'
+import { renderKey, pendingStore, PendingConflictError, PendingInvariantError, PendingReadError, PendingLeaseLostError, PendingStaleCopyError, UNKNOWN_HOLDER_STALE_MS, mergeDerivationAttempt, mayBeBilled, grantLockPath } from '../src/pending.mjs'
 import { verifyMedia, hashUrl } from '../src/verify.mjs'
 
 const IMG = 'https://agent.livepeer.org/a/img.jpg'
@@ -1099,20 +1099,42 @@ test('the stale-lock takeover never removes a fresh lock another process took af
   }
 })
 
-test('a lock older than the stale age is cleared even when its holder is alive; a crashed takeover file is cleared by age', () => {
+test('a lock is never taken over from a holder alive on this host, however old; only an unjudgeable one is cleared by age, after UNKNOWN_HOLDER_STALE_MS', () => {
   const { dir, store, done } = tmpStore({ isAlive: () => true })
   try {
     const key = renderKey({ grantId: 'urn:g', capability: 'old-lock' })
     const lock = join(dir, `${key}.json.lock`)
     mkdirSync(dir, { recursive: true })
-    writeFileSync(lock, JSON.stringify({ pid: 999_999_006, at: 'long ago' }))
-    const old = new Date(Date.now() - 60_000)
-    utimesSync(lock, old, old)
-    writeFileSync(`${lock}.takeover`, '')
-    utimesSync(`${lock}.takeover`, old, old)
-    assert.equal(store.beginAttempt({ key, idempotencyKey: key }).resumed, false)
+    const setLock = (content, ageMs) => {
+      writeFileSync(lock, content)
+      const t = new Date(Date.now() - ageMs)
+      utimesSync(lock, t, t)
+    }
+    const past = UNKNOWN_HOLDER_STALE_MS + 60_000
+    // Alive on this host (a suspended holder stops touching it): kept, however old.
+    for (const holder of [{ pid: 999_999_006, at: 'long ago', token: 't' }, { pid: 999_999_006, host: hostname(), at: 'long ago', token: 't' }]) {
+      setLock(JSON.stringify(holder), past)
+      assert.throws(() => store.beginAttempt({ key, idempotencyKey: key }), e => e instanceof PendingConflictError && e.inFlight)
+      assert.equal(readFileSync(lock, 'utf8'), JSON.stringify(holder))
+      assert.equal(store.load(key), null)
+    }
+    // Liveness cannot be judged (another host, or a half-written file): kept until the long bound.
+    for (const content of [JSON.stringify({ pid: 999_999_007, host: 'another-machine', token: 't' }), '']) {
+      setLock(content, 60_000)
+      assert.throws(() => store.beginAttempt({ key, idempotencyKey: key }), PendingConflictError)
+      assert.equal(readFileSync(lock, 'utf8'), content)
+      setLock(content, past)
+      writeFileSync(`${lock}.takeover`, '')
+      const old = new Date(Date.now() - 60_000)
+      utimesSync(`${lock}.takeover`, old, old)
+      store.beginAttempt({ key, idempotencyKey: key })
+      assert.equal(existsSync(lock), false)
+      assert.equal(existsSync(`${lock}.takeover`), false)
+    }
+    // This process's pid with a token it does not hold: a dead earlier process that had the same pid.
+    setLock(JSON.stringify({ pid: process.pid, host: hostname(), token: 'not-mine' }), 1000)
+    store.markSent(key)
     assert.equal(existsSync(lock), false)
-    assert.equal(existsSync(`${lock}.takeover`), false)
   } finally {
     done()
   }
@@ -1146,7 +1168,7 @@ test('B5: a rerun after a settled failure starts clean; the old job id, media an
   }
 })
 
-test('B4: a key\'s lease is exclusive while its holder lives, taken over when it dies or stops touching it, and released only by its own holder', () => {
+test('B4: a key\'s lease is exclusive while its holder lives (suspended or not), taken over when it dies, and released only by its own holder', () => {
   let alive = true
   const { dir, store, done } = tmpStore({ isAlive: () => alive })
   try {
@@ -1173,11 +1195,16 @@ test('B4: a key\'s lease is exclusive while its holder lives, taken over when it
     writeFileSync(lease, 'someone else')
     mine.release()
     assert.equal(readFileSync(lease, 'utf8'), 'someone else')
-    // A live holder that stopped touching it for longer than the stale age.
+    // A live holder that stopped touching it (suspended: Ctrl-Z, SIGSTOP, a debugger) is never taken over, however long ago.
     alive = true
-    writeFileSync(lease, JSON.stringify({ pid: 999_999_031, at: 'then', token: 'old' }))
-    const old = new Date(Date.now() - 60_000)
+    const stopped = JSON.stringify({ pid: 999_999_031, host: hostname(), at: 'then', token: 'old' })
+    writeFileSync(lease, stopped)
+    const old = new Date(Date.now() - UNKNOWN_HOLDER_STALE_MS - 60_000)
     utimesSync(lease, old, old)
+    assert.throws(() => store.acquireLease(key), e => e instanceof PendingConflictError && e.inFlight)
+    assert.equal(readFileSync(lease, 'utf8'), stopped)
+    // Once it has died, it is.
+    alive = false
     store.acquireLease(key).release()
     assert.equal(existsSync(lease), false)
   } finally {
@@ -1201,6 +1228,83 @@ test('B3: the grant lock is exclusive, waits for its holder, and is taken over f
     alive = false
     assert.equal(store.withGrantLock('urn:mandate:grant:x', () => 'taken'), 'taken')
     assert.throws(() => store.withGrantLock('', () => 1), /grant id/)
+  } finally {
+    done()
+  }
+})
+
+test('BLOCKER 3: a write under a lease this process no longer holds is refused, and nothing is written', () => {
+  const { dir, store, done } = tmpStore({ isAlive: () => false })
+  try {
+    const key = renderKey({ grantId: 'urn:g', capability: 'lost-lease' })
+    const lease = store.acquireLease(key)
+    store.save({ key, idempotencyKey: key, status: 'submitted', jobId: 'mjob_lease00001', attempts: [] })
+    const before = readFileSync(join(dir, `${key}.json`), 'utf8')
+    // Another process took the lease over (its own token).
+    writeFileSync(`${join(dir, key)}.json.lease`, JSON.stringify({ pid: 999_999_040, host: hostname(), token: 'theirs' }))
+    const lost = e => e instanceof PendingLeaseLostError && e instanceof PendingConflictError && e.inFlight && /no longer holds its lease/.test(e.message)
+    assert.throws(() => store.save({ ...store.load(key), status: 'rendered', mediaUrl: 'https://x.test/a.mp4' }), lost)
+    assert.throws(() => store.noteDerivationAttempt(key, { id: ID, name: 'derivation-0123456789abcdef-fedcba9876543210', stage: 'started' }), lost)
+    assert.throws(() => store.finishAttempt(key, { status: 'rendered' }), lost)
+    assert.throws(() => store.markSent(key), lost)
+    // The lease file gone entirely is not held either.
+    rmSync(`${join(dir, key)}.json.lease`)
+    assert.throws(() => store.save({ ...store.load(key), status: 'rendered' }), lost)
+    assert.equal(readFileSync(join(dir, `${key}.json`), 'utf8'), before)
+    lease.release()
+    // Released: the key is no longer guarded by this store, and another store never was.
+    assert.equal(store.save({ ...store.load(key), error: 'noted' }).error, 'noted')
+    assert.equal(pendingStore(dir).save({ ...store.load(key), error: 'again' }).error, 'again')
+  } finally {
+    done()
+  }
+  // A clean-failure rerun writes directly, and checks the lease the same way.
+  const t = tmpStore({ isAlive: () => false })
+  try {
+    const key = renderKey({ grantId: 'urn:g', capability: 'lost-lease-rerun' })
+    t.store.beginAttempt({ key, idempotencyKey: key })
+    t.store.finishAttempt(key, { status: 'failed', mayHaveStarted: false })
+    const before = readFileSync(join(t.dir, `${key}.json`), 'utf8')
+    const lease = t.store.acquireLease(key)
+    writeFileSync(`${join(t.dir, key)}.json.lease`, 'someone else')
+    assert.throws(() => t.store.beginAttempt({ key, idempotencyKey: key }), PendingLeaseLostError)
+    assert.equal(readFileSync(join(t.dir, `${key}.json`), 'utf8'), before)
+    lease.release()
+  } finally {
+    t.done()
+  }
+})
+
+test('BLOCKER 3: a save from a copy loaded before another write is refused, so a recorded status or a derivation attempt is never undone', () => {
+  const { dir, store, done } = tmpStore({ isAlive: () => false })
+  try {
+    const key = renderKey({ grantId: 'urn:g', capability: 'stale-copy' })
+    store.save({ key, idempotencyKey: key, status: 'submitted', jobId: 'mjob_stale00001', mayHaveStarted: true, attempts: [] })
+    // Process A loads the record, then waits on a poll.
+    const stale = store.load(key)
+    assert.equal(stale.revision, 1)
+    // Process B records it meanwhile.
+    const other = pendingStore(dir, { isAlive: () => false })
+    other.noteDerivationAttempt(key, { id: ID, name: 'derivation-0123456789abcdef-fedcba9876543210', stage: 'started' })
+    other.save({ ...other.load(key), status: 'recorded', mediaUrl: 'https://x.test/b.mp4', derivation: { id: ID, ual: 'did:dkg:x/1' } })
+    const recorded = readFileSync(join(dir, `${key}.json`), 'utf8')
+    const staleErr = e => e instanceof PendingStaleCopyError && e instanceof PendingConflictError && e.existing.status === 'recorded' && /changed on disk/.test(e.message)
+    assert.throws(() => store.save({ ...stale, status: 'rendered', mediaUrl: 'https://x.test/a.mp4' }), staleErr)
+    assert.throws(() => store.save({ ...stale, status: 'failed-confirmed' }, { allowResolve: true }), staleErr)
+    assert.equal(readFileSync(join(dir, `${key}.json`), 'utf8'), recorded)
+    // A fresh copy saves, and each write moves the revision on.
+    const fresh = store.load(key)
+    assert.equal(fresh.revision, 3)
+    assert.equal(store.save({ ...fresh, note: 'x' }).revision, 4)
+    assert.equal(store.load(key).derivationAttempt.name, 'derivation-0123456789abcdef-fedcba9876543210')
+    // A record from before revisions loads as revision 0 and is checked the same way.
+    const legacyKey = renderKey({ grantId: 'urn:g', capability: 'stale-legacy' })
+    writeFileSync(join(dir, `${legacyKey}.json`), JSON.stringify({ key: legacyKey, status: 'submitted', jobId: 'mjob_legacy0001' }))
+    const old = store.load(legacyKey)
+    assert.equal(old.revision, 0)
+    store.save({ ...store.load(legacyKey), status: 'rendered', mediaUrl: 'https://x.test/c.mp4' })
+    assert.throws(() => store.save({ ...old, status: 'submitted' }), PendingStaleCopyError)
+    assert.equal(store.load(legacyKey).status, 'rendered')
   } finally {
     done()
   }

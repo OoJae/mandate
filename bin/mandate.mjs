@@ -212,8 +212,9 @@ function writeFailed(out, e, { what, ids, assetName, contextGraphId, node, check
 
 /**
  * Print, and return for the result, the configuration a command runs under:
- * which env file was loaded (or none), the trusted producers and graphs in
- * effect, and a visible warning when the freshness check is off.
+ * which env file was loaded (or none), the resolved Mandate home (local state
+ * and pending renders), the trusted producers and graphs in effect, and a
+ * visible warning when the freshness check is off.
  */
 function configInEffect(out, cfg = null) {
   const settle = get => { try { return { value: get(), error: null } } catch (e) { return { value: null, error: String(e.message).split('\n')[0] } } }
@@ -225,6 +226,9 @@ function configInEffect(out, cfg = null) {
     ? c.dim(`  env file           ${clean(envLoad.path, 300)} (${envLoad.source}; ${envLoad.loaded.length} key(s) set from it${envLoad.loaded.length ? `: ${envLoad.loaded.join(', ')}` : ''})`)
     : c.dim(`  env file           none (looked for ${clean(envLoad.searched ?? '', 300)}; a .env in the working directory is never read)`))
   if (envLoad.ignored.length) out.line(c.dim(`  env file: ignored ${envLoad.ignored.join(', ')} (only MANDATE_* and LIVEPEER_AGENT_KEY are read)`))
+  // Where local state and pending renders live: two runs that print different
+  // homes do not share revocations seen, pending spend or locks.
+  out.line(c.dim(`  mandate home       ${clean(envLoad.home ?? '', 300)} (local state, pending renders and their locks)`))
   for (const [label, got] of [['trusted producers', trusted], ['grants graphs', grants], ['derivations graphs', derivs]]) {
     out.line(got.error ? c.yellow(`  ${label.padEnd(18)} ${clean(got.error, 300)}`) : c.dim(`  ${label.padEnd(18)} ${got.value.map(v => clean(v, 120)).join(', ') || 'none'}`))
   }
@@ -233,6 +237,7 @@ function configInEffect(out, cfg = null) {
   }
   return {
     envFile: envLoad.path, envFileSource: envLoad.path ? envLoad.source : null, envFileSearched: envLoad.searched, envKeysLoaded: [...envLoad.loaded], envFileWarnings: [...envLoad.warnings],
+    mandateHome: envLoad.home,
     trustedProducers: trusted.value, grantsCgs: grants.value, derivationsCgs: derivs.value, checkFreshness,
   }
 }
@@ -342,6 +347,16 @@ async function cmdGrant(flags, out, prompter) {
       out.result({ granted: false, consent: r.summary })
       return r.code
     }
+    // A recording answers one capture. The same clip (a replay, or the file kept
+    // from an earlier grant, revoked or not) is refused, so withdrawn consent is
+    // never republished as fresh. Checked against this grantor's anchored grants;
+    // a grant confirmed by hand carries no clip hash and cannot be matched.
+    const reuse = await clipAlreadyUsed(grantor, subject, r.consent?.sha256)
+    if (reuse.code !== EXIT.OK) {
+      out.line((reuse.code === EXIT.INCONCLUSIVE ? c.yellow : c.red)(`\n  NOT PUBLISHED — ${reuse.reason}. Nothing was published.\n`))
+      out.result({ granted: false, reason: reuse.code === EXIT.INCONCLUSIVE ? 'consent clip reuse not checked' : 'consent clip reused', detail: reuse.reason, usedBy: reuse.usedBy, consent: r.summary })
+      return reuse.code
+    }
     const questions = consentQuestions(r.consent, grant, r.scriptMatched)
     if (questions.length && (!prompter.possible() || out.json)) {
       const reason = r.scriptMatched
@@ -400,6 +415,29 @@ async function cmdGrant(flags, out, prompter) {
   out.line(c.dim('\n  Renew by publishing a new grant; a revocation ends this one for good.\n'))
   out.result({ granted: true, grant, contextGraphId: cg, ual: r.ual, txHash: r.txHash, name: r.name, explorer: txLink(r.ual, r.txHash), consent: consentSummary })
   return EXIT.OK
+}
+
+/**
+ * Whether a consent clip already backs a grant this grantor anchored, as
+ * { code, reason, usedBy }: OK when it does not, CONSENT_UNCONFIRMED when it
+ * does, INCONCLUSIVE when the grants graph could not be read completely (a clip
+ * that cannot be shown unused is not published).
+ */
+async function clipAlreadyUsed(grantor, subject, sha256) {
+  if (typeof sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(sha256)) {
+    return { code: EXIT.INCONCLUSIVE, reason: 'the consent clip has no usable sha256, so it cannot be checked against earlier grants', usedBy: [] }
+  }
+  const k = await readKnowledge(grantor, readConfig(), { subject })
+  if (!k.consistency.ok) {
+    return { code: EXIT.INCONCLUSIVE, reason: `cannot check whether this consent clip already backs a grant: ${clean(k.consistency.reason, 300)}`, usedBy: [] }
+  }
+  const usedBy = k.grants.filter(g => g?.consentClipSha256 === sha256).map(g => ({ id: g.id, subject: g.subject, ual: g.ual ?? null, revoked: revocationOf(g, k.states).revoked === true }))
+  if (!usedBy.length) return { code: EXIT.OK, reason: null, usedBy }
+  return {
+    code: EXIT.CONSENT_UNCONFIRMED,
+    reason: `this consent clip (sha256 ${sha256}) already backs grant ${clean(usedBy[0].id, 200)}${usedBy[0].revoked ? ', which was revoked' : ''}; a recording is consent for the capture it was made for, never for a new grant. Record a new clip`,
+    usedBy,
+  }
 }
 
 /** What each unchecked item means for this grant, and the word a person must type to accept it. */
@@ -918,6 +956,9 @@ async function commitDerivation(out, pending, rec, extra = {}) {
   const producer = PRODUCER()
   let attempt = rec.derivationAttempt?.name ? rec.derivationAttempt : null
   const fail = (e, { blocked = null } = {}) => {
+    // This process lost the key's lease, or its copy of the record is older than
+    // what is on disk: another process owns the render now, so nothing is written.
+    if (e instanceof PendingConflictError) throw e
     const stage = blocked ? blocked.stage : (typeof e?.stage === 'string' && STAGE.test(e.stage) ? e.stage : 'error')
     const ual = typeof e?.ual === 'string' && PRINTABLE.test(e.ual) ? e.ual : null
     const txHash = typeof e?.txHash === 'string' && TX_HASH.test(e.txHash) ? e.txHash : null

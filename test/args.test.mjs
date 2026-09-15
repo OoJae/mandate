@@ -135,6 +135,23 @@ test('B7: loadScriptEnv (publish-ontology, the spikes) refuses --env-file, needs
     assert.deepEqual(ok.log, [`env file: ${file}`])
     assert.equal(process.env.MANDATE_TEST_SCRIPT_ENV, '1')
     assert.equal(process.env.NODE_OPTIONS === '--require=/nonexistent', false)
+    // The CLI also takes --env-path=<path>; so must a script, instead of quietly falling back to ~/.mandate/.env.
+    delete process.env.MANDATE_TEST_SCRIPT_ENV
+    const eq = run(['--publish', `--env-path=${file}`])
+    assert.equal(eq.code, null, eq.error.join('\n'))
+    assert.equal(eq.result.path, file)
+    assert.deepEqual(eq.log, [`env file: ${file}`])
+    assert.equal(process.env.MANDATE_TEST_SCRIPT_ENV, '1')
+    for (const argv of [['--env-path='], ['--publish', '--env-path=']]) {
+      const r = run(argv)
+      assert.equal(r.code, 1, argv.join(' '))
+      assert.match(r.error.join('\n'), /--env-path needs a path/)
+    }
+    for (const argv of [[`--env-path=${file}`, '--env-path', file], ['--env-path', file, `--env-path=${file}`], [`--env-path=${file}`, `--env-path=${file}`]]) {
+      const r = run(argv)
+      assert.equal(r.code, 1, argv.join(' '))
+      assert.match(r.error.join('\n'), /--env-path given more than once/)
+    }
   } finally {
     delete process.env.MANDATE_TEST_SCRIPT_ENV
     rmSync(dir, { recursive: true, force: true })

@@ -392,9 +392,12 @@ claiming the grant; when it is non-zero, `billedUnknown` is true.
   accents stripped, `&` to `and`, punctuation and hyphens split; a question mark (`?`,
   `¿`, `؟`, `‽`, `⸮`, the Armenian `՞`, Ethiopic `፧`, Limbu, Old Nubian, Vai, Bamum,
   Chakma and Adlam marks, anything NFKD folds to `?`, and the Greek question mark U+037E,
-  matched before NFKD folds it to `;`) kept as a word of its own; every run of letters, digits, symbols
-  or marks that does not fold to a-z0-9 (another script, small capitals, emoji) kept as
-  one word; `lipsync` to `lip sync`,
+  matched before NFKD folds it to `;`) kept as a word of its own; punctuation is closed
+  world too: only `. , ; : ! ' "`, typographic quotes, hyphens and dashes, parentheses and
+  brackets are dropped (NFKD turns an ellipsis into dots first), and every other character
+  Unicode classes as punctuation (`\p{P}`, for example `/`, `*`, `%`, `@` or a medieval
+  question mark) is a word of its own; every run of letters, digits, symbols or marks that
+  does not fold to a-z0-9 (another script, small capitals, emoji) kept as one word; `lipsync` to `lip sync`,
   `faceswap` to `face swap`, `St` to `saint`; `U.K.`/`UK` to `united kingdom`,
   `U.S.`/`US`/`USA` to `united states`; ordinals and number words to digits (including
   years said in pairs and "two thousand and twenty six"), except that a number phrase with
@@ -609,8 +612,12 @@ unreadable named file. `s6c` hands the file it loaded to every CLI call with `--
 - `envFileLocation({ flag, env }) → { path, source, explicit }`, first match wins:
   `--env-path <path>` (source `--env-path`, explicit), `MANDATE_ENV_FILE` (explicit),
   `$MANDATE_HOME/.env` with `MANDATE_HOME` from the real environment, default
-  `~/.mandate/.env` (source `MANDATE_HOME`, not explicit). A relative path resolves
-  against the working directory. **A `.env` in the working directory is never read.**
+  `~/.mandate/.env` (source `MANDATE_HOME`, not explicit). A leading `~` in `MANDATE_HOME`
+  or `MANDATE_ENV_FILE` is expanded to the home directory and an empty value counts as
+  unset; any other relative value (including `MANDATE_HOME` set inside the env file) is a
+  `ConfigError` (exit 1), because it would be read from whatever directory Mandate runs in.
+  `mandateHome(env)` in `src/state-store.mjs` is the one resolver for the state and pending
+  directories too. **A `.env` in the working directory is never read.**
 - `loadMandateEnv` returns (and keeps in `envLoad`) `{ path, source, searched, loaded,
   ignored, warnings }`. An explicit file that is missing, unreadable or not a regular file
   is a `ConfigError` (exit 1); a missing default file is not, and `path` stays `null`. A
@@ -672,6 +679,12 @@ billed; the DKG stages decide exit 6 or 7 only for grants and revocations.
   operator types `matches`, `consents`, then each `unchecked` item (the end date as
   `YYYY-MM-DD`, the ceiling or `none`, `anywhere`), and the grant is published **without**
   `consentClipSha256`.
+- A consent clip answers one capture. Before publishing, the grantor's own anchored grants
+  are read, and a clip whose SHA-256 already backs one of them, revoked or not and for any
+  subject, is exit 3 (`reason: 'consent clip reused'`, `usedBy` naming the grant). If the
+  grants graph cannot be read consistently the grant is exit 9. A clip used for an
+  operator-confirmed grant (published without its hash), or a grant the grantor node has
+  not yet read back, cannot be matched.
 - `--force` only lets unheard terms go on to that typed confirmation. It never overrides
   a failed transcription, a missing affirmative consent or a contradiction.
 - `--yes` skips only the typed "publish" confirmation, never a consent answer. A typed
@@ -792,12 +805,19 @@ mode 0700 and their files 0600, written atomically; `~/.mandate` itself is not c
     only the short key-lock wait (about 1 s) and then gets `PendingConflictError`
     (`inFlight: true`, "in use by another mandate process"). The holder touches the file
     every 5 s on an unref'd timer.
-  A lock or lease is taken over when its holder's pid is not alive on this machine, or when
-  the file is older than 30 s (a live lease is kept younger by its heartbeat). Takeover
-  happens only under `<lock>.takeover`, and only if the file still holds what was judged
-  stale; release removes it only while it holds the caller's own token. Liveness is judged
-  on this machine only: two machines sharing one `MANDATE_HOME` are not protected from each
-  other.
+  A lock or lease whose holder is alive on this machine is never taken over, however old:
+  a suspended process (Ctrl-Z, a debugger) keeps it. It is taken over when its holder's pid
+  is not alive on this machine, or, when the holder cannot be judged (another host, or an
+  unparseable file), once the file is older than `UNKNOWN_HOLDER_STALE_MS` (1 hour). A
+  crashed holder whose pid has since been reused by a live process leaves the lock until
+  that process exits or the file is removed. Takeover happens only under
+  `<lock>.takeover`, and only if the file still holds what was judged stale; release removes
+  it only while it holds the caller's own token. Two machines sharing one `MANDATE_HOME`
+  are not protected from each other.
+- Every write to `pending/<key>.json` increments `revision`, and `load()` gives a record
+  without one revision 0. A save from a copy whose `revision` no longer matches the file
+  (`PendingStaleCopyError`), or made after this process lost the key's lease (`PendingLeaseLostError`), writes nothing
+  and exits 5, so a finished record is never overwritten by a stale copy.
 - A record written before `attempts[]` existed is legacy; a legacy `dispatching` record
   counts as possibly billed. A pending file that exists but cannot be read throws
   `PendingReadError` naming it.

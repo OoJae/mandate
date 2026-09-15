@@ -16,9 +16,11 @@
 import { closeSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, statSync, utimesSync, writeFileSync, chmodSync } from 'node:fs'
 import { createHash, randomBytes } from 'node:crypto'
 import { join } from 'node:path'
-import { homedir } from 'node:os'
+import { hostname } from 'node:os'
+import { mandateHome } from './state-store.mjs'
 
-export const defaultPendingDir = () => join(process.env.MANDATE_HOME ?? join(homedir(), '.mandate'), 'pending')
+/** Under the resolved MANDATE_HOME (see mandateHome): never the working directory. */
+export const defaultPendingDir = () => join(mandateHome(), 'pending')
 
 const KEY = /^mandate-[0-9a-f]{32}$/
 
@@ -62,6 +64,29 @@ export class PendingInvariantError extends Error {
     super(message)
     this.name = 'PendingInvariantError'
     this.key = key
+  }
+}
+
+/**
+ * A save for a key whose lease this process took and no longer holds: another
+ * process may be working on the render now, so nothing is written.
+ */
+export class PendingLeaseLostError extends PendingConflictError {
+  constructor(key) {
+    super({ key, status: 'in use' }, { inFlight: true, message: `pending render ${key}: this process no longer holds its lease (another mandate process may have taken it over); nothing was written. Check it with \`mandate record --pending ${key}\`` })
+    this.name = 'PendingLeaseLostError'
+  }
+}
+
+/**
+ * A save from a copy of a record older than what is on disk: another write
+ * landed after the copy was loaded, and saving it would undo that write (a
+ * recorded status, a derivation attempt). Nothing is written.
+ */
+export class PendingStaleCopyError extends PendingConflictError {
+  constructor(existing, revision) {
+    super(existing, { message: `pending render ${existing.key} changed on disk (revision ${existing.revision ?? 0}, status ${existing.status}) after this copy (revision ${revision}) was loaded; nothing was written, so that change is kept. Check it with \`mandate record --pending ${existing.key}\`` })
+    this.name = 'PendingStaleCopyError'
   }
 }
 
@@ -186,8 +211,24 @@ const processAlive = pid => {
   }
 }
 
-/** A lock older than this is from a crashed process; the critical sections it guards take milliseconds. */
+/**
+ * A takeover file older than this is from a process that crashed inside the
+ * millisecond window it is held for.
+ */
 const STALE_LOCK_MS = 30_000
+/**
+ * A lock or lease is never taken over from a holder whose pid is alive on this
+ * host, however old it is: a holder suspended by Ctrl-Z, SIGSTOP, a debugger or
+ * a VM pause stops touching its lease but will carry on when resumed, and a
+ * takeover then would let two processes work on one render. Age alone clears a
+ * lock only when its holder's liveness cannot be judged here: the file cannot
+ * be parsed (a crash between creating and writing it) or names another host
+ * (two machines sharing MANDATE_HOME). It must then be this old: one hour,
+ * longer than a render's 10-minute poll and the pauses above usually last.
+ * Trade-off: a lock left by a crashed process whose pid was since reused by a
+ * live process stays until that process exits or the file is removed by hand.
+ */
+export const UNKNOWN_HOLDER_STALE_MS = 60 * 60_000
 const LOCK_TRIES = 40
 const LOCK_WAIT_MS = 25
 /**
@@ -199,8 +240,9 @@ const GRANT_LOCK_TRIES = 600
 /**
  * A key's lease is held for a whole render or record (dispatch, polling, the
  * derivation write), which can take minutes. Its holder touches it every
- * LEASE_HEARTBEAT_MS, so the STALE_LOCK_MS age rule only clears a lease whose
- * holder has stopped (or died, which the liveness rule catches at once).
+ * LEASE_HEARTBEAT_MS. A lease whose holder is alive on this host is never
+ * cleared, however old; a dead holder's is cleared at once; one whose holder
+ * cannot be judged waits UNKNOWN_HOLDER_STALE_MS.
  */
 const LEASE_HEARTBEAT_MS = 5_000
 
@@ -208,6 +250,9 @@ const LEASE_HEARTBEAT_MS = 5_000
 export const grantLockPath = (dir, grantId) => join(dir, `grant-${createHash('sha256').update(String(grantId)).digest('hex').slice(0, 32)}.lock`)
 /** A short synchronous wait: the store is synchronous, and a held lock is released within milliseconds. */
 const pause = ms => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
+/** Lock tokens this process holds now, so a lock naming this pid but not one of them is known to be a dead process's. */
+const heldTokens = new Set()
+const HOST = hostname()
 
 /**
  * @param dir where records live
@@ -240,8 +285,9 @@ export function pendingStore(dir = defaultPendingDir(), { isAlive = processAlive
    * Take an exclusive lock file. The lock is created with 'wx', which fails if
    * another process holds it, so two processes cannot both hold it.
    *
-   * Each lock carries a random token. A stale lock (its holder is dead, or it is
-   * older than STALE_LOCK_MS) is cleared only while holding `<lock>.takeover`,
+   * Each lock carries a random token, its holder's pid and host. A stale lock
+   * (see UNKNOWN_HOLDER_STALE_MS: its holder is dead on this host, or its holder
+   * cannot be judged and it is older than that bound) is cleared only while holding `<lock>.takeover`,
    * itself created with 'wx', and only if the lock still holds exactly what was
    * judged stale: a process that read a stale holder and then lost the race
    * never removes the fresh lock another process has taken since. Release
@@ -252,18 +298,25 @@ export function pendingStore(dir = defaultPendingDir(), { isAlive = processAlive
   const acquire = (lock, { tries: maxTries = LOCK_TRIES, conflict }) => {
     ensureDir()
     const takeover = `${lock}.takeover`
-    const mine = JSON.stringify({ pid: process.pid, at: new Date().toISOString(), token: randomBytes(12).toString('hex') })
+    const token = randomBytes(12).toString('hex')
+    const mine = JSON.stringify({ pid: process.pid, host: HOST, at: new Date().toISOString(), token })
     const judge = raw => {
       let holder = null
       try { holder = JSON.parse(raw) } catch { /* half-written: judged by age */ }
       const age = ageOf(lock)
       if (age === null) return false
-      return age > STALE_LOCK_MS || Boolean(holder && Number.isInteger(holder.pid) && holder.pid !== process.pid && !isAlive(holder.pid))
+      const judgeable = holder && typeof holder === 'object' && Number.isInteger(holder.pid) && holder.pid > 0
+        && (holder.host === undefined || holder.host === HOST)
+      if (!judgeable) return age > UNKNOWN_HOLDER_STALE_MS
+      // This pid, but not a token this process holds: a dead earlier process that had the same pid.
+      if (holder.pid === process.pid) return !heldTokens.has(holder.token)
+      return !isAlive(holder.pid)
     }
     for (let tries = 0; ; tries++) {
       try {
         const fd = openSync(lock, 'wx', 0o600)
         try { writeFileSync(fd, mine) } finally { closeSync(fd) }
+        heldTokens.add(token)
         return mine
       } catch (e) {
         if (e.code !== 'EEXIST') throw e
@@ -293,7 +346,29 @@ export function pendingStore(dir = defaultPendingDir(), { isAlive = processAlive
       }
     }
   }
-  const release = (lock, mine) => { if (readRaw(lock) === mine) rmSync(lock, { force: true }) }
+  const release = (lock, mine) => {
+    heldTokens.delete(JSON.parse(mine).token)
+    if (readRaw(lock) === mine) rmSync(lock, { force: true })
+  }
+
+  /** Leases this store holds, by key: every write to a key held here first checks the lease is still this process's. */
+  const leases = new Map()
+  const assertLease = key => {
+    const held = leases.get(key)
+    if (held && readRaw(held.lock) !== held.mine) throw new PendingLeaseLostError(key)
+  }
+  /**
+   * Every write bumps `revision`, and load() gives a record without one
+   * revision 0. A save whose record carries a revision other than the one on
+   * disk comes from a copy loaded before another write, and is refused rather
+   * than undo that write. A record with no revision is a new one built by the
+   * caller, not a copy of what is stored.
+   */
+  const assertFresh = (existing, next) => {
+    if (!existing || next.revision === undefined) return
+    if (next.revision !== (existing.revision ?? 0)) throw new PendingStaleCopyError(existing, next.revision)
+  }
+  const nextRevision = existing => (Number.isSafeInteger(existing?.revision) ? existing.revision : 0) + 1
 
   /** Run `fn` holding the short exclusive lock on one key, so two reruns cannot both read an absent or resumable record and both dispatch. */
   const withLock = (key, fn) => {
@@ -322,7 +397,9 @@ export function pendingStore(dir = defaultPendingDir(), { isAlive = processAlive
     save(record, { allowResolve = false } = {}) {
       ensureDir()
       const target = file(record.key)
+      assertLease(record.key)
       const existing = read(target)
+      assertFresh(existing, record)
       let next = { ...record }
       if (existing) {
         if (existing.idempotencyKey && next.idempotencyKey !== undefined && next.idempotencyKey !== existing.idempotencyKey) {
@@ -343,7 +420,7 @@ export function pendingStore(dir = defaultPendingDir(), { isAlive = processAlive
         }
       }
       const tmp = `${target}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`
-      const written = { ...next, updatedAt: now().toISOString() }
+      const written = { ...next, revision: nextRevision(existing), updatedAt: now().toISOString() }
       writeFileSync(tmp, JSON.stringify(written, null, 2), { mode: 0o600 })
       renameSync(tmp, target)
       return written
@@ -428,7 +505,8 @@ export function pendingStore(dir = defaultPendingDir(), { isAlive = processAlive
           ? [...attempts.slice(0, -1), { ...attempts.at(-1), settled: { ...(attempts.at(-1).settled ?? {}), ...outcome } }]
           : attempts
         const target = file(record.key)
-        const written = { ...kept, ...record, status: 'dispatching', attempts: [...history, attempt], updatedAt: started }
+        assertLease(record.key)
+        const written = { ...kept, ...record, status: 'dispatching', attempts: [...history, attempt], revision: nextRevision(existing), updatedAt: started }
         const tmp = `${target}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`
         writeFileSync(tmp, JSON.stringify(written, null, 2), { mode: 0o600 })
         renameSync(tmp, target)
@@ -488,8 +566,10 @@ export function pendingStore(dir = defaultPendingDir(), { isAlive = processAlive
       if (!rec) throw new Error(`no pending render ${key}`)
       return this.save({ ...rec, derivationAttempt: mergeDerivationAttempt(rec.derivationAttempt, attempt) })
     },
+    /** The record, with `revision` 0 when it has none, so saving a copy of it is checked against later writes. */
     load(key) {
-      return read(file(key))
+      const rec = read(file(key))
+      return rec && typeof rec === 'object' && rec.revision === undefined ? { ...rec, revision: 0 } : rec
     },
     /**
      * Run `fn` (synchronous) holding the lock on one grant's ceiling decision.
@@ -516,16 +596,19 @@ export function pendingStore(dir = defaultPendingDir(), { isAlive = processAlive
      * Take the lease on one key for a whole render or record: dispatch, polling
      * and the derivation write. A second process on the same key does not wait
      * (a render can take minutes): it gets PendingConflictError (inFlight) at
-     * once, after only the short wait a stale lease's takeover needs. The lease
-     * is touched every few seconds while held, so the stale age rule never
-     * clears the lease of a live holder that is still running. Returns
-     * { release() }; call it in a finally.
+     * once, after only the short wait a stale lease's takeover needs. A lease
+     * whose holder is alive on this host is never taken over, even while that
+     * holder is suspended (see UNKNOWN_HOLDER_STALE_MS). While it is held, every
+     * write to this key through this store first checks the lease is still this
+     * process's, and throws PendingLeaseLostError without writing if not.
+     * Returns { release() }; call it in a finally.
      */
     acquireLease(key) {
       const lock = `${file(key)}.lease`
       const mine = acquire(lock, {
         conflict: () => new PendingConflictError({ key, status: 'in use' }, { inFlight: true, message: `pending render ${key} is in use by another mandate process (a render or record of the same key is dispatching, polling or recording it); nothing was done here. Wait for that process to finish, then check it with \`mandate record --pending ${key}\`` }),
       })
+      leases.set(key, { lock, mine })
       const beat = setInterval(() => {
         if (readRaw(lock) !== mine) return
         try { const t = new Date(); utimesSync(lock, t, t) } catch { /* judged by age and liveness */ }
@@ -537,6 +620,7 @@ export function pendingStore(dir = defaultPendingDir(), { isAlive = processAlive
           if (done) return
           done = true
           clearInterval(beat)
+          if (leases.get(key)?.mine === mine) leases.delete(key)
           release(lock, mine)
         },
       }

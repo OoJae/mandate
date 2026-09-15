@@ -349,10 +349,22 @@ Every `mandate` command, `scripts/nodes.mjs`, `scripts/publish-skill.mjs`,
 `scripts/publish-ontology.mjs` and the live spikes read their settings from the real environment, plus **one** env file that fills in anything the
 environment leaves unset. That file is, in order:
 
-1. the file named with `--env-path <path>` (any command or script);
+1. the file named with `--env-path <path>` or `--env-path=<path>` (any command or script;
+   given twice it is exit 1);
 2. the file named by the `MANDATE_ENV_FILE` variable;
 3. `$MANDATE_HOME/.env`, which is `~/.mandate/.env` by default. `MANDATE_HOME` for this
    lookup comes from the real environment only.
+
+`MANDATE_HOME` and `MANDATE_ENV_FILE` must be absolute paths, or start with `~/` (or be
+exactly `~`), which is expanded to your home directory: a quoted
+`export MANDATE_HOME="~/.mandate"` or a `MANDATE_HOME=~/.mandate` line in the env file
+works. An empty value counts as unset. Any other relative value (`.mandate`,
+`~other/.mandate`) is exit 1 before the command runs, including a `MANDATE_HOME` that the
+env file itself sets, because a relative path would be read from whatever directory
+Mandate is run in. The env file, local state (`state/`) and pending renders with their
+locks (`pending/`) all use this one resolved home. `--env-path` is your own command line,
+so a relative path there is resolved from the working directory (after the same `~`
+expansion).
 
 **A `.env` in the working directory is never read.** A folder someone sent you (a
 delivery holding a video and a `.env`) must not be able to change which producers you
@@ -376,8 +388,10 @@ node bin/mandate.mjs verify --sha256 <hash> --env-path ~/verifier.env
 - A group- or world-writable env file is loaded with a warning on stderr (whoever can
   write it chooses your trusted producers): run `chmod 600` on it.
 - `mandate status` and `mandate verify` print, and return as `config` in `--json`, the env
-  file loaded (or `none (looked for …)`), the keys it set, the trusted producers, the
-  grants and derivations graphs, and whether the freshness check is on. With
+  file loaded (or `none (looked for …)`), the keys it set, the resolved Mandate home
+  (`mandate home`, `config.mandateHome`: where local state and pending renders live, so
+  two runs that do not share them are visible), the trusted producers, the grants and
+  derivations graphs, and whether the freshness check is on. With
   `MANDATE_CHECK_FRESHNESS=0` they print `FRESHNESS CHECK OFF`, and every read carries a
   `freshness not checked` warning.
 - The flag is `--env-path`; Mandate refuses `--env-file` and `--env-file-if-exists`
@@ -421,8 +435,8 @@ link, because the script never states those and they must be typed; otherwise on
 terminal with `--json` it needs `--yes` (else exit 1, also before any link).
 
 **Consent is confirmed automatically only when the transcript is a reading of that
-script.** Both are put in one canonical form first (case, punctuation and hyphens
-ignored; `lipsync` and `lip-sync`, `U.K.` and `UK`, `13th of December` and
+script.** Both are put in one canonical form first (case, hyphens and a few
+meaningless marks ignored; `lipsync` and `lip-sync`, `U.K.` and `UK`, `13th of December` and
 `December the 13th`, `US$5`, `5 USD` and `five US dollars` each count as one form; a
 bare `$5` or `five dollars` names no country, so it is not `US dollars`, and an ordinal
 such as `a fifth` is never an amount). Then every
@@ -436,10 +450,12 @@ spellings, and `yes`, `yeah`, `okay`, `ok`, `so`, `well` and `hey`, each make a 
 **not a reading** of the script, so a person must review it: `uh-uh`, `mm-mm` and
 `nuh-uh` are a spoken "no", and `yeah, yeah` or `well…` can be one, and the heuristics
 below do not hear any of them as a refusal. Re-record for an automatic match.
-A question mark
-counts as an extra word, and so does any run of letters, digits or symbols that does not
-fold to a-z or 0-9 (another script, an emoji), so a question or a word in another
-language beside the script blocks the match. The refusal heuristics must also hear an
+Punctuation is closed-world too: only `.`, `,`, `;`, `:`, `!`, straight and
+typographic quotes and apostrophes, hyphens and dashes, parentheses, square brackets and
+an ellipsis are ignored. Every other punctuation mark (any question mark, `/`, `*`, `%`,
+`@`, `#`, `_`, `{`, `¡`) counts as an extra word, and so does any run of letters, digits or
+symbols that does not fold to a-z or 0-9 (another script, an emoji), so a question or a
+word in another language beside the script blocks the match. The refusal heuristics must also hear an
 affirmative first-person consent in it. Anything else is **not confirmed**, however
 consent-like it sounds.
 No list of refusal phrasings is complete, which is why nothing but the script can pass
@@ -469,6 +485,14 @@ What happens next:
   retraction), the end date (`YYYY-MM-DD`), the ceiling or `none`, and `anywhere` for an
   unrestricted territory. A grant confirmed this way is published **without** the clip
   hash; the hash stays in the command's result.
+- **A clip is consent for the capture it was recorded for, never for another grant.**
+  After the transcript check and before any question, the clip's SHA-256 is compared with
+  the `consentClipSha256` of every grant this grantor has anchored in its grants graph (any
+  subject, revoked or not). A match is refused (exit 3, "Record a new clip"), with the
+  grant it already backs in `usedBy`, and nothing is published: a kept recording, or a
+  replay of one, never turns withdrawn consent into a fresh machine-verified grant. When
+  the grants graph cannot be read consistently the check cannot be made, and it is exit 9
+  with nothing published.
 - A clip that never arrives, or a failed transcription, is exit 3, and `--force` never
   overrides it.
 
@@ -555,8 +579,17 @@ decide one at a time.** On one machine (processes sharing one `MANDATE_HOME`):
   says the pending render is in use by another mandate process (`record` adds `nothing was
   done here`) and exits 5 at once, having sent, polled and published nothing. Wait for the
   first to finish, then run `mandate record --pending <key>`. A lease whose process died is
-  taken over at once; one whose process stopped refreshing it (every 5 s) is taken over
-  after 30 s.
+  taken over at once. **A lease whose process is alive on this machine is never taken
+  over**, however long ago it was refreshed: a run suspended with Ctrl-Z, a debugger or a
+  VM pause keeps its lease and carries on when resumed, and any other run of that key
+  meanwhile exits 5. A lock or lease file that cannot be parsed, or that names another
+  host, is taken over only once it is an hour old. Trade-off: a crashed process whose pid
+  has since been reused by a live process leaves its lease (or lock) in place until that
+  process exits or someone removes the file.
+- Every pending record carries a `revision`. A write from a copy of the record loaded
+  before another write landed, or from a process that no longer holds the key's lease, is
+  refused (exit 5) and writes nothing, so a recorded status or a derivation attempt is never
+  undone and a job never gets a second derivation.
 - Before dispatching, a render takes the **grant's lock**, reads this machine's pending
   renders again, lets the gate decide again with them counted, and saves its
   `dispatching` record before releasing the lock. So of several renders started at once
@@ -665,9 +698,19 @@ consent clip is evidence bound to the grant by SHA-256.
   it. The refusal heuristics can stop a clip, never pass one, and they do not hear a
   spoken "no" made of sounds (`uh-uh`, `mm-mm`): such a clip is never confirmed
   automatically, but on the typed path the operator watching it is what catches it.
-  Every question mark Unicode classes as punctuation (the Armenian `՞`, the Ethiopic `፧`
-  and the Greek `;` included) is a word of its own, so a reading said as a question is
-  never confirmed; a plain semicolon is not a question mark.
+  Only a short list of punctuation is ignored (`. , ; : !`, quotes and apostrophes,
+  hyphens and dashes, parentheses, square brackets, an ellipsis); every other mark Unicode
+  classes as punctuation is a word of its own, every question mark included (the Armenian
+  `՞`, the Ethiopic `፧`, the medieval `⹔`, the inverted interrobang `⸘` and the Greek `;`),
+  so a reading said as a question is never confirmed; a plain semicolon is not a question
+  mark.
+- **A reused consent clip is caught only by its exact bytes, and only against hashes on
+  the graph.** The script holds nothing specific to one capture, so a recording is refused
+  for a new grant only when its SHA-256 already backs one of this grantor's anchored
+  grants. A re-encoded or trimmed copy has a new hash and is not caught; a clip first used
+  for a grant a person confirmed (published without the hash) cannot be matched; and a
+  grant published moments ago that the grantor's node has not yet shown in a read could be
+  missed.
 - **The deny list is incomplete.** It refuses common honest labels (`undressing`,
   `topless`, `stripper`, `bdsm`, `impostor`, `catfishing`), but `lingerie`, `boudoir`,
   `scam`, `fraud` and `voice-clone` pass today. A grant's `permitsUseClass` list is the

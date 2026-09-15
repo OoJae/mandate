@@ -29,13 +29,13 @@ import { join, resolve } from 'node:path'
 import { DkgNode } from '../src/dkg.mjs'
 import { contextGraphAddress } from '../src/resolve.mjs'
 import { assertContextGraphId } from '../src/queries.mjs'
-import { fileStateStore } from '../src/state-store.mjs'
+import { fileStateStore, ConfigError, absoluteSettingPath, mandateHome } from '../src/state-store.mjs'
 import { normAddress } from '../src/rdf-term.mjs'
 
 export const ENV_KEY = /^(MANDATE_[A-Z0-9_]+|LIVEPEER_AGENT_KEY)$/
 
 /** A configuration problem the operator fixes in the environment or .env; the CLI exits 1 for it. */
-export class ConfigError extends Error {}
+export { ConfigError, mandateHome }
 
 /** Copy allow-listed, unset keys from a .env file into `env`. */
 export function loadEnvFile(path, env = process.env) {
@@ -53,18 +53,27 @@ export function loadEnvFile(path, env = process.env) {
  * Where the env file is looked for: `flag` (--env-path), then MANDATE_ENV_FILE,
  * then `$MANDATE_HOME/.env`, with MANDATE_HOME (default ~/.mandate) taken from
  * the real environment. `explicit` is true for the first two, which must exist.
+ *
+ * MANDATE_ENV_FILE and MANDATE_HOME go through absoluteSettingPath: a leading
+ * `~` is the home directory, empty is unset, and a relative value is a
+ * ConfigError rather than a path under the working directory. A relative
+ * --env-path is the operator's own command line, so it is resolved as typed
+ * (after the same `~` expansion, for the `--env-path=~/x` form a shell leaves).
  */
 export function envFileLocation({ flag, env = process.env } = {}) {
-  if (typeof flag === 'string' && flag) return { path: resolve(flag), source: '--env-path', explicit: true }
-  if (env.MANDATE_ENV_FILE) return { path: resolve(env.MANDATE_ENV_FILE), source: 'MANDATE_ENV_FILE', explicit: true }
-  return { path: join(env.MANDATE_HOME || join(homedir(), '.mandate'), '.env'), source: 'MANDATE_HOME', explicit: false }
+  if (typeof flag === 'string' && flag) return { path: resolve(flag.replace(/^~(?=$|\/)/, () => homedir())), source: '--env-path', explicit: true }
+  const named = absoluteSettingPath(env.MANDATE_ENV_FILE, 'MANDATE_ENV_FILE')
+  if (named) return { path: named, source: 'MANDATE_ENV_FILE', explicit: true }
+  return { path: join(mandateHome(env), '.env'), source: 'MANDATE_HOME', explicit: false }
 }
 
 /**
  * What loadMandateEnv did: `path` is the file loaded (null when none was),
- * `searched` where it looked, and `warnings` anything the operator should see.
+ * `searched` where it looked, `home` the resolved MANDATE_HOME (under which
+ * state and pending renders live) after the file loaded, and `warnings` anything
+ * the operator should see.
  */
-export const envLoad = { path: null, source: null, searched: null, loaded: [], ignored: [], warnings: [] }
+export const envLoad = { path: null, source: null, searched: null, home: null, loaded: [], ignored: [], warnings: [] }
 
 /**
  * Load the env file (see envFileLocation) into `env`. An explicitly named file
@@ -73,13 +82,14 @@ export const envLoad = { path: null, source: null, searched: null, loaded: [], i
  * change which producers and graphs this machine trusts.
  */
 export function loadMandateEnv({ flag, env = process.env } = {}) {
+  Object.assign(envLoad, { path: null, source: null, searched: null, home: null, loaded: [], ignored: [], warnings: [] })
   const where = envFileLocation({ flag, env })
-  Object.assign(envLoad, { path: null, source: where.source, searched: where.path, loaded: [], ignored: [], warnings: [] })
+  Object.assign(envLoad, { source: where.source, searched: where.path })
   let st
   try {
     st = statSync(where.path)
   } catch (e) {
-    if (e.code === 'ENOENT' && !where.explicit) return envLoad
+    if (e.code === 'ENOENT' && !where.explicit) return Object.assign(envLoad, { home: mandateHome(env) })
     throw new ConfigError(`the env file ${where.path} (from ${where.source}) cannot be read: ${e.code ?? e.message}`)
   }
   if (!st.isFile()) throw new ConfigError(`the env file ${where.path} (from ${where.source}) is not a file`)
@@ -93,12 +103,21 @@ export function loadMandateEnv({ flag, env = process.env } = {}) {
     throw new ConfigError(`the env file ${where.path} (from ${where.source}) cannot be read: ${e.code ?? e.message}`)
   }
   Object.assign(envLoad, { path: where.path, loaded: r.loaded, ignored: r.ignored })
+  // The file may itself set MANDATE_HOME (as ~/.mandate, say): check it now, so
+  // a relative value stops every command here, not only the ones that touch state.
+  try {
+    envLoad.home = mandateHome(env)
+  } catch (e) {
+    if (e instanceof ConfigError && r.loaded.includes('MANDATE_HOME')) throw new ConfigError(`${e.message} (set in the env file ${where.path})`)
+    throw e
+  }
   return envLoad
 }
 
 /**
  * For a script run from the repository (publish-ontology, the spikes): load the
- * same env file as the CLI from `--env-path <path>` in `argv`, refusing Node's
+ * same env file as the CLI from `--env-path <path>` or `--env-path=<path>` in
+ * `argv` (the two forms the CLI accepts; given more than once is refused), refusing Node's
  * own --env-file. Prints warnings and the file used; exits 1 on a bad flag or
  * an unreadable named file. Returns envLoad.
  */
@@ -107,11 +126,22 @@ export function loadScriptEnv(argv = process.argv.slice(2), { log = console.log,
     error('--env-file is read by Node.js itself, which applies a NODE_OPTIONS from that file; name the env file with --env-path <path> instead')
     return exit(1)
   }
-  const at = argv.indexOf('--env-path')
-  const flag = at === -1 ? undefined : argv[at + 1]
-  if (at !== -1 && (!flag || flag.startsWith('--'))) {
-    error('--env-path needs a path')
+  // The CLI takes `--env-path <path>` and `--env-path=<path>`; so do scripts.
+  const given = argv.filter(a => a === '--env-path' || a.startsWith('--env-path='))
+  if (given.length > 1) {
+    error('--env-path given more than once')
     return exit(1)
+  }
+  let flag
+  if (given.length) {
+    const at = argv.indexOf(given[0])
+    const spaced = given[0] === '--env-path'
+    flag = spaced ? argv[at + 1] : given[0].slice('--env-path='.length)
+    // As in bin/args.mjs: only the spaced form can swallow the next flag.
+    if (!flag || (spaced && flag.startsWith('--'))) {
+      error('--env-path needs a path')
+      return exit(1)
+    }
   }
   let loaded
   try {

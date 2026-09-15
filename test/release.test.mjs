@@ -506,6 +506,68 @@ test('ci: installs run no scripts, and the test and mutation jobs run what they 
   assert.ok(Math.abs(claimed - total) <= 50, `the ci.yml comment says about ${claimed} mutants; there are ${total}`)
 })
 
+// Each action at the commit of the release its comment names, checked against the tags
+// with git ls-remote when pinned. A new SHA must change this table too, so a pin to an
+// arbitrary 40-hex commit (a fork's, or a typo) does not pass on shape alone.
+const ACTION_PINS = {
+  'actions/checkout': ['3d3c42e5aac5ba805825da76410c181273ba90b1', 'v7.0.1'],
+  'actions/setup-node': ['820762786026740c76f36085b0efc47a31fe5020', 'v7.0.0'],
+  'actions/upload-artifact': ['043fb46d1a93c77aae656e7c1c64a875d1fc6a0a', 'v7.0.1'],
+  'actions/download-artifact': ['3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c', 'v8.0.1'],
+}
+
+test('workflows: every action is at the known commit for the release its comment names', () => {
+  for (const [name, text] of [['release', releaseText], ['ci', ciText]]) {
+    const lines = text.split('\n').filter(l => /^\s*-?\s*uses:/.test(l))
+    assert.ok(lines.length > 0, name)
+    for (const line of lines) {
+      const m = /^\s*-?\s*uses: ([\w.-]+\/[\w.-]+)@([0-9a-f]{40}) # (v[\d.]+)$/.exec(line)
+      assert.ok(m, `${name}: ${line}`)
+      assert.deepEqual([m[2], m[3]], ACTION_PINS[m[1]] ?? null, `${name}: ${m[1]}`)
+    }
+  }
+})
+
+test('ci: runs on every push to main and every pull request, read-only, with no job waiting on another', () => {
+  // A paths filter or a missing pull_request trigger skips the mutation job (if: pull_request)
+  // without turning anything red.
+  assert.deepEqual(ci.on, { push: { branches: ['main'] }, pull_request: null })
+  assert.deepEqual(ci.permissions, { contents: 'read' })
+  for (const [name, job] of Object.entries(ci.jobs)) {
+    // Both jobs run dependency code: a job-level grant (write-all, contents: write) would hand it a writable token.
+    if ('permissions' in job) assert.deepEqual(job.permissions, { contents: 'read' }, `ci/${name}: permissions`)
+    // needs: mutation on test would skip the tests on every push, where mutation does not run.
+    assert.ok(!('needs' in job), `ci/${name}: needs`)
+    assert.ok(!('outputs' in job), `ci/${name}: outputs`)
+  }
+  assert.equal(ci.jobs.mutation.if, "github.event_name == 'pull_request'")
+})
+
+test('ci: the Node matrix starts at the engines floor and includes the release Node major', () => {
+  const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'))
+  const floor = /^>=(\d+)\.(\d+)\.0$/.exec(pkg.engines.node)
+  assert.ok(floor, pkg.engines.node)
+  const nodes = ci.jobs.test.strategy.matrix.node
+  assert.ok(Array.isArray(nodes), 'matrix.node is a list')
+  const key = v => v.split('.').map(Number)
+  const sorted = [...nodes].sort((a, b) => key(a)[0] - key(b)[0] || (key(a)[1] ?? 0) - (key(b)[1] ?? 0))
+  assert.deepEqual(nodes, sorted, 'matrix in ascending order')
+  // The floor itself, not just its major: 22.13 lacks APIs that 22.15 has (module.registerHooks).
+  assert.equal(nodes[0], `${floor[1]}.${floor[2]}`)
+  const releaseMajor = release.jobs.test.steps.find(s => actionOf(s) === 'actions/setup-node').with['node-version'].split('.')[0]
+  assert.ok(nodes.includes(releaseMajor), `release Node ${releaseMajor} is in the ci matrix`)
+  assert.equal(ci.jobs.test.strategy['fail-fast'], 'false', 'one failing Node does not cancel the others')
+})
+
+test('release: pack exports the digest it computed, and the uploaded artifact id', () => {
+  assert.deepEqual(release.jobs.pack.outputs, {
+    tarball: '${{ steps.pack.outputs.tarball }}',
+    sha256: '${{ steps.pack.outputs.sha256 }}',
+    'artifact-id': '${{ steps.upload.outputs.artifact-id }}',
+  })
+  assert.deepEqual(release.jobs.pack.steps.map(s => s.id ?? null), [null, null, null, null, 'pack', 'upload'])
+})
+
 test('ci: the namespace documents check fails on a modified or untracked file, and passes when current', () => {
   const run = ci.jobs.test.steps[4].run
   assert.match(run, /^node scripts\/build-vocab-docs\.mjs\n/)

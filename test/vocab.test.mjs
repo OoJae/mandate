@@ -129,6 +129,19 @@ test('scripts/publish-skill.mjs reads only Mandate keys from its env file ($MAND
     assert.match(r.stdout, new RegExp(`^env file: ${join(dir, '.mandate', '.env').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'm'))
     assert.match(r.stdout, /dry run/)
     assert.doesNotMatch(r.stderr, /NODE_TLS_REJECT_UNAUTHORIZED/)
+    // A named file in the `=` form the CLI accepts is the one read, never the default
+    // file (whose LIVEPEER_AGENT_KEY a publish would otherwise send); a repeated or empty flag is exit 1.
+    const named = join(dir, 'named.env')
+    writeFileSync(named, 'MANDATE_READ_MAX=10\nHTTP_PROXY=http://127.0.0.1:9\n', { mode: 0o600 })
+    const eq = spawnSync(process.execPath, [join(repo, 'scripts/publish-skill.mjs'), `--env-path=${named}`], { cwd: dir, env, encoding: 'utf8', timeout: 30_000 })
+    assert.equal(eq.status, 0, eq.stdout + eq.stderr)
+    assert.match(eq.stdout, new RegExp(`^env file: ${named.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'm'))
+    assert.match(eq.stdout, /^\.env: ignored HTTP_PROXY \(/m)
+    for (const bad of [['--env-path=', named], ['--env-path', named, `--env-path=${named}`], ['--env-path=']]) {
+      const b = spawnSync(process.execPath, [join(repo, 'scripts/publish-skill.mjs'), ...bad.filter(a => a !== named || bad[0] !== '--env-path=')], { cwd: dir, env, encoding: 'utf8', timeout: 30_000 })
+      assert.equal(b.status, 1, JSON.stringify(bad) + b.stdout + b.stderr)
+      assert.match(b.stderr, /--env-path (needs a path|given more than once)/)
+    }
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }

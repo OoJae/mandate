@@ -7,11 +7,45 @@
  * store remembers both per context graph.
  */
 import { mkdirSync, readFileSync, renameSync, writeFileSync, chmodSync } from 'node:fs'
-import { join } from 'node:path'
+import { isAbsolute, join, sep } from 'node:path'
 import { homedir } from 'node:os'
 
 /** The local state file exists but cannot be read or parsed. A reader must stop, not start from empty memory. */
 export class StateReadError extends Error {}
+
+/**
+ * A configuration problem the operator fixes in the environment or env file;
+ * the CLI exits 1 for it. Defined here, and re-exported by bin/config.mjs, so
+ * the library's path resolution can raise it without importing the CLI.
+ */
+export class ConfigError extends Error {}
+
+/**
+ * A path taken from a setting such as MANDATE_HOME or MANDATE_ENV_FILE, made
+ * absolute without looking at the working directory. A leading `~` or `~/` is
+ * the user's home directory (a quoted export, or a line in an env file, leaves
+ * it unexpanded). Unset or empty gives undefined. Anything still relative after
+ * that is a ConfigError: resolving it against the working directory would let
+ * whatever folder Mandate is run from (a delivery with its own `~/.mandate/.env`)
+ * supply the trust settings, the local state and the pending-spend records.
+ */
+export function absoluteSettingPath(value, name) {
+  if (value === undefined || value === null || value === '') return undefined
+  const expanded = /^~(?=$|\/)/.test(value) || (sep === '\\' && /^~\\/.test(value))
+    ? homedir() + value.slice(1)
+    : value
+  if (!isAbsolute(expanded)) {
+    throw new ConfigError(`${name} must be an absolute path (or start with ~/), got ${JSON.stringify(value)}; a relative path would be read from whatever directory Mandate is run in`)
+  }
+  return expanded
+}
+
+/**
+ * Mandate's home directory: MANDATE_HOME (see absoluteSettingPath), else
+ * ~/.mandate. The env file, local state and pending renders all live under it,
+ * so every one of them must use this.
+ */
+export const mandateHome = (env = process.env) => absoluteSettingPath(env.MANDATE_HOME, 'MANDATE_HOME') ?? join(homedir(), '.mandate')
 
 const empty = () => ({ version: 1, knownUals: {}, revocations: {} })
 
@@ -48,7 +82,7 @@ export function memoryStateStore() {
   }
 }
 
-export const defaultStateDir = () => join(process.env.MANDATE_HOME ?? join(homedir(), '.mandate'), 'state')
+export const defaultStateDir = () => join(mandateHome(), 'state')
 
 /** One JSON file per context graph under `dir` (mode 0700), written atomically with mode 0600. */
 export function fileStateStore(dir = defaultStateDir()) {

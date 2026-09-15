@@ -1170,3 +1170,37 @@ test('a reading followed by a question mark from any script is never confirmed, 
     assert.ok(scriptWords(`2026${q}`).includes('?'), `U+${q.codePointAt(0).toString(16)}`)
   }
 })
+
+test('punctuation is closed-world: only a short list of harmless marks is dropped, every other one blocks a reading', () => {
+  const req = { capability: ['sync-lipsync-v3'], useClass: ['advertising'], territory: ['GB'], validUntil: '2026-12-13T00:00:00Z', maxSpendUsd: 5 }
+  const script = consentScript(req)
+  const hex = c => `U+${c.codePointAt(0).toString(16)}`
+  // A clean reading, with the harmless marks ASR and people type, still matches.
+  assert.equal(checkSpokenScope(script, req).confirmed, true)
+  const clean = `“I consent” – to lip-sync… of my likeness (for advertising) in the ‘United Kingdom’, until 13 December 2026; spending is capped at 5 US dollars! «[—]»`
+  assert.equal(checkSpokenScope(clean, req).confirmed, true, JSON.stringify(checkSpokenScope(clean, req).scriptMatch))
+  // Every question mark, the medieval one and the inverted interrobang included,
+  // and a sample of other punctuation, after the reading and inside it.
+  const marks = ['?', '¿', '⸮', '‽', '⸘', '⹔', '՞', '؟', '፧', '⁇', '？', '/', '\\', '*', '%', '@', '#', '_', '{', '}', '§', '¶', '†', '‡', '•', '※', '¡', '、', '。', '·', '،', '।', '⸗', '〜', '〃', '＃', '＠']
+  for (const q of marks) {
+    for (const t of [`${script}${q}`, `${script} ${q}`, script.replace(' of ', ` ${q} of `), script.replace('likeness', `likeness${q}`)]) {
+      const r = checkSpokenScope(t, req)
+      assert.equal(r.confirmed, false, `${hex(q)} in ${t}`)
+      assert.equal(r.scriptMatch.matched, false, `${hex(q)} in ${t}`)
+      assert.ok(r.scriptMatch.extra.length >= 1, `${hex(q)}: ${r.scriptMatch.extra}`)
+    }
+  }
+  // Over every code point Unicode classes as punctuation: it is dropped only if
+  // its NFKD form is made of the allow-listed marks (plus spaces and accents).
+  const allowed = /^[\s̀-ͯ.,;:!'"«»‘-‟‹›‐-―()[\]-]*$/
+  const leaked = []
+  for (let cp = 0; cp < 0x110000; cp++) {
+    if (cp >= 0xd800 && cp < 0xe000) continue
+    const ch = String.fromCodePoint(cp)
+    if (!/\p{P}/u.test(ch)) continue
+    const dropped = scriptWords(`consent${ch}`).length === 1
+    // The Greek question mark folds to ";" but is read as a question mark first.
+    if (dropped !== (cp !== 0x37e && allowed.test(ch.normalize('NFKD')))) leaked.push(hex(ch))
+  }
+  assert.deepEqual(leaked, [])
+})

@@ -13,31 +13,21 @@
  * can later update or delete, since ownership is verified by API key.
  */
 import { readFileSync } from 'node:fs'
-import { loadMandateEnv } from '../bin/config.mjs'
+import { loadScriptEnv } from '../bin/config.mjs'
 
 const arg = (name, def) => {
   const i = process.argv.indexOf(`--${name}`)
   return i > -1 ? process.argv[i + 1] : def
 }
 
-// The same env file as the CLI: --env-path <path>, else MANDATE_ENV_FILE, else
-// $MANDATE_HOME/.env (default ~/.mandate/.env); a .env in the working directory
-// is never read. Only MANDATE_* and LIVEPEER_AGENT_KEY come from it. This
-// request carries the key, so a stray NODE_TLS_REJECT_UNAUTHORIZED=0 or proxy
-// setting copied into the file must not reach it.
-if (process.argv.slice(2).some(a => /^--env-file(?:-if-exists)?(?:=|$)/.test(a))) {
-  console.error('--env-file is read by Node.js itself, which applies a NODE_OPTIONS from that file; name the env file with --env-path <path> instead')
-  process.exit(1)
-}
-let envFile
-try {
-  envFile = loadMandateEnv({ flag: arg('env-path') })
-} catch (e) {
-  console.error(e.message)
-  process.exit(1)
-}
-for (const w of envFile.warnings) console.error(`warning: ${w}`)
-console.log(envFile.path ? `env file: ${envFile.path}` : `env file: none (looked for ${envFile.searched})`)
+// The same env file as the CLI: --env-path <path> or --env-path=<path>, else
+// MANDATE_ENV_FILE, else $MANDATE_HOME/.env (default ~/.mandate/.env); a .env in
+// the working directory is never read. Only MANDATE_* and LIVEPEER_AGENT_KEY come
+// from it. This request carries the key, so a stray NODE_TLS_REJECT_UNAUTHORIZED=0
+// or proxy setting copied into the file must not reach it. loadScriptEnv refuses
+// --env-file, an empty or repeated --env-path, and an unreadable named file (exit
+// 1), so the `=` form never falls back to the default file's key.
+const envFile = loadScriptEnv()
 if (envFile.ignored.length) console.log(`.env: ignored ${envFile.ignored.join(', ')} (only MANDATE_* and LIVEPEER_AGENT_KEY are read)`)
 const list = (name, def) => arg(name, def).split(',').map(s => s.trim()).filter(Boolean)
 

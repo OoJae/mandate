@@ -1,9 +1,9 @@
 import { test, before, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
-import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync, statSync, readdirSync, mkdirSync, chmodSync } from 'node:fs'
+import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync, statSync, readdirSync, mkdirSync, chmodSync, utimesSync } from 'node:fs'
 import { createServer } from 'node:http'
-import { tmpdir } from 'node:os'
+import { tmpdir, hostname } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { request as httpRequest } from 'node:http'
@@ -58,16 +58,39 @@ export async function fakeClient() {
   }
 }
 `
-const PRELOAD = client => `import { registerHooks } from 'node:module'
-registerHooks({
-  load(url, context, nextLoad) {
-    const r = nextLoad(url, context)
-    if (!url.endsWith('/src/livepeer.mjs')) return r
-    const source = String(r.source).replace('export async function connect(', 'async function realConnect(')
-      + '\\nexport async function connect(surface) { return (await import(${JSON.stringify(client)})).fakeClient(surface) }\\n'
-    return { ...r, source }
-  },
-})
+/*
+ * The hook rewrites only src/livepeer.mjs. module.registerHooks (synchronous, in
+ * this thread) exists from Node 22.15 and 23.5; the engines floor is 22.13, which
+ * has only module.register (hooks in a worker thread, and deprecated from Node 26
+ * with a warning on stderr). So the preload uses registerHooks where it exists and
+ * register otherwise. MANDATE_TEST_HOOKS=register forces the fallback, so a Node
+ * that has both still runs it.
+ */
+const HOOKS = client => `const rewrite = (url, r) => {
+  if (!url.endsWith('/src/livepeer.mjs')) return r
+  // register hands the source over as bytes (a Uint8Array on Node 22), registerHooks as a Buffer or string.
+  const text = typeof r.source === 'string' ? r.source : new TextDecoder().decode(r.source)
+  const source = text.replace('export async function connect(', 'async function realConnect(')
+    + '\\nexport async function connect(surface) { return (await import(${JSON.stringify(client)})).fakeClient(surface) }\\n'
+  return { ...r, source }
+}
+export function loadSync(url, context, nextLoad) { return rewrite(url, nextLoad(url, context)) }
+export async function load(url, context, nextLoad) { return rewrite(url, await nextLoad(url, context)) }
+`
+const PRELOAD = hooks => `import * as mod from 'node:module'
+if (typeof mod.registerHooks === 'function' && process.env.MANDATE_TEST_HOOKS !== 'register') {
+  mod.registerHooks({ load: (await import(${JSON.stringify(hooks)})).loadSync })
+} else {
+  mod.register(${JSON.stringify(hooks)})
+}
+// Only loopback is reachable, so a hook that failed to apply ends the run at once
+// instead of reaching the real Livepeer Agent.
+const realFetch = globalThis.fetch
+globalThis.fetch = (input, init) => {
+  const host = new URL(input instanceof Request ? input.url : String(input)).hostname
+  if (host !== '127.0.0.1' && host !== 'localhost') return Promise.reject(new Error('test harness: no network to ' + host))
+  return realFetch(input, init)
+}
 if (process.env.MANDATE_TEST_TTY === '1') process.stdin.isTTY = true
 `
 
@@ -82,7 +105,8 @@ before(async () => {
     homes[role] = dir
   }
   writeFileSync(join(work, 'fake-livepeer.mjs'), FAKE_CLIENT)
-  writeFileSync(join(work, 'preload.mjs'), PRELOAD(pathToFileURL(join(work, 'fake-livepeer.mjs')).href))
+  writeFileSync(join(work, 'livepeer-hooks.mjs'), HOOKS(pathToFileURL(join(work, 'fake-livepeer.mjs')).href))
+  writeFileSync(join(work, 'preload.mjs'), PRELOAD(pathToFileURL(join(work, 'livepeer-hooks.mjs')).href))
   // Media the fake platform hands back: each path has its own bytes.
   media = createServer((req, res) => {
     if (req.url.startsWith('/missing')) { res.writeHead(404); return res.end() }
@@ -517,6 +541,18 @@ test('D1: consent confirms only a reading of the script; anything else is exit 3
   assert.match(loose.stderr, /NOT A READING OF THE CONSENT SCRIPT/)
   const contradicted = await mandate(args, { lp: consentLp(`${consentScript(requested)} But not for advertising.`) })
   assert.equal(contradicted.code, 8, contradicted.stderr)
+})
+
+test('harness: the fake Livepeer hook works through module.register too, the only hook API on the Node 22.13 floor', async () => {
+  const requested = { capability: ['talking-head'], useClass: ['advertising'], territory: ['GB'] }
+  const args = ['consent', '--capability', 'talking-head', '--use-class', 'advertising', '--territory', 'GB', '--json']
+  // The deprecation warning module.register prints on Node 26 is not what is checked here.
+  for (const env of [{}, { MANDATE_TEST_HOOKS: 'register', NODE_NO_WARNINGS: '1' }]) {
+    const r = await mandate(args, { lp: consentLp(consentScript(requested)), env })
+    assert.equal(r.code, 0, `${JSON.stringify(env)}: ${r.stderr}`)
+    assert.equal(json(r).confirmed, true)
+    assert.ok(r.calls.length > 0, 'the fake client answered')
+  }
 })
 
 /* Rendering */
@@ -1903,4 +1939,83 @@ test('B7: publish-ontology and every spike that reads bin/config.mjs load the CL
     assert.match(src, /^(?:const envFile = )?loadScriptEnv\(\)$/m, f)
   }
   assert.match(readFileSync(join(repo, 'spikes/s6c-forgery.mjs'), 'utf8'), /\.\.\.\(envFile\.path \? \['--env-path', envFile\.path\] : \[\]\)/)
+})
+
+/* A consent clip answers one capture; a suspended or stale pending run never writes over another */
+
+test('consent: the same clip is refused for a new grant from the same grantor, revoked or not, for any subject; nothing is published', async () => {
+  const lp = consentLp(scriptFor({ territory: ['GB'] }), { tag: 'kept-recording' })
+  const a = await mandate(consentGrant({ subject: 'rep', territory: 'GB', 'valid-until': until }), { lp, tty: true })
+  assert.equal(a.code, 0, a.stdout)
+  const first = json(a)
+  assert.equal(first.consent.confirmedBy, 'script')
+  const p0 = publishes(grantor)
+  // Not revoked: refused.
+  const live = await mandate(consentGrant({ subject: 'rep2', territory: 'GB', 'valid-until': until }), { lp, tty: true })
+  assert.equal(live.code, 3, live.stdout)
+  assert.equal(json(live).granted, false)
+  assert.equal(json(live).reason, 'consent clip reused')
+  assert.equal(json(live).usedBy[0].id, first.grant.id)
+  assert.equal(json(live).usedBy[0].revoked, false)
+  assert.equal(publishes(grantor), p0)
+  // Revoked: refused too, and says so.
+  assert.equal((await mandate(['revoke', '--id', first.grant.id, '--yes', '--json'])).code, 0)
+  const p1 = publishes(grantor)
+  const again = await mandate(consentGrant({ subject: 'rep', territory: 'GB', 'valid-until': until }), { lp, tty: true })
+  assert.equal(again.code, 3, again.stdout)
+  assert.match(json(again).detail, /already backs grant .*which was revoked; a recording is consent for the capture it was made for/)
+  assert.equal(json(again).usedBy[0].revoked, true)
+  assert.equal(publishes(grantor), p1)
+  // A new recording is accepted.
+  const fresh = await mandate(consentGrant({ subject: 'rep', territory: 'GB', 'valid-until': until }), { lp: consentLp(scriptFor({ territory: ['GB'] }), { tag: 'new-recording' }), tty: true })
+  assert.equal(fresh.code, 0, fresh.stdout)
+  assert.notEqual(json(fresh).grant.consentClipSha256, first.grant.consentClipSha256)
+})
+
+async function submittedPendingRecord(tag, jobId) {
+  const g = json(await mandate(grantArgs({ subject: tag })))
+  const key = `mandate-${createHash('sha256').update(tag).digest('hex').slice(0, 32)}`
+  const now = new Date().toISOString()
+  store().save({ key, idempotencyKey: key, status: 'submitted', jobId, mayHaveStarted: true, capability: 'talking-head', grantId: g.grant.id, subject: g.grant.subject, inputs: { image_url: mediaUrl('in.jpg') }, sourceUrl: null, estimateUsd: 0.84, estimateSource: 'static list price', priceUnit: 'second', createdAt: now, attempts: [{ n: 1, pid: 999_999_050, startedAt: now, sentAt: now, endedAt: now, status: 'submitted', jobId, mayHaveStarted: true }] })
+  return { g, key }
+}
+
+test('BLOCKER 3: record --pending never takes over a lease whose holder is alive here, however long it has not touched it (a suspended run)', async () => {
+  const { key } = await submittedPendingRecord('lse', 'mjob_lse0000001')
+  const lease = join(pendingDir(), `${key}.json.lease`)
+  // This test process stands in for a suspended holder: alive, lease untouched for 2 hours.
+  writeFileSync(lease, JSON.stringify({ pid: process.pid, host: hostname(), at: 'then', token: 'suspended' }))
+  const old = new Date(Date.now() - 2 * 3600_000)
+  utimesSync(lease, old, old)
+  const k0 = world[DERIVS_CG].kas.length
+  const r = await mandate(['record', '--pending', key, '--json'], { lp: { get_create_media: { structured: { status: 'done', url: mediaUrl('lse.mp4'), cost_usd_estimated: 0.5 } } } })
+  assert.equal(r.code, 5, r.stdout)
+  assert.equal(json(r).outcome, 'in-use')
+  assert.equal(r.calls.length, 0)
+  assert.equal(world[DERIVS_CG].kas.length, k0)
+  assert.equal(store().load(key).status, 'submitted')
+  assert.ok(readFileSync(lease, 'utf8').includes('suspended'))
+  rmSync(lease)
+})
+
+test('BLOCKER 3: record --pending whose copy went stale during its poll writes nothing and publishes nothing', async () => {
+  const { key } = await submittedPendingRecord('stl', 'mjob_stl0000001')
+  const k0 = world[DERIVS_CG].kas.length
+  const p0 = publishes(producer)
+  const run = mandate(['record', '--pending', key, '--json'], { lp: { get_create_media: [{ structured: { status: 'running' } }, { structured: { status: 'done', url: mediaUrl('stl.mp4'), cost_usd_estimated: 0.5 } }] } })
+  const log = join(work, `lp-${lpSeq}.log`)
+  // Once its first poll has answered 'running' it waits 10 s holding the copy it
+  // loaded; another write lands then (as a run that took the lease over would make).
+  for (let i = 0; i < 600 && !(existsSync(log) && readFileSync(log, 'utf8').includes('get_create_media')); i++) await sleepMs(50)
+  assert.ok(readFileSync(log, 'utf8').includes('get_create_media'), 'the record run reached its poll')
+  await sleepMs(500)
+  const s = store()
+  s.save({ ...s.load(key), status: 'recorded', mediaUrl: mediaUrl('stl-other.mp4'), derivation: { id: 'urn:mandate:derivation:00000000000000dd:00000000000000dd', ual: 'did:dkg:x/9' } })
+  const onDisk = readFileSync(join(pendingDir(), `${key}.json`), 'utf8')
+  const r = await run
+  assert.equal(r.code, 5, r.stdout)
+  assert.match(json(r).error, /changed on disk/)
+  assert.equal(readFileSync(join(pendingDir(), `${key}.json`), 'utf8'), onDisk)
+  assert.equal(world[DERIVS_CG].kas.length, k0)
+  assert.equal(publishes(producer), p0)
 })

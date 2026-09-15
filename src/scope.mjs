@@ -428,8 +428,9 @@ export function checkSpokenScope(transcript, requested = {}) {
 // term word, "my", "likeness", "until", each word of the date, "spending",
 // "capped", the amount and "US dollars" (a bare "dollars" or "$" is not). "of the likeness" (no "my") and
 // "capped at 5" (no "dollars") change what was agreed, so they are not readings.
-// A "?" and any letter, digit or symbol outside a-z0-9 are words of their own
-// (see scriptWords), so they are extra, never filler.
+// A "?", any punctuation outside a short harmless list, and any letter, digit
+// or symbol outside a-z0-9 are words of their own (see scriptWords), so they
+// are extra, never filler.
 export const SCRIPT_MAX_MISSES = 2
 // Unaligned transcript words that may be ignored. Deliberately short and closed:
 // only words that cannot carry a refusal on their own or in any combination of
@@ -524,12 +525,20 @@ export function scriptWords(text) {
     // Armenian, Ethiopic, Limbu, Old Nubian, Vai, Bamum, Chakma and Adlam marks
     // are punctuation, not letters, so without this they would be dropped.
     .replace(/[?\u00bf\u055e\u061f\u1367\u1945\u203d\u2cfa\u2cfb\u2e2e\ua60f\ua6f7\u{11143}\u{1e95f}]/gu, ' ? ')
+    // Closed world for punctuation too: only this short list of marks that
+    // carry no meaning of their own is dropped: . , ; : ! ' " and typographic
+    // quotes, hyphens and dashes, parentheses and brackets (NFKD has already
+    // turned an ellipsis into dots). Every other character Unicode classes as
+    // punctuation (\p{P}), such as a medieval question mark, an inverted
+    // interrobang, "/", "*", "%" or "@", is a word of its own and blocks the match.
+    .replace(/[.,;:!'"\u00ab\u00bb\u2018-\u201f\u2039\u203a\u2010-\u2015()[\]-]/g, ' ')
+    .replace(/\p{P}/gu, p => ` ${p} `)
     // Closed world: a letter, digit, symbol or mark that did not fold to a-z0-9
     // (Cyrillic, CJK, Arabic, Devanagari, small capitals, emoji, a cross mark)
     // is never thrown away. Each run of them is one word, so it is extra and
     // blocks the match: a refusal in another script cannot sit beside a reading.
     .replace(/(?:(?![a-z0-9])[\p{L}\p{N}\p{S}\p{M}])+/gu, run => ` ${run} `)
-    .replace(/[^a-z0-9?\p{L}\p{N}\p{S}\p{M}]+/gu, ' ')
+    .replace(/[^a-z0-9\p{L}\p{N}\p{S}\p{M}\p{P}]+/gu, ' ')
   let t = s.trim().split(' ').filter(Boolean)
   t = t.flatMap(w => ({ lipsync: ['lip', 'sync'], lipsyncing: ['lip', 'syncing'], faceswap: ['face', 'swap'], st: ['saint'] })[w] ?? [w])
   t = numbersToDigits(t)

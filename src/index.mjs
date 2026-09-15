@@ -21,7 +21,9 @@ export { grantToQuads, stateToQuads, derivationToQuads, grantToTurtle, stateToTu
 export { verifyKnowledge, blastRadius, CLEAR, TAINTED, UNKNOWN, INCONCLUSIVE } from './verify-core.mjs'
 export { readKnowledge, readPublisher, READ_DEFAULTS } from './resolve.mjs'
 export { anchorsFromMeta, checkConsistency, reduceSlice } from './provenance.mjs'
-export { memoryStateStore, fileStateStore, StateReadError } from './state-store.mjs'
+// mandateHome is where fileStateStore() keeps state by default: MANDATE_HOME with a
+// leading ~ expanded, never relative (ConfigError), else ~/.mandate.
+export { memoryStateStore, fileStateStore, StateReadError, mandateHome, ConfigError } from './state-store.mjs'
 export { makeSubject, subjectAddress, TermError, InvalidIriError, UnpublishableLiteralError } from './rdf-term.mjs'
 export { reconcile } from './derivation.mjs'
 // The script and its matcher go with the check: a harness that shows or reads the
