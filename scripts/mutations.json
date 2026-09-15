@@ -2,6 +2,8 @@
   "about": "Security guards for scripts/mutation-check.mjs. Each entry removes or weakens one guard; the test suite must fail for every one. When a refactor moves a guard, update its find/replace here rather than deleting the entry.",
   "slowTests": ["test/cli.test.mjs"],
   "mutants": [
+    { "id": "fetch-deadline-timer-counts", "file": "src/fetch-bytes.mjs", "guard": "the deadline timer's own rejection is a timeout even when the clock reads just before the deadline",
+      "find": "if (last?.timedOut === true || now() >= deadline) throw", "replace": "if (now() >= deadline) throw", "tests": ["test/execute.test.mjs"] },
     { "id": "gate-grantor-did", "file": "src/gate.mjs", "guard": "a grant's grantor DID must name its publisher",
       "find": " && agentAddress(g.grantor) === a", "replace": "" },
     { "id": "gate-grant-iri-address", "file": "src/gate.mjs", "guard": "a grant id must embed its publisher's address",

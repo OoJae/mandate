@@ -987,6 +987,11 @@ describe('round three: execute and fetch-bytes', () => {
     await new Promise(r => setTimeout(r, 10))
     assert.equal(returned, true)
 
+    // The deadline timer may fire before the clock reads the deadline: still a timeout.
+    const early = { cancel: async () => {}, [Symbol.asyncIterator]: () => ({ next: () => new Promise(() => {}), return: async () => ({ done: true }) }) }
+    await within(assert.rejects(sha256OfUrl('https://h.test/a.mp4', { timeoutMs: 50, attempts: 3, backoffMs: 0, sleep: async () => {}, now: () => 0, fetch: async () => fakeRes(early) }),
+      e => e instanceof FetchBytesError && /timed out/.test(e.message)), 2000, 'early timer')
+
     const times = [0, 0, 50, 50, 200]
     let fetches = 0
     const clock = () => times.length > 1 ? times.shift() : times[0]

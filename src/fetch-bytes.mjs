@@ -16,11 +16,12 @@
 import { createHash } from 'node:crypto'
 
 export class FetchBytesError extends Error {
-  constructor(message, { status = null, final = false } = {}) {
+  constructor(message, { status = null, final = false, timedOut = false } = {}) {
     super(message)
     this.name = 'FetchBytesError'
     this.status = status
     this.final = final
+    this.timedOut = timedOut
   }
 }
 
@@ -58,7 +59,7 @@ const MAX_TIMER_MS = 2_147_483_647
 function beforeDeadline(promise, ms, onTimeout) {
   let timer
   const expired = new Promise((_, reject) => {
-    timer = setTimeout(() => { onTimeout?.(); reject(new FetchBytesError('timed out fetching media')) }, Math.max(0, ms))
+    timer = setTimeout(() => { onTimeout?.(); reject(new FetchBytesError('timed out fetching media', { timedOut: true })) }, Math.max(0, ms))
   })
   return Promise.race([promise, expired]).finally(() => clearTimeout(timer))
 }
@@ -137,11 +138,13 @@ export async function sha256OfUrl(url, opts = {}) {
     } catch (e) {
       if (e instanceof FetchBytesError && e.final) throw e
       last = e
-      if (now() >= deadline) break
+      // A timer can fire a millisecond before the clock reaches the deadline, so
+      // the deadline's own rejection counts as the deadline, whatever now() says.
+      if (e?.timedOut === true || now() >= deadline) break
       if (i < attempts - 1) await sleep(Math.min(backoffMs * 2 ** i, Math.max(0, deadline - now())))
     }
   }
   const why = last?.cause?.code ?? last?.name ?? last?.message
-  if (now() >= deadline) throw new FetchBytesError(`timed out fetching media after ${tried} attempt${tried === 1 ? '' : 's'} within ${timeoutMs}ms: ${why}`)
+  if (last?.timedOut === true || now() >= deadline) throw new FetchBytesError(`timed out fetching media after ${tried} attempt${tried === 1 ? '' : 's'} within ${timeoutMs}ms: ${why}`)
   throw new FetchBytesError(`cannot fetch media after ${tried} attempts: ${why}`)
 }
