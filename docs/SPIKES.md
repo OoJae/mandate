@@ -1,7 +1,28 @@
-# Day-zero spike results
+# Spike results
 
 Every claim below was produced by running the thing, not by reading documentation.
-Raw fixtures are in `spikes/out/`.
+Sections are in the order they were run. Scratch output from the early spikes went to
+`spikes/out/`, which is not committed; committed evidence is in
+[`docs/evidence/`](evidence/) and the live fixtures the tests use in
+[`test/fixtures/live/`](../test/fixtures/live/).
+
+## Status
+
+| Spike | Result | Where |
+|---|---|---|
+| S1 Livepeer capability registry | GREEN | below |
+| S2 Consent capture link | GREEN for the link only: a link was minted and its page loaded. No real upload or transcription is committed; the phone capture in `demo/full.mjs --consent` is pending | below |
+| S3 DKG v10 install | GREEN | below |
+| S4 Two independent parties | GREEN | below |
+| S5 Testnet anchoring | GREEN after manual funding | "S5 revisited" |
+| S6 Author attestation, S6b forging it from the producer's node | GREEN: the producer's node refuses to seal as the grantor | "S6" |
+| S6c Forgery of graph *content* from the producer's node | GREEN against 0.2.0 on all three nodes, the grantor's, the producer's and the read-only verifier's (re-recorded 14 Sep). That 0.1.0 would accept the same forgeries is shown by replaying them against 0.1.0's resolver in tests; no live 0.1.0 read of these assets was recorded | "S6c" |
+| S7 Live render | GREEN inline (`sync-lipsync-v3`, 103 s); async worker abandons at ~128 s | "S7" |
+| Graph omission in `/api/query` | reproduced on both nodes; handled by merged, checked reads | "DKG v10.0.16 leaves whole named graphs out" |
+| Read-only verifier node | GREEN, no funded wallet | "A third, read-only verifier node" |
+| Node.js `--env-file` after the script name | reproduced on Node v26.0.0: Node applies it; Mandate's flag is `--env-path` | "Node.js reads `--env-file` anywhere on the command line" |
+
+The table below is the day-zero snapshot, kept as it was.
 
 | Spike | Result | Evidence |
 |-------|--------|----------|
@@ -124,6 +145,14 @@ The grantor's listen port is random (`listenPort: 0`) and is printed in its `dae
 
 ## M1 proven against live DKG data
 
+> **Superseded as evidence, kept as it was run (12 Sep, 0.1.0).** Scenario E below
+> does not show forgery rejection. The forger wrote its **own** DID as
+> `stateAuthor`, the assertion was sealed and shared but never anchored, under the
+> old `mandate.build` namespace, and it was judged by the 0.1.0 resolver, which
+> compared `stateAuthor`. A forger that wrote the grantor's DID would have been
+> accepted, which is what the adversarial study found. The run against 0.2.0 is
+> "S6c" below.
+
 Five scenarios, run end to end against two real DKG v10 testnet daemons. No
 mocks anywhere in this path.
 
@@ -192,11 +221,12 @@ node, passing Ana's address as `authorAgentAddress`:
     is not a registered local agent on this node
 ```
 
-The node will not sign for an agent whose key it does not hold. Two consequences
-worth stating plainly in the README:
+The node will not sign for an agent whose key it does not hold. Two consequences:
 
-1. The "written by the depicted person, not the renderer" claim is enforced by
-   the node, not merely asserted by the schema.
+1. A seal naming the grantor as author cannot be produced from the producer's
+   node. That is all this shows. It does not stop the producer writing a triple
+   that *names* the grantor, which 0.1.0 believed; 0.2.0 attributes every object
+   to the address in its anchored Verifiable Memory path instead (S6c).
 2. It only holds because the grantor runs a **separate daemon**. The red-team
    warning about custodial mode is real — a single node with two registered
    agents would hold both keys, and the claim would collapse. Mandate uses two
@@ -277,14 +307,16 @@ flakiness. Only the single success beat depends on a render completing.
 
 The async path is unusable, but **the inline path works**. `sync-lipsync-v3`
 (`fal-ai/sync-lipsync/v3/image-to-video`, $0.13997/s) completed inline in **103
-seconds** and returned a real MP4. Full loop, no mocks anywhere:
+seconds** and returned a real MP4. The loop below used real services, on 0.1.0, but
+**the render was not gated**: the spike called the capability directly, and the
+derivation edge was written by the spike script afterwards, not by a gate.
 
 1. `flux-schnell` generates a **synthetic** reference portrait (~$0.003)
 2. `inworld-tts` generates the speech
 3. `sync-lipsync-v3` renders the video inline — real MP4, ~$0.84
 4. The derivation edge is committed to the DKG, content-addressed
    `sha256 48a2c16d22920ce5ab051987c435bf5517e80bb7c1f50eb4b1b2e98efdbd9b88`
-5. A third party, given **only the URL**, hashes the bytes and returns
+5. A third party, given the URL and the configured graph ids, hashes the bytes and returns
    **`CLEAR — authorised by did:dkg:agent:0xeD1e…0B69 under urn:mandate:grant:cara-9d2f,
    served by "sync-lipsync-v3"`**
 6. Cara revokes on her own node
@@ -307,8 +339,13 @@ hash.
 
 **A read concurrent with a share can return a partial view.** One render
 transiently saw zero grants and refused with `grant-exists` instead of
-`not-revoked`. This is the correct direction and is now a test: **the gate fails
-closed.** A partial or failed read produces a refusal, never a permit.
+`not-revoked`. That one happened to fail closed. 0.2.0 makes an empty, partial or
+failed read refuse by construction (every graph is checked against its anchor's
+declared triple count and the node's graph count; `test/resolve.test.mjs`). One case
+still permits: a read that is complete but comes from a node that has not yet
+received a later revocation. The freshness check against the chain head catches that
+once the revocation is bound on-chain, and only when the node's admin token lets it
+run.
 
 **Unpriced capabilities report unknown, not zero.** `sync-lipsync-v3` was
 initially missing from the local price table and a refusal claimed `$0.0000`
@@ -380,9 +417,9 @@ After publishing the revocation to VM, polling the producer's own node:
 ```
 
 13s of that is chain confirmation; the rest is durable sync. The sub-two-second
-figure only ever held on a single node. Across two independent parties the honest
-number is **~50–60 seconds**, and the README states it rather than the flattering
-one.
+figure only ever held on a single node. This one run put the window at about 49 s
+after confirmation; the later runs below measured less, so no single figure is
+claimed.
 
 ---
 
@@ -394,7 +431,7 @@ IRIs, so the resolver stopped recognising them — `0 grant(s)`, refused
 `grant-exists` — which is the fail-closed behaviour working as designed. Every
 UAL above this section is superseded.
 
-### Producer-node run (`demo/e2e-dana-5i66.json`)
+### Producer-node run (`docs/evidence/v0.1.0/e2e-dana-5i66.json`)
 
 | | |
 |---|---|
@@ -403,7 +440,19 @@ UAL above this section is superseded.
 | revocation | UAL `…/13` |
 | producer, own node | REFUSED — `not-revoked`, **4s** after the revocation anchored |
 
-Across three runs, anchor-to-refusal on the independent node: **49s, 27s, 4s**.
+Anchor-to-refusal on the producer's node, stated precisely (these runs used 0.1.0):
+
+- **At most 4 s after the revoke command returned** in `e2e-dana-5i66` (grant `…/12`,
+  revocation `…/13`): the first poll after that was already refused. The log records
+  it as "4s from revoke command returning".
+- **27 s after the revoke command returned** in `e2e-dana-w0io` (grant `…/10`,
+  revocation `…/11`), under the old `mandate.build` namespace.
+- **About 49 s** in the earlier SWM-versus-VM run above: the refusal came at +62 s
+  after the revoke command started, of which about 13 s was chain confirmation. That
+  run left no separate log.
+
+So the window ranged from under 4 s to about a minute, and it is unbounded if the
+producer's node stops syncing, which 0.2.0 now detects.
 
 ### A peer cannot write into another party's graph
 
@@ -424,7 +473,7 @@ Resolution, and the better design regardless: **each party writes to a graph it
 owns.** The producer created and registered `mandate-derivations` (on-chain
 **431**); the grantor subscribed to it. Readers query both graphs.
 
-### Real media under the new namespace (`demo/media-verify-eve-e3wr.json`)
+### Real media under the new namespace (`docs/evidence/v0.1.0/media-verify-eve-e3wr.json`)
 
 | | |
 |---|---|
@@ -441,6 +490,18 @@ closed the connection mid-download (`UND_ERR_SOCKET: other side closed`), and
 taken afterwards against the same anchored graphs; the JSON records that
 honestly rather than presenting it as one uninterrupted run.
 
+Two more things this run does not show, noted by the adversarial review:
+
+- **The render was not gated.** The MP4 came from the S7c spike on 12 Sep and had
+  first been verified under another grant (`cara-9d2f`). The script created a new
+  grant (`eve-e3wr`) on 13 Sep and wrote a derivation linking the existing file to it,
+  with `derivedAt` set to the time of writing.
+- **Its `billedUsd` of 0.6999** is the reservation of the failed async job
+  `mjob_1cec6bfe884c`, not the cost of the inline render that produced the file
+  (about $0.84 at list price for 6 s).
+
+`demo/full.mjs` replaces this with a single gated run.
+
 ### Two verifier defects found and fixed
 
 - **`hashUrl` gave up on one dropped connection.** It now retries transient
@@ -450,7 +511,9 @@ honestly rather than presenting it as one uninterrupted run.
   came back first decided the verdict. That also allowed laundering: link the hash
   of a file made under a revoked grant to some unrelated live grant, and it could
   verify CLEAR. Every edge is now judged, sorted deterministically, and a file is
-  CLEAR only if every edge is.
+  CLEAR only if every edge is. (That fix was incomplete in 0.1.0: edges shared an
+  IRI derived from the output hash, so a second `authorizedUnder` merged into the
+  first edge. 0.2.0 gives every derivation its own IRI and never merges assets.)
 
 ### DKG v10.0.16 cannot publish a double quote or a line break
 
@@ -507,7 +570,9 @@ Use a pymthouse composite key instead — Authorization: Bearer app_<appId>_pmth
 
 What that means in practice:
 
-- **A present-but-retired key is worse than no key.** With it in `.env`, every
+- **A present-but-retired key is worse than no key.** With it in `.env` (the env file
+  was then read from the working directory; it is now `~/.mandate/.env` or the file
+  named with `--env-path`), every
   Livepeer call Mandate makes fails at connection time, including calls that work
   keyless. Removing it restored `describe_capability` and `request_upload`
   immediately.
@@ -526,3 +591,168 @@ Consequences: Mandate runs entirely on the keyless demo tier, which is unaffecte
 The only thing blocked is publishing the community skill under an owner key.
 `scripts/publish-skill.mjs` now refuses an `sk_` key with that explanation instead
 of failing with an opaque 401.
+
+## DKG v10.0.16 leaves whole named graphs out of query results (2026-09-13)
+
+Found while capturing resolver fixtures (`scripts/capture-fixtures.mjs`,
+`test/fixtures/live/*.json`, which record every observed row count). Identical
+read-only `POST /api/query` requests, seconds apart, with no writes in between:
+
+| Node | Query | Row counts over repeated requests |
+|---|---|---|
+| grantor (publisher) | one KA's graph, read explicitly | full in 6 of 8, **0** in 2 of 8 |
+| producer (synced) | `_meta`, filtered to one publisher | 125, **0**, 125, **0** |
+| producer | `COUNT(DISTINCT ?g)` over a publisher prefix | **0**, 1, **0**, 1 |
+| producer | whole publisher prefix | **0**, 77, 77 |
+
+A graph is either returned whole or not at all; nothing is invented. The likely
+cause is in `dkg-storage/dist/graph-set-index-store.js`: the index of which named
+graphs exist drops a graph after a failed existence probe, so a query sees an
+incomplete graph set until the index recovers.
+
+For Mandate this is a correctness problem, not a performance one. A read that
+silently omits the graph holding a revocation looks exactly like a grant that was
+never revoked. `src/resolve.mjs` therefore:
+
+- reads one publisher's Verifiable Memory at a time, together with its `_meta`
+  anchors and the node's own graph count;
+- merges repeated attempts (safe, because anchored data is append-only and the
+  fault only omits);
+- accepts the read only when every anchored graph returned exactly the
+  `publicTripleCount` its anchor declares, no graph lacks an anchor, the graph
+  count matches, and every anchor this machine has seen before (`~/.mandate/state`)
+  is still present;
+- believes an empty answer only when every attempt agrees.
+
+Otherwise the gate refuses with `read-inconsistent` and the verifier answers
+`INCONCLUSIVE`. With four attempts, live reads on both nodes settle within 2–9
+seconds. `test/resolve.test.mjs` replays the fault.
+
+## S6c — forgery from the producer's own node, live (2026-09-13)
+
+The adversarial study showed that v0.1.0 believed self-declared authors. This spike
+runs that attack on Base Sepolia against the 0.2.0 resolver
+([`spikes/s6c-forgery.mjs`](../spikes/s6c-forgery.mjs); full record in
+[`docs/evidence/s6c-forgery.json`](evidence/s6c-forgery.json) and
+[`.txt`](evidence/s6c-forgery.txt)).
+
+**Genuine, from the grantor's node, through the CLI** (subject `0xed1e…0b69:ana-s6c`):
+
+| | UAL | tx |
+|---|---|---|
+| grant G1 (`talking-head`) | `…0b69/27` | `0xaedb52c8…6e44fd2` |
+| grant G2 (`talking-head`) | `…0b69/28` | `0xf1bd5875…fa4b34` |
+| revoke G1 | `…0b69/29` | `0x61636412…c74d39` |
+
+**Forged, from the producer's node, straight to the DKG API.** All three were written
+to name the grantor or its subject, and use the grantor's own id format:
+
+| | What it claims | UAL | tx |
+|---|---|---|---|
+| a | G1 is `active` again, `stateAuthor` = the grantor's DID | `…0cb5/3` | `0xaedeab9c…deebd0` |
+| b | a grant for `ana-s6c`, `grantor` = the grantor's DID, permitting `face-swap-video`, $1000 ceiling | `…0cb5/4` | `0xd18895bd…aa3adf` |
+| c | a grant for `ana-s6c`, `grantor` = the producer, permitting `face-swap-video` | `…0cb5/6` | `0x56411263…a943e0d` |
+
+**Result.** The committed record ([`s6c-forgery.txt`](evidence/s6c-forgery.txt))
+holds reads from all three nodes, re-recorded on 14 Sep with `--reread`. The
+verifier has never published anything.
+
+| Request | Grantor node | Producer node | Verifier node |
+|---|---|---|---|
+| `talking-head` for `ana-s6c` | PERMITTED under G2 only | PERMITTED under G2 only | PERMITTED under G2 only |
+| `face-swap-video` for `ana-s6c` | REFUSED `capability-permitted` | REFUSED `capability-permitted` | REFUSED `capability-permitted` |
+| G1 revoked? | yes, despite (a) | yes, despite (a) | yes, despite (a) |
+| forgeries reported | 3, with UAL and publisher (plus `legacy-format` `…0cb5/1`, below) | the same | the same |
+
+Under the current resolver the same reads list a fourth rejected record, `…0cb5/1`:
+the producer's own derivation from the 0.1.0 media run, whose id is in the 0.1.0
+format. A trusted producer's record that cannot be read is now a trusted
+`legacy-format` record rather than a warning, so a file it names verifies
+`TAINTED / MALFORMED`. The three forgeries are still rejected.
+
+Three more things this run established:
+
+- **A peer cannot anchor into another party's context graph, even an open one.**
+  The producer's node sealed (a) and (c) into the grantor's graph (`201 wm-sealed`),
+  then failed every share with `A promote prerequisite is temporarily unavailable`,
+  including after retries (`test/fixtures/live/s6c-producer-writes.json`). Its
+  node holds only a stub of that graph. The forgeries therefore went into the
+  producer's own graph, where the resolver reports them as `misplaced-grant` and
+  `misplaced-state`. The resolver would reject them in the grants graph as well
+  (`grant-not-by-subject`, `state-not-by-grantor`; see `test/adversarial.test.mjs`),
+  but that path could not be exercised live from this node.
+- **A subscribed node can silently stop receiving another party's anchors.** After
+  a restart the producer stayed at 9 of the grantor's assets for over ten minutes,
+  with `synced: false`, while the grantor kept receiving the producer's. Its reads
+  were internally consistent, just stale. `POST /api/context-graph/reconcile`
+  confirmed it (`headOrdinal 12`, `watermark 9`, `unresolvedOrdinals 3`) but could
+  not fetch them. `POST /api/context-graph/fetch-assets` with the UALs and the
+  grantor's peer id fetched all three in 13.5 s. A stale node refusing is luck; a
+  stale node missing only a revocation would permit. This is the case for a
+  freshness check against the chain's head ordinal.
+- **Not every confirmed anchor records a transaction.** `…0cb5/4` was confirmed on
+  the `finalized-materialization` lane and its `_meta` has no `transactionHash`,
+  although the publish response returned one.
+
+## A third, read-only verifier node (2026-09-13)
+
+`node scripts/nodes.mjs up verifier` stood up `mandate-verifier` on :9203 from an
+empty home: it wrote a four-line `config.json`, started the daemon, subscribed to
+graphs 430 and 431, dialled the other two nodes, and caught up with the chain. It
+has an agent identity (`0xacD6…C9CA`) and no funded wallet, and it never
+publishes. `mandate verify` now reads from it by default.
+
+What it took, for anyone repeating it:
+
+- **The first boot takes about two minutes** before the API binds; `dkg start`
+  itself gives up waiting after 15 s while the daemon keeps starting.
+- **Public Base Sepolia RPC endpoints time out often.** The new node's context
+  graph authority bootstrap failed on all three default endpoints at first
+  (`getContextGraphAuthoritySnapshot … TIMEOUT`), and until it succeeded,
+  `subscribe` answered `503 … read authority is temporarily unavailable` and
+  `reconcile` answered `404 … does not exist or is not subscribed locally`. Both
+  cleared on their own within minutes.
+- **`reconcile` is the freshness signal.** It reports `headOrdinal` (assets bound
+  to the graph on-chain) and the node's watermark, in about 2 s when current. The
+  resolver now calls it before every CLI decision; a node behind the chain is an
+  inconsistent read.
+- **`fetch-assets` is strict:** 1–10 UALs per request, and one UAL that belongs to
+  another graph (`409 … is not registered to a Context Graph`) or has no coherent
+  version snapshot fails the whole request. In this run the node's own
+  chain-driven reconciliation, not the probes, brought it from 0 to 12/12 and 4/4
+  in about ten minutes.
+
+On 13 Sep the verifier then resolved the S6c subject in 16 s with the same verdict as
+the other two nodes; that first read was observed, not saved. The 14 Sep `--reread`
+recorded a verifier read with the same verdict, which is the one in the S6c table above
+and in [`s6c-forgery.txt`](evidence/s6c-forgery.txt).
+
+## Node.js reads `--env-file` anywhere on the command line (2026-09-14)
+
+Found while moving the CLI's env file out of the working directory (a folder someone
+sends a verifier must not be able to choose whom it trusts). The obvious flag name,
+`--env-file`, is not safe for a Node script. On Node v26.0.0, with a file `y.env` holding
+`NODE_OPTIONS=--require=<path>/evil.cjs` and a script that only prints its arguments:
+
+```
+$ node script.mjs status --env-file y.env
+EVIL LOADED
+script ran [ 'status', '--env-file', 'y.env' ]
+
+$ node script.mjs status --env-file missing.env
+node: missing.env: not found            # exit 9, before the script runs
+
+$ node script.mjs status --env-path y.env
+script ran [ 'status', '--env-path', 'y.env' ]
+```
+
+Node scans the whole argv for `--env-file`, even after the script name, loads that file
+into the environment and honours a `NODE_OPTIONS` in it before any of the script's code
+runs. So a Mandate flag of that name would let the file it names run code in the CLI,
+and a missing file would exit 9, which Mandate uses for INCONCLUSIVE.
+
+Consequences in Mandate: the flag is `--env-path`. `mandate`, `scripts/nodes.mjs` and
+`scripts/publish-skill.mjs` refuse `--env-file` and `--env-file-if-exists` with exit 1 and
+point to `--env-path`. The refusal runs inside the script, so it cannot stop Node from
+having already applied the file; it only stops anyone from believing Mandate read it.
+Only `MANDATE_*` keys and `LIVEPEER_AGENT_KEY` are taken from the file `--env-path` names.

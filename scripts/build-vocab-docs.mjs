@@ -5,7 +5,7 @@
  * one; test/vocab.test.mjs checks the copies are current.
  */
 import { Parser } from 'n3'
-import { readFileSync, writeFileSync, mkdirSync, copyFileSync } from 'node:fs'
+import { readFileSync, writeFileSync, mkdirSync, copyFileSync, existsSync, readdirSync } from 'node:fs'
 
 const NS = 'https://oojae.github.io/mandate/ns/v1#'
 const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type'
@@ -35,6 +35,33 @@ const ontology = NS.slice(0, -1)
 const title = one(ontology, 'http://purl.org/dc/terms/title')
 const description = one(ontology, 'http://purl.org/dc/terms/description')
 const version = one(ontology, 'http://www.w3.org/2002/07/owl#versionInfo')
+const versionIri = one(ontology, 'http://www.w3.org/2002/07/owl#versionIRI')
+
+// The only fixed copies are the ones anchored on the DKG; a Pages path can be
+// rewritten. 1.0.0 predates docs/evidence/ontology-*.json, so it is listed here.
+const anchored = new Map([['1.0.0', { ual: 'did:dkg:base:84532/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/26', txHash: '0x94ba6ea19e437c7afefbe920052a9069a1810554145c637bcad173a0f5f1dbaa' }]])
+for (const f of readdirSync('docs/evidence').filter(f => /^ontology-\d+\.\d+\.\d+\.json$/.test(f))) {
+  const e = JSON.parse(readFileSync(`docs/evidence/${f}`, 'utf8'))
+  anchored.set(e.version, { ual: e.ual, txHash: e.txHash })
+}
+const semver = v => v.split('.').map(Number)
+const newer = (a, b) => { const x = semver(a), y = semver(b); for (let i = 0; i < 3; i++) if (x[i] !== y[i]) return x[i] > y[i]; return false }
+const latestAnchored = [...anchored.keys()].filter(v => !newer(v, version)).sort((a, b) => (newer(a, b) ? -1 : 1))[0] ?? null
+
+// Does this version differ from the latest anchored one only in comments and version metadata?
+const EDITORIAL = new Set([`${RDFS}comment`, 'http://www.w3.org/2002/07/owl#versionInfo', 'http://www.w3.org/2002/07/owl#versionIRI', 'http://www.w3.org/2002/07/owl#priorVersion'])
+const substance = text => new Set(new Parser().parse(text).filter(q => !EDITORIAL.has(q.predicate.value))
+  .map(q => `${q.subject.value} ${q.predicate.value} ${q.object.termType}:${q.object.value}@${q.object.language ?? ''}^${q.object.datatype?.value ?? ''}`))
+const sameSet = (a, b) => a.size === b.size && [...a].every(x => b.has(x))
+const anchoredCopy = latestAnchored && `${OUT}/${latestAnchored}/mandate.ttl`
+const commentsOnly = latestAnchored && latestAnchored !== version && existsSync(anchoredCopy)
+  && sameSet(substance(ttl), substance(readFileSync(anchoredCopy, 'utf8')))
+
+const fixedNote = anchored.has(version)
+  ? `this version, anchored on the DKG as <code>${esc(anchored.get(version).ual)}</code>, which is the fixed copy; the web copy is served at <code>${esc(versionIri)}</code>`
+  : latestAnchored
+    ? `this version, served at <code>${esc(versionIri)}</code>. It is not anchored${commentsOnly ? `, and differs from ${esc(latestAnchored)} in comments only` : ''}. The fixed, anchored copy is version ${esc(latestAnchored)}: <code>${esc(anchored.get(latestAnchored).ual)}</code>`
+    : `this version, served at <code>${esc(versionIri)}</code>. It is not anchored, so no fixed copy exists yet`
 
 const termBlock = s => {
   const name = s.slice(NS.length)
@@ -94,16 +121,20 @@ const html = `<!doctype html>
 <p>${esc(description)}</p>
 
 <div class="rule">
-  <p><strong>The authorship rule.</strong> A <code>mandate:GrantState</code> assertion counts only when its
-  <code>mandate:stateAuthor</code> is the <code>mandate:grantor</code> of the grant it refers to. The graph is
-  append-only, so “active” and “revoked” assertions coexist and anyone can write either; a resolver that skips
-  this check lets the party that profits from rendering defeat any revocation.</p>
+  <p><strong>The authorship rule.</strong> Authorship is the address that anchored a Knowledge Asset, never a
+  value written inside it. A <code>mandate:LikenessGrant</code> counts only when anchored by the address in its
+  <code>mandate:subject</code>; a <code>mandate:GrantState</code> counts only when anchored by the address that
+  anchored its grant. The graph is append-only and anyone can write <code>mandate:grantor</code> or
+  <code>mandate:stateAuthor</code> naming anyone, so a resolver that trusts those values lets the party that
+  profits from rendering invent a grant or defeat a revocation. Version 1.0.0 made that mistake.</p>
 </div>
 
 <h2>Downloads</h2>
 <ul class="downloads">
   <li><a href="mandate.ttl">mandate.ttl</a> — the ontology, Turtle</li>
   <li><a href="context.jsonld">context.jsonld</a> — JSON-LD context</li>
+  <li><a href="${esc(version)}/mandate.ttl">${esc(version)}/mandate.ttl</a> — ${fixedNote}</li>
+  ${[...anchored.entries()].filter(([v]) => v !== version).map(([v, a]) => `<li>${esc(v)}: anchored as <code>${esc(a.ual)}</code> (<a href="https://sepolia.basescan.org/tx/${esc(a.txHash)}">transaction</a>)</li>`).join('\n  ')}
   <li><a href="https://github.com/OoJae/mandate">github.com/OoJae/mandate</a> — reference resolver and gate</li>
 </ul>
 
@@ -119,5 +150,9 @@ mkdirSync(OUT, { recursive: true })
 writeFileSync(`${OUT}/index.html`, html)
 copyFileSync('vocab/mandate.ttl', `${OUT}/mandate.ttl`)
 copyFileSync('vocab/context.jsonld', `${OUT}/context.jsonld`)
+// The versionIRI resolves to a copy that later versions never overwrite.
+mkdirSync(`${OUT}/${version}`, { recursive: true })
+copyFileSync('vocab/mandate.ttl', `${OUT}/${version}/mandate.ttl`)
+writeFileSync(`${OUT}/${version}/index.html`, `<!doctype html><meta charset="utf-8"><title>Mandate vocabulary ${esc(version)}</title><p>Mandate vocabulary version ${esc(version)}: <a href="mandate.ttl">mandate.ttl</a>. Current version: <a href="../">../</a></p>\n`)
 writeFileSync('docs/.nojekyll', '')
 console.log(`built ${OUT}: ${classes.length} classes, ${props.length} properties`)

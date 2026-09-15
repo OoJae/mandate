@@ -1,53 +1,49 @@
 /**
  * The third-party check.
  *
- * A distributor, ad network, or platform is handed a finished file and nothing
- * else. No relationship with the producer, no relationship with the depicted
- * person, no reason to trust either. It hashes the bytes, finds the derivation
- * edge, follows `authorizedUnder` to the grant, and decides for itself.
+ * A distributor, ad network, or platform is handed a finished file. It has no
+ * relationship with the producer or the depicted person and no reason to trust
+ * either. Given the graph ids to read and the producers whose records it
+ * accepts, it hashes the bytes, finds the derivations, follows each to its grant,
+ * and decides for itself.
  *
  * This is the argument for a public verifiable graph over a vendor database, and
- * it is why the grant clauses are published while the media never is. It also
- * covers the case C2PA cannot: platform recompression strips an embedded
- * manifest, but the content hash of the delivered file still resolves here.
+ * it is why the grant clauses are published while the media never is. It
+ * complements embedded provenance such as C2PA rather than replacing it: it
+ * matches exact bytes only, so a re-encoded file has a new hash and verifies
+ * UNKNOWN.
  */
-import { createHash } from 'node:crypto'
 import { readKnowledge } from './resolve.mjs'
 import { verifyKnowledge } from './verify-core.mjs'
+import { sha256OfUrl } from './fetch-bytes.mjs'
 
-export { CLEAR, TAINTED, UNKNOWN, verifyKnowledge } from './verify-core.mjs'
+export { CLEAR, TAINTED, UNKNOWN, INCONCLUSIVE, verifyKnowledge } from './verify-core.mjs'
+export { FetchBytesError } from './fetch-bytes.mjs'
 
 /**
- * Hash the bytes behind a URL.
- *
- * Retries transient network failures: media hosts drop connections mid-body, and
- * a verifier that gives up on one closed socket reports nothing at all. An HTTP
- * error status is not retried — that is an answer, not a hiccup.
+ * SHA-256 of the bytes behind an http(s) URL, streamed with a size cap and timeout.
+ * `opts` go to sha256OfUrl unchanged: maxBytes, timeoutMs, attempts, fetch.
  */
-export async function hashUrl(url, { attempts = 4, backoffMs = 1500 } = {}) {
-  let lastErr
-  for (let i = 0; i < attempts; i++) {
-    try {
-      const res = await fetch(url)
-      if (!res.ok) throw Object.assign(new Error(`cannot fetch media: HTTP ${res.status}`), { final: true })
-      return createHash('sha256').update(Buffer.from(await res.arrayBuffer())).digest('hex')
-    } catch (e) {
-      if (e.final) throw e
-      lastErr = e
-      if (i < attempts - 1) await new Promise(r => setTimeout(r, backoffMs * 2 ** i))
-    }
-  }
-  throw new Error(`cannot fetch media after ${attempts} attempts: ${lastErr?.cause?.code ?? lastErr?.message}`)
+export async function hashUrl(url, opts = {}) {
+  return (await sha256OfUrl(url, opts ?? {})).sha256
 }
 
 /**
- * Verify a delivered file from its bytes alone.
+ * Verify a delivered file from its bytes, the configured grants and derivations
+ * graphs, and the producers this verifier trusts. The file itself carries no
+ * metadata that is believed; everything else comes from those graphs.
  *
- * `node` is the VERIFIER's own node — deliberately not the producer's. Nothing
- * here asks the producer anything.
+ * `node` should be the verifier's own node, not the producer's. `cfg` is the
+ * readKnowledge configuration: the grants graph, the derivations graphs, and
+ * which producers' edges the verifier believes.
+ *
+ * `mediaUrl` is fetched from wherever it points, redirects included. If it
+ * comes from an uploader, run this where it cannot reach internal services, or
+ * pass `fetchOptions.fetch` that enforces an allow-list (see fetch-bytes.mjs).
+ * `fetchOptions` also sets maxBytes, timeoutMs and attempts.
  */
-export async function verifyMedia(node, contextGraph, mediaUrl, { now = new Date().toISOString() } = {}) {
-  const sha256 = await hashUrl(mediaUrl)
-  const k = await readKnowledge(node, contextGraph)
+export async function verifyMedia(node, cfg, mediaUrl, { now = new Date().toISOString(), fetchOptions = {} } = {}) {
+  const sha256 = await hashUrl(mediaUrl, fetchOptions)
+  const k = await readKnowledge(node, cfg, { sha256 })
   return verifyKnowledge(k, sha256, { now })
 }

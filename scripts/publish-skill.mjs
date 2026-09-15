@@ -3,27 +3,36 @@
  *
  *   node scripts/publish-skill.mjs                 # dry run: print the payload and limits
  *   node scripts/publish-skill.mjs --publish       # publish (requires LIVEPEER_AGENT_KEY)
+ *   add --env-path <path> to read settings from that file (default ~/.mandate/.env)
  *
  * The task/domain/persona tags and scope are a closed vocabulary that no tool
  * exposes; if publish_skill rejects them, its error names the problem. Override
  * with --task a,b --domain a,b --persona a,b --scope episode|epic|story.
  *
+ * The skill body is this repository's skills/likeness-consent.md, found from the
+ * script's own location, never from the working directory.
+ *
  * Refuses to publish without a key: a keyless publish may create a skill no one
  * can later update or delete, since ownership is verified by API key.
  */
-import { readFileSync, existsSync } from 'node:fs'
-import { parseEnv } from 'node:util'
-
-if (existsSync('.env')) {
-  for (const [k, v] of Object.entries(parseEnv(readFileSync('.env', 'utf8')))) {
-    if (process.env[k] === undefined) process.env[k] = v
-  }
-}
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
+import { loadScriptEnv } from '../bin/config.mjs'
 
 const arg = (name, def) => {
   const i = process.argv.indexOf(`--${name}`)
   return i > -1 ? process.argv[i + 1] : def
 }
+
+// The same env file as the CLI: --env-path <path> or --env-path=<path>, else
+// MANDATE_ENV_FILE, else $MANDATE_HOME/.env (default ~/.mandate/.env); a .env in
+// the working directory is never read. Only MANDATE_* and LIVEPEER_AGENT_KEY come
+// from it. This request carries the key, so a stray NODE_TLS_REJECT_UNAUTHORIZED=0
+// or proxy setting copied into the file must not reach it. loadScriptEnv refuses
+// --env-file, an empty or repeated --env-path, and an unreadable named file (exit
+// 1), so the `=` form never falls back to the default file's key.
+const envFile = loadScriptEnv()
+if (envFile.ignored.length) console.log(`.env: ignored ${envFile.ignored.join(', ')} (only MANDATE_* and LIVEPEER_AGENT_KEY are read)`)
 const list = (name, def) => arg(name, def).split(',').map(s => s.trim()).filter(Boolean)
 
 const payload = {
@@ -35,7 +44,7 @@ const payload = {
   domain: list('domain', 'image,video,audio'),
   persona: list('persona', 'creator'),
   scope: arg('scope', 'episode'),
-  body: readFileSync('skills/likeness-consent.md', 'utf8'),
+  body: readFileSync(join(import.meta.dirname, '..', 'skills', 'likeness-consent.md'), 'utf8'),
   version: '1.0.0',
   author: 'OoJae',
 }
@@ -61,7 +70,7 @@ if (!process.argv.includes('--publish')) {
   process.exit(0)
 }
 if (!process.env.LIVEPEER_AGENT_KEY) {
-  console.error('\nLIVEPEER_AGENT_KEY is not set. Add it to .env (gitignored); refusing to publish keyless.')
+  console.error('\nLIVEPEER_AGENT_KEY is not set. Add it to your env file (~/.mandate/.env, or pass --env-path); refusing to publish keyless.')
   process.exit(2)
 }
 if (process.env.LIVEPEER_AGENT_KEY.startsWith('sk_')) {

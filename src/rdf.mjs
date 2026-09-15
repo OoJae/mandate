@@ -1,110 +1,150 @@
 /**
- * Turtle serialisation for the Mandate vocabulary.
+ * Serialisation for the Mandate vocabulary.
  *
  * Grants are written as RDF because the whole argument for a shared graph is
  * that someone else's agent — a distributor, an auditor, a platform — can read
  * a grant without our code, our schema docs, or our permission.
+ *
+ * The primary output is wire quads ({subject, predicate, object} with bare IRIs
+ * and N-Triples literals), which is what the DKG node's HTTP write API takes.
+ * Turtle is derived from the same quads, so the two can never disagree.
+ *
+ * Every value is validated with the same functions the resolver uses to read
+ * it back (src/rdf-term.mjs). A grant that would be read back as malformed is
+ * refused here, before it can be anchored and paid for.
  */
 import * as V from './vocab.mjs'
+import {
+  TermError, iriTerm, literalTerm, decimalTerm, dateTimeTerm, ntriplesTerm,
+  agentAddress, subjectAddress, isSha256, asDateTime,
+} from './rdf-term.mjs'
 
-// Correct Turtle escaping, for any consumer of this output.
-const escapeLiteral = s => String(s)
-  .replace(/\\/g, '\\\\')
-  .replace(/"/g, '\\"')
-  .replace(/\n/g, '\\n')
-  .replace(/\r/g, '\\r')
-  .replace(/\t/g, '\\t')
+export { UnpublishableLiteralError, InvalidIriError, TermError } from './rdf-term.mjs'
 
-/**
- * DKG v10.0.16 cannot publish a literal containing a double quote or a line
- * break, however it is escaped: the node unescapes its input, re-serialises to
- * N-Quads without re-escaping, and fails to parse its own output. Measured with
- * probe drafts; tabs, backslashes, apostrophes and typographic quotes are fine.
- *
- * Refusing here gives a clear error naming the field, instead of an opaque
- * parser failure from the node — and it never silently rewrites someone's words.
- */
-export class UnpublishableLiteralError extends Error {}
+const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type'
+const CAPABILITY = /^[a-z0-9][a-z0-9-]{1,63}$/
+const USE_CLASS = /^[a-z][a-z0-9-]{0,31}$/
+const TERRITORY = /^[A-Z]{2}$/
 
-let dkgSafe = true
-/** For Turtle destined somewhere other than a DKG node. */
-export function setDkgSafe(v) { dkgSafe = !!v }
+const q = (subject, predicate, object) => ({ subject, predicate, object })
 
-const lit = (s, field = 'value') => {
-  const str = String(s)
-  if (dkgSafe && /["\r\n]/.test(str)) {
-    throw new UnpublishableLiteralError(
-      `${field} contains a double quote or line break, which DKG v10 cannot publish: ${JSON.stringify(str.slice(0, 60))}`)
+function tokens(values, pattern, field, { required = false } = {}) {
+  const list = values === undefined || values === null ? [] : [].concat(values)
+  if (required && list.length === 0) throw new TermError(`${field} must list at least one value`)
+  const seen = new Set()
+  for (const v of list) {
+    if (typeof v !== 'string' || !pattern.test(v)) throw new TermError(`${field} has an invalid value: ${JSON.stringify(v)}`)
+    if (seen.has(v)) throw new TermError(`${field} lists ${JSON.stringify(v)} twice`)
+    seen.add(v)
   }
-  return `"${escapeLiteral(str)}"`
-}
-const iri = s => `<${s}>`
-const term = s => (/^(https?:|urn:|did:)/.test(s) ? iri(s) : lit(s))
-
-const PREFIX = `@prefix mandate: <${V.NS}> .
-@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
-`
-
-/** Serialise one grant. Clause data only — never media, names, or biometrics. */
-export function grantToTurtle(g) {
-  const rows = []
-  const add = (p, o) => rows.push(`  ${iri(p)} ${o} ;`)
-
-  add(V.grantor, iri(g.grantor))
-  add(V.subject, lit(g.subject, 'subject'))
-  if (g.consentClipSha256) add(V.consentClipSha256, lit(g.consentClipSha256))
-  if (g.consentTranscript) add(V.consentTranscript, lit(g.consentTranscript, 'consentTranscript'))
-  for (const c of g.permitsCapability ?? []) add(V.permitsCapability, lit(c, 'permitsCapability'))
-  for (const u of g.permitsUseClass ?? []) add(V.permitsUseClass, lit(u, 'permitsUseClass'))
-  for (const u of g.forbidsUseClass ?? []) add(V.forbidsUseClass, lit(u, 'forbidsUseClass'))
-  for (const t of g.territory ?? []) add(V.territory, lit(t, 'territory'))
-  if (g.validFrom) add(V.validFrom, `${lit(g.validFrom)}^^xsd:dateTime`)
-  if (g.validUntil) add(V.validUntil, `${lit(g.validUntil)}^^xsd:dateTime`)
-  if (g.maxSpendUsd != null) add(V.maxSpendUsd, `"${g.maxSpendUsd}"^^xsd:decimal`)
-
-  return `${PREFIX}
-${iri(g.id)}
-  a ${iri(V.LikenessGrant)} ;
-${rows.join('\n')}
-.
-`
+  return list
 }
 
 /**
- * Serialise a state assertion.
+ * Quads for one likeness grant. Clause data only — never media, names or
+ * biometrics.
  *
- * `stateAuthor` is written explicitly even though the KA seal also carries an
- * author: the resolver must be able to decide authenticity from the triples
- * alone, so that a third party reading the graph reaches the same verdict we do.
+ * `consentTranscript` is refused unless `allowTranscript` is set: a transcript
+ * is the depicted person's own words, and a public Verifiable Memory graph is
+ * permanent. Publish its hash, not the text.
  */
-export function stateToTurtle(s) {
-  return `${PREFIX}
-${iri(s.id)}
-  a ${iri(V.GrantState)} ;
-  ${iri(V.stateOf)} ${iri(s.stateOf)} ;
-  ${iri(V.state)} ${lit(s.state)} ;
-  ${iri(V.stateAuthor)} ${iri(s.stateAuthor)} ;
-  ${iri(V.stateAt)} ${lit(s.stateAt)}^^xsd:dateTime ;
-.
-`
+export function grantToQuads(g, { dkgSafe = true, allowTranscript = false } = {}) {
+  const id = iriTerm(g.id, 'id')
+  const grantorAddr = agentAddress(g.grantor)
+  if (!grantorAddr) throw new TermError(`grantor must be a did:dkg:agent DID, got ${JSON.stringify(g.grantor)}`)
+  const subjectAddr = subjectAddress(g.subject)
+  if (!subjectAddr) {
+    throw new TermError(`subject must be self-certifying, <grantor address>:<name>, got ${JSON.stringify(g.subject)}`)
+  }
+  if (subjectAddr !== grantorAddr) {
+    throw new TermError(`subject ${g.subject} belongs to ${subjectAddr}, not to the grantor ${grantorAddr}`)
+  }
+
+  const capabilities = tokens(g.permitsCapability, CAPABILITY, 'permitsCapability', { required: true })
+  const permits = tokens(g.permitsUseClass, USE_CLASS, 'permitsUseClass')
+  const forbids = tokens(g.forbidsUseClass, USE_CLASS, 'forbidsUseClass')
+  const territory = tokens(g.territory, TERRITORY, 'territory')
+
+  const out = [
+    q(id, RDF_TYPE, V.LikenessGrant),
+    q(id, V.grantor, iriTerm(g.grantor, 'grantor')),
+    q(id, V.subject, literalTerm(g.subject, { field: 'subject', dkgSafe })),
+  ]
+  if (g.consentClipSha256 !== undefined && g.consentClipSha256 !== null) {
+    if (!isSha256(g.consentClipSha256)) throw new TermError('consentClipSha256 must be 64 lowercase hex characters')
+    out.push(q(id, V.consentClipSha256, literalTerm(g.consentClipSha256, { field: 'consentClipSha256' })))
+  }
+  if (g.consentTranscript !== undefined && g.consentTranscript !== null) {
+    if (!allowTranscript) {
+      throw new TermError('consentTranscript would publish the depicted person\'s words permanently; '
+        + 'publish consentClipSha256 instead, or pass allowTranscript explicitly')
+    }
+    out.push(q(id, V.consentTranscript, literalTerm(g.consentTranscript, { field: 'consentTranscript', dkgSafe })))
+  }
+  for (const c of capabilities) out.push(q(id, V.permitsCapability, literalTerm(c, { field: 'permitsCapability' })))
+  for (const u of permits) out.push(q(id, V.permitsUseClass, literalTerm(u, { field: 'permitsUseClass' })))
+  for (const u of forbids) out.push(q(id, V.forbidsUseClass, literalTerm(u, { field: 'forbidsUseClass' })))
+  for (const t of territory) out.push(q(id, V.territory, literalTerm(t, { field: 'territory' })))
+
+  if (g.validFrom !== undefined && g.validFrom !== null) out.push(q(id, V.validFrom, dateTimeTerm(g.validFrom, 'validFrom')))
+  if (g.validUntil !== undefined && g.validUntil !== null) out.push(q(id, V.validUntil, dateTimeTerm(g.validUntil, 'validUntil')))
+  if (g.validFrom && g.validUntil && !(asDateTime(new Date(g.validUntil).toISOString()) > asDateTime(new Date(g.validFrom).toISOString()))) {
+    throw new TermError('validUntil must be later than validFrom')
+  }
+  if (g.maxSpendUsd !== undefined && g.maxSpendUsd !== null) out.push(q(id, V.maxSpendUsd, decimalTerm(g.maxSpendUsd, 'maxSpendUsd')))
+  return out
 }
 
-/** Serialise a derivation edge: what was made, and under whose permission. */
-export function derivationToTurtle(d) {
-  const rows = []
-  const add = (p, o) => rows.push(`  ${iri(p)} ${o} ;`)
-  add(V.outputSha256, lit(d.outputSha256))
-  add(V.servedCapability, lit(d.servedCapability))
-  if (d.servedModelId) add(V.servedModelId, lit(d.servedModelId))
-  add(V.authorizedUnder, term(d.authorizedUnder))
-  if (d.loraId) add(V.loraId, lit(d.loraId))
-  if (d.sessionId) add(V.sessionId, lit(d.sessionId))
-  if (d.billedUsd != null) add(V.billedUsd, `"${d.billedUsd}"^^xsd:decimal`)
-  add(V.derivedAt, `${lit(d.derivedAt)}^^xsd:dateTime`)
-  return `${PREFIX}
-${iri(d.id)}
-  a ${iri(V.Derivation)} ;
-${rows.join('\n')}
-.
-`
+/**
+ * Quads for a revocation.
+ *
+ * Only 'revoked' is written: revocation is terminal per grant IRI, and renewal
+ * means publishing a new grant. `stateAuthor` is descriptive — the resolver
+ * attributes the assertion to whoever published it, and treats a stateAuthor
+ * that disagrees with the publisher as a forgery.
+ */
+export function stateToQuads(s, { dkgSafe = true } = {}) {
+  if (s.state !== 'revoked') throw new TermError(`only 'revoked' states are written; got ${JSON.stringify(s.state)}`)
+  const id = iriTerm(s.id, 'id')
+  if (!agentAddress(s.stateAuthor)) throw new TermError(`stateAuthor must be a did:dkg:agent DID, got ${JSON.stringify(s.stateAuthor)}`)
+  return [
+    q(id, RDF_TYPE, V.GrantState),
+    q(id, V.stateOf, iriTerm(s.stateOf, 'stateOf')),
+    q(id, V.state, literalTerm(s.state, { field: 'state', dkgSafe })),
+    q(id, V.stateAuthor, iriTerm(s.stateAuthor, 'stateAuthor')),
+    q(id, V.stateAt, dateTimeTerm(s.stateAt, 'stateAt')),
+  ]
 }
+
+/** Quads for a derivation edge: what was made, and under whose permission. */
+export function derivationToQuads(d, { dkgSafe = true } = {}) {
+  const id = iriTerm(d.id, 'id')
+  if (!isSha256(d.outputSha256)) throw new TermError('outputSha256 must be 64 lowercase hex characters')
+  if (typeof d.servedCapability !== 'string' || !CAPABILITY.test(d.servedCapability)) {
+    throw new TermError(`servedCapability has an invalid value: ${JSON.stringify(d.servedCapability)}`)
+  }
+  const out = [
+    q(id, RDF_TYPE, V.Derivation),
+    q(id, V.outputSha256, literalTerm(d.outputSha256, { field: 'outputSha256' })),
+    q(id, V.servedCapability, literalTerm(d.servedCapability, { field: 'servedCapability' })),
+    q(id, V.authorizedUnder, iriTerm(d.authorizedUnder, 'authorizedUnder')),
+    q(id, V.derivedAt, dateTimeTerm(d.derivedAt, 'derivedAt')),
+  ]
+  if (d.servedModelId) out.push(q(id, V.servedModelId, literalTerm(d.servedModelId, { field: 'servedModelId', dkgSafe })))
+  if (d.loraId) out.push(q(id, V.loraId, literalTerm(d.loraId, { field: 'loraId', dkgSafe })))
+  // mandate:sessionId holds the platform job id, so reconcile() can join billed
+  // jobs to derivation edges on one key.
+  const jobId = d.jobId ?? d.sessionId
+  if (jobId) out.push(q(id, V.sessionId, literalTerm(jobId, { field: 'jobId', dkgSafe })))
+  if (d.billedUsd !== undefined && d.billedUsd !== null) out.push(q(id, V.billedUsd, decimalTerm(d.billedUsd, 'billedUsd')))
+  return out
+}
+
+/** N-Triples (valid Turtle) for a list of wire quads. */
+export function quadsToNTriples(quads) {
+  return quads.map(x => `${ntriplesTerm(x.subject)} ${ntriplesTerm(x.predicate)} ${ntriplesTerm(x.object)} .`).join('\n') + '\n'
+}
+
+export const grantToTurtle = (g, opts) => quadsToNTriples(grantToQuads(g, opts))
+export const stateToTurtle = (s, opts) => quadsToNTriples(stateToQuads(s, opts))
+export const derivationToTurtle = (d, opts) => quadsToNTriples(derivationToQuads(d, opts))

@@ -42,32 +42,44 @@ try {
   check('zero transitive dependencies', installedDeps === 1, `${installedDeps} package(s) in node_modules`)
 
   const core = sh('node', ['--input-type=module', '-e', `
-    import { decide, verifyKnowledge, NS, STATE_REVOKED, CLEAR } from 'mandate-consent'
+    import { decide, verifyKnowledge, NS, CLEAR, makeSubject } from 'mandate-consent'
     import { readFileSync } from 'node:fs'
-    const grant = { id: 'urn:g', grantor: 'did:a', subject: 's', permitsCapability: ['talking-head'],
-      permitsUseClass: [], forbidsUseClass: [], territory: [], maxSpendUsd: 5 }
-    const ok = decide({ subject: 's', capability: 'talking-head', at: '2026-09-13T00:00:00Z', estimatedUsd: 1 }, { grants: [grant] })
-    const forged = decide({ subject: 's', capability: 'talking-head', at: '2026-09-13T00:00:00Z', estimatedUsd: 1 }, {
-      grants: [grant],
-      assertions: [
-        { stateOf: 'urn:g', state: STATE_REVOKED, stateAuthor: 'did:a', stateAt: '2026-09-12T00:00:00Z' },
-        { stateOf: 'urn:g', state: 'active', stateAuthor: 'did:producer', stateAt: '2026-09-12T12:00:00Z' },
-      ] })
-    const v = verifyKnowledge({ grants: [grant], assertions: [], derivations: [
-      { outputSha256: 'h', servedCapability: 'talking-head', authorizedUnder: 'urn:g' }] }, 'h', { now: '2026-09-13T00:00:00Z' })
+    const ANA = '0xed1eeb64cac09874257f05fd6b51a55695ad0b69'
+    const PRODUCER = '0x8eaa4857b22dddbfb5ebc476087fec39336e0cb5'
+    const subject = makeSubject(ANA, 'ana')
+    const grant = { id: 'urn:mandate:grant:' + subject + ':0000000000000001', publisher: ANA, tier: 'vm',
+      grantor: 'did:dkg:agent:' + ANA, subject, permitsCapability: ['talking-head'], permitsUseClass: [],
+      forbidsUseClass: [], territory: [], validFrom: null, validUntil: null, maxSpendUsd: 5 }
+    const k = over => ({ grants: [grant], states: [], derivations: [], forgeries: [], warnings: [], consistency: { ok: true }, ...over })
+    const request = { subject, capability: 'talking-head', useClass: 'advertising', territory: 'GB', at: '2026-09-13T00:00:00Z', estimatedUsd: 1 }
+    const ok = decide(request, k())
+    const forged = decide(request, k({ grants: [{ ...grant, publisher: PRODUCER }] }))
+    const unrevoked = decide(request, k({ states: [
+      { stateOf: grant.id, state: 'revoked', tier: 'vm', publisher: ANA },
+      { stateOf: grant.id, state: 'active', tier: 'vm', publisher: PRODUCER }] }))
+    const partial = decide(request, k({ consistency: { ok: false, reason: 'graph omitted' } }))
+    const v = verifyKnowledge(k({ derivations: [{ id: 'urn:mandate:derivation:aaaaaaaaaaaaaaaa:0000000000000001',
+      outputSha256: 'a'.repeat(64), servedCapability: 'talking-head', authorizedUnder: grant.id, derivedAt: '2026-09-13T00:00:00Z', publisher: PRODUCER, trusted: true }] }),
+      'a'.repeat(64), { now: '2026-09-13T00:00:00Z' })
     const ttl = readFileSync(new URL(import.meta.resolve('mandate-consent/vocab/mandate.ttl')), 'utf8')
-    console.log(JSON.stringify({ permit: ok.permit, forgedPermit: forged.permit, forgedClause: forged.clause,
-      verdict: v.verdict, clear: CLEAR, ns: NS, ttlHasNs: ttl.includes(NS) }))
+    console.log(JSON.stringify({ permit: ok.permit, forgedClause: forged.clause, unrevokedClause: unrevoked.clause,
+      partialClause: partial.clause, verdict: v.verdict, verdictReason: v.reason, clear: CLEAR, ns: NS, ttlHasNs: ttl.includes(NS) }))
   `], { cwd: app })
   const r = JSON.parse(core.trim())
   check('core imports with no peers and permits a valid grant', r.permit === true)
-  check('core rejects a forged state assertion', r.forgedPermit === false && r.forgedClause === 'not-revoked')
-  check('core verifies from bytes', r.verdict === r.clear)
+  check('core refuses a grant published by anyone but its subject', r.forgedClause === 'grant-exists')
+  check('core keeps a revocation against a forged "active"', r.unrevokedClause === 'not-revoked')
+  check('core refuses on an incomplete read', r.partialClause === 'read-inconsistent')
+  check('core verifies from bytes', r.verdict === r.clear, r.verdict === r.clear ? '' : `${r.verdict}: ${r.verdictReason}`)
   check('vocabulary ships under the owned namespace', r.ttlHasNs && r.ns === 'https://oojae.github.io/mandate/ns/v1#')
 
   let help = ''
-  try { sh(join(nm, '.bin', 'mandate'), [], { cwd: app }) } catch (e) { help = (e.stdout || '') + (e.stderr || '') }
-  check('bin runs and prints help', /consent rail for generative media/.test(help))
+  let helpExit = 0
+  try { help = sh(join(nm, '.bin', 'mandate'), [], { cwd: app }) } catch (e) { help = (e.stdout || '') + (e.stderr || ''); helpExit = e.status }
+  check('bin runs and prints help, exiting 0', helpExit === 0 && /consent rail for generative media/.test(help))
+  let usageExit = 0
+  try { sh(join(nm, '.bin', 'mandate'), ['revoke'], { cwd: app }) } catch (e) { usageExit = e.status }
+  check('a usage error exits 1', usageExit === 1)
 
   let peerError = ''
   try { sh('node', ['--input-type=module', '-e', "await import('mandate-consent/livepeer')"], { cwd: app }) }

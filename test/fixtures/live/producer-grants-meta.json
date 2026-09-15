@@ -1,0 +1,322 @@
+{
+  "node": "producer",
+  "contextGraphId": "0xeD1eeB64CaC09874257F05Fd6B51A55695ad0B69/mandate-grants",
+  "prefix": "did:dkg:context-graph:0xeD1eeB64CaC09874257F05Fd6B51A55695ad0B69/mandate-grants/_verifiable_memory/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/",
+  "sparql": "SELECT ?s ?p ?o WHERE {\n  GRAPH <did:dkg:context-graph:0xeD1eeB64CaC09874257F05Fd6B51A55695ad0B69/mandate-grants/_meta> { ?s ?p ?o }\n  FILTER(STRSTARTS(STR(?s), \"did:dkg:\"))\n  FILTER(?p IN (<http://dkg.io/ontology/kaUal>, <http://dkg.io/ontology/assertionGraph>, <http://dkg.io/ontology/status>, <http://dkg.io/ontology/confirmationKind>, <http://dkg.io/ontology/transactionHash>, <http://dkg.io/ontology/materializedVersion>, <http://dkg.io/ontology/publicTripleCount>, <http://www.w3.org/ns/prov#wasAttributedTo>))\n} LIMIT 5000",
+  "observedCounts": [
+    62,
+    62
+  ],
+  "bindings": [
+    {
+      "s": "did:dkg:base:84532/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/15",
+      "p": "http://dkg.io/ontology/materializedVersion",
+      "o": "\"46770882:0\""
+    },
+    {
+      "s": "did:dkg:base:84532/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/14",
+      "p": "http://dkg.io/ontology/materializedVersion",
+      "o": "\"46770882:0\""
+    },
+    {
+      "s": "did:dkg:base:84532/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/16",
+      "p": "http://dkg.io/ontology/materializedVersion",
+      "o": "\"46770882:0\""
+    },
+    {
+      "s": "did:dkg:base:84532/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/13",
+      "p": "http://dkg.io/ontology/materializedVersion",
+      "o": "\"46770882:0\""
+    },
+    {
+      "s": "did:dkg:base:84532/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/10",
+      "p": "http://dkg.io/ontology/materializedVersion",
+      "o": "\"46770882:0\""
+    },
+    {
+      "s": "did:dkg:base:84532/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/4",
+      "p": "http://dkg.io/ontology/materializedVersion",
+      "o": "\"46770882:0\""
+    },
+    {
+      "s": "did:dkg:base:84532/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/12",
+      "p": "http://dkg.io/ontology/materializedVersion",
+      "o": "\"46770882:0\""
+    },
+    {
+      "s": "did:dkg:base:84532/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/11",
+      "p": "http://dkg.io/ontology/materializedVersion",
+      "o": "\"46770882:0\""
+    },
+    {
+      "s": "did:dkg:base:84532/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/9",
+      "p": "http://dkg.io/ontology/materializedVersion",
+      "o": "\"46770882:0\""
+    },
+    {
+      "s": "did:dkg:base:84532/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/4",
+      "p": "http://dkg.io/ontology/status",
+      "o": "\"confirmed\""
+    },
+    {
+      "s": "did:dkg:base:84532/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/4",
+      "p": "http://dkg.io/ontology/transactionHash",
+      "o": "\"0x16b4a73bdba90e334336c53cd0adebe84090d19b1c6880f072e6006782ec489f\""
+    },
+    {
+      "s": "did:dkg:base:84532/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/4",
+      "p": "http://dkg.io/ontology/publicTripleCount",
+      "o": "\"11\"^^<http://www.w3.org/2001/XMLSchema#integer>"
+    },
+    {
+      "s": "did:dkg:base:84532/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/4",
+      "p": "http://dkg.io/ontology/kaUal",
+      "o": "did:dkg:base:84532/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/4"
+    },
+    {
+      "s": "did:dkg:base:84532/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/4",
+      "p": "http://dkg.io/ontology/confirmationKind",
+      "o": "\"transaction\""
+    },
+    {
+      "s": "did:dkg:base:84532/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/4",
+      "p": "http://dkg.io/ontology/assertionGraph",
+      "o": "did:dkg:context-graph:0xeD1eeB64CaC09874257F05Fd6B51A55695ad0B69/mandate-grants/_verifiable_memory/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/4"
+    },
+    {
+      "s": "did:dkg:base:84532/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/9",
+      "p": "http://dkg.io/ontology/status",
+      "o": "\"confirmed\""
+    },
+    {
+      "s": "did:dkg:base:84532/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/9",
+      "p": "http://dkg.io/ontology/publicTripleCount",
+      "o": "\"5\"^^<http://www.w3.org/2001/XMLSchema#integer>"
+    },
+    {
+      "s": "did:dkg:base:84532/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/9",
+      "p": "http://dkg.io/ontology/kaUal",
+      "o": "did:dkg:base:84532/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/9"
+    },
+    {
+      "s": "did:dkg:base:84532/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/9",
+      "p": "http://dkg.io/ontology/confirmationKind",
+      "o": "\"finalized-materialization\""
+    },
+    {
+      "s": "did:dkg:base:84532/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/9",
+      "p": "http://dkg.io/ontology/assertionGraph",
+      "o": "did:dkg:context-graph:0xeD1eeB64CaC09874257F05Fd6B51A55695ad0B69/mandate-grants/_verifiable_memory/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/9"
+    },
+    {
+      "s": "did:dkg:base:84532/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/10",
+      "p": "http://dkg.io/ontology/status",
+      "o": "\"confirmed\""
+    },
+    {
+      "s": "did:dkg:base:84532/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/10",
+      "p": "http://dkg.io/ontology/transactionHash",
+      "o": "\"0x818d2c13b71e1eae797fad7cbf6460b2098fcd12d9ceb79ed6454102d8d22464\""
+    },
+    {
+      "s": "did:dkg:base:84532/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/10",
+      "p": "http://dkg.io/ontology/publicTripleCount",
+      "o": "\"12\"^^<http://www.w3.org/2001/XMLSchema#integer>"
+    },
+    {
+      "s": "did:dkg:base:84532/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/10",
+      "p": "http://dkg.io/ontology/kaUal",
+      "o": "did:dkg:base:84532/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/10"
+    },
+    {
+      "s": "did:dkg:base:84532/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/10",
+      "p": "http://dkg.io/ontology/confirmationKind",
+      "o": "\"transaction\""
+    },
+    {
+      "s": "did:dkg:base:84532/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/10",
+      "p": "http://dkg.io/ontology/assertionGraph",
+      "o": "did:dkg:context-graph:0xeD1eeB64CaC09874257F05Fd6B51A55695ad0B69/mandate-grants/_verifiable_memory/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/10"
+    },
+    {
+      "s": "did:dkg:base:84532/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/11",
+      "p": "http://dkg.io/ontology/status",
+      "o": "\"confirmed\""
+    },
+    {
+      "s": "did:dkg:base:84532/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/11",
+      "p": "http://dkg.io/ontology/transactionHash",
+      "o": "\"0xbf2d65559041f70fd126071197c25fb4231ce209eda5f1c1b714cc3b7708868e\""
+    },
+    {
+      "s": "did:dkg:base:84532/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/11",
+      "p": "http://dkg.io/ontology/publicTripleCount",
+      "o": "\"5\"^^<http://www.w3.org/2001/XMLSchema#integer>"
+    },
+    {
+      "s": "did:dkg:base:84532/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/11",
+      "p": "http://dkg.io/ontology/kaUal",
+      "o": "did:dkg:base:84532/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/11"
+    },
+    {
+      "s": "did:dkg:base:84532/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/11",
+      "p": "http://dkg.io/ontology/confirmationKind",
+      "o": "\"transaction\""
+    },
+    {
+      "s": "did:dkg:base:84532/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/11",
+      "p": "http://dkg.io/ontology/assertionGraph",
+      "o": "did:dkg:context-graph:0xeD1eeB64CaC09874257F05Fd6B51A55695ad0B69/mandate-grants/_verifiable_memory/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/11"
+    },
+    {
+      "s": "did:dkg:base:84532/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/12",
+      "p": "http://dkg.io/ontology/status",
+      "o": "\"confirmed\""
+    },
+    {
+      "s": "did:dkg:base:84532/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/12",
+      "p": "http://dkg.io/ontology/transactionHash",
+      "o": "\"0x69b9a2ded0a6f604fa4bd94769daf3aae347ea50cc6b9f131cf50f842c49a738\""
+    },
+    {
+      "s": "did:dkg:base:84532/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/12",
+      "p": "http://dkg.io/ontology/publicTripleCount",
+      "o": "\"12\"^^<http://www.w3.org/2001/XMLSchema#integer>"
+    },
+    {
+      "s": "did:dkg:base:84532/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/12",
+      "p": "http://dkg.io/ontology/kaUal",
+      "o": "did:dkg:base:84532/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/12"
+    },
+    {
+      "s": "did:dkg:base:84532/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/12",
+      "p": "http://dkg.io/ontology/confirmationKind",
+      "o": "\"transaction\""
+    },
+    {
+      "s": "did:dkg:base:84532/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/12",
+      "p": "http://dkg.io/ontology/assertionGraph",
+      "o": "did:dkg:context-graph:0xeD1eeB64CaC09874257F05Fd6B51A55695ad0B69/mandate-grants/_verifiable_memory/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/12"
+    },
+    {
+      "s": "did:dkg:base:84532/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/13",
+      "p": "http://dkg.io/ontology/status",
+      "o": "\"confirmed\""
+    },
+    {
+      "s": "did:dkg:base:84532/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/13",
+      "p": "http://dkg.io/ontology/transactionHash",
+      "o": "\"0x5faa940d697a632bc9260a93e1e4329600f62cb73c0a887b8c6fa2c599a85010\""
+    },
+    {
+      "s": "did:dkg:base:84532/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/13",
+      "p": "http://dkg.io/ontology/publicTripleCount",
+      "o": "\"5\"^^<http://www.w3.org/2001/XMLSchema#integer>"
+    },
+    {
+      "s": "did:dkg:base:84532/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/13",
+      "p": "http://dkg.io/ontology/kaUal",
+      "o": "did:dkg:base:84532/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/13"
+    },
+    {
+      "s": "did:dkg:base:84532/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/13",
+      "p": "http://dkg.io/ontology/confirmationKind",
+      "o": "\"transaction\""
+    },
+    {
+      "s": "did:dkg:base:84532/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/13",
+      "p": "http://dkg.io/ontology/assertionGraph",
+      "o": "did:dkg:context-graph:0xeD1eeB64CaC09874257F05Fd6B51A55695ad0B69/mandate-grants/_verifiable_memory/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/13"
+    },
+    {
+      "s": "did:dkg:base:84532/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/14",
+      "p": "http://dkg.io/ontology/status",
+      "o": "\"confirmed\""
+    },
+    {
+      "s": "did:dkg:base:84532/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/14",
+      "p": "http://dkg.io/ontology/transactionHash",
+      "o": "\"0x0275825ccec96ff13f8b8b276c1ffa509b1f71a74f64cdc8ff322459225fc5a4\""
+    },
+    {
+      "s": "did:dkg:base:84532/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/14",
+      "p": "http://dkg.io/ontology/publicTripleCount",
+      "o": "\"11\"^^<http://www.w3.org/2001/XMLSchema#integer>"
+    },
+    {
+      "s": "did:dkg:base:84532/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/14",
+      "p": "http://dkg.io/ontology/kaUal",
+      "o": "did:dkg:base:84532/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/14"
+    },
+    {
+      "s": "did:dkg:base:84532/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/14",
+      "p": "http://dkg.io/ontology/confirmationKind",
+      "o": "\"transaction\""
+    },
+    {
+      "s": "did:dkg:base:84532/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/14",
+      "p": "http://dkg.io/ontology/assertionGraph",
+      "o": "did:dkg:context-graph:0xeD1eeB64CaC09874257F05Fd6B51A55695ad0B69/mandate-grants/_verifiable_memory/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/14"
+    },
+    {
+      "s": "did:dkg:base:84532/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/15",
+      "p": "http://dkg.io/ontology/status",
+      "o": "\"confirmed\""
+    },
+    {
+      "s": "did:dkg:base:84532/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/15",
+      "p": "http://dkg.io/ontology/transactionHash",
+      "o": "\"0x08cf0056b89f0db02e4ba867420e10330f1ef2c6b2f4550cc50538d9ba7e67a1\""
+    },
+    {
+      "s": "did:dkg:base:84532/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/15",
+      "p": "http://dkg.io/ontology/publicTripleCount",
+      "o": "\"11\"^^<http://www.w3.org/2001/XMLSchema#integer>"
+    },
+    {
+      "s": "did:dkg:base:84532/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/15",
+      "p": "http://dkg.io/ontology/kaUal",
+      "o": "did:dkg:base:84532/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/15"
+    },
+    {
+      "s": "did:dkg:base:84532/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/15",
+      "p": "http://dkg.io/ontology/confirmationKind",
+      "o": "\"transaction\""
+    },
+    {
+      "s": "did:dkg:base:84532/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/15",
+      "p": "http://dkg.io/ontology/assertionGraph",
+      "o": "did:dkg:context-graph:0xeD1eeB64CaC09874257F05Fd6B51A55695ad0B69/mandate-grants/_verifiable_memory/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/15"
+    },
+    {
+      "s": "did:dkg:base:84532/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/16",
+      "p": "http://dkg.io/ontology/status",
+      "o": "\"confirmed\""
+    },
+    {
+      "s": "did:dkg:base:84532/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/16",
+      "p": "http://dkg.io/ontology/transactionHash",
+      "o": "\"0xcd411ab081b3e5400a2095f8b7de7433f431f4ca7fb9e22b79a669462805a4b7\""
+    },
+    {
+      "s": "did:dkg:base:84532/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/16",
+      "p": "http://dkg.io/ontology/publicTripleCount",
+      "o": "\"5\"^^<http://www.w3.org/2001/XMLSchema#integer>"
+    },
+    {
+      "s": "did:dkg:base:84532/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/16",
+      "p": "http://dkg.io/ontology/kaUal",
+      "o": "did:dkg:base:84532/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/16"
+    },
+    {
+      "s": "did:dkg:base:84532/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/16",
+      "p": "http://dkg.io/ontology/confirmationKind",
+      "o": "\"transaction\""
+    },
+    {
+      "s": "did:dkg:base:84532/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/16",
+      "p": "http://dkg.io/ontology/assertionGraph",
+      "o": "did:dkg:context-graph:0xeD1eeB64CaC09874257F05Fd6B51A55695ad0B69/mandate-grants/_verifiable_memory/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/16"
+    }
+  ]
+}

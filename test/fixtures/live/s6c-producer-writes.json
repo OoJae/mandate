@@ -1,0 +1,445 @@
+[
+  {
+    "path": "/api/knowledge-assets",
+    "request": {
+      "contextGraphId": "0xeD1eeB64CaC09874257F05Fd6B51A55695ad0B69/mandate-grants",
+      "name": "forgery-a-a92cfb76a7b92fa6",
+      "quads": [
+        {
+          "subject": "urn:mandate:state:a4fd01c01f7ce0b8",
+          "predicate": "http://www.w3.org/1999/02/22-rdf-syntax-ns#type",
+          "object": "https://oojae.github.io/mandate/ns/v1#GrantState"
+        },
+        {
+          "subject": "urn:mandate:state:a4fd01c01f7ce0b8",
+          "predicate": "https://oojae.github.io/mandate/ns/v1#stateOf",
+          "object": "urn:mandate:grant:0xed1eeb64cac09874257f05fd6b51a55695ad0b69:ana-s6c:f5b751b4b13bb895"
+        },
+        {
+          "subject": "urn:mandate:state:a4fd01c01f7ce0b8",
+          "predicate": "https://oojae.github.io/mandate/ns/v1#state",
+          "object": "\"active\""
+        },
+        {
+          "subject": "urn:mandate:state:a4fd01c01f7ce0b8",
+          "predicate": "https://oojae.github.io/mandate/ns/v1#stateAuthor",
+          "object": "did:dkg:agent:0xed1eeb64cac09874257f05fd6b51a55695ad0b69"
+        },
+        {
+          "subject": "urn:mandate:state:a4fd01c01f7ce0b8",
+          "predicate": "https://oojae.github.io/mandate/ns/v1#stateAt",
+          "object": "\"2026-09-13T15:45:29.603Z\"^^<http://www.w3.org/2001/XMLSchema#dateTime>"
+        }
+      ],
+      "finalize": true
+    },
+    "status": 201,
+    "response": {
+      "name": "forgery-a-a92cfb76a7b92fa6",
+      "assertionUri": "did:dkg:context-graph:0xeD1eeB64CaC09874257F05Fd6B51A55695ad0B69/mandate-grants/_working_memory/0x8eaa4857b22dddbfb5ebc476087fec39336e0cb5/2",
+      "alreadyExists": false,
+      "status": "wm-sealed",
+      "written": 5,
+      "merkleRoot": "0x9dd97e570b75a54ae94fdcb8a2a35a25e2f5b0e18fd72732073eb2e8487a316a",
+      "authorAddress": "0x8EaA4857B22dddbfb5ebC476087FEc39336e0CB5"
+    }
+  },
+  {
+    "path": "/api/knowledge-assets/forgery-a-a92cfb76a7b92fa6/swm/share",
+    "request": {
+      "contextGraphId": "0xeD1eeB64CaC09874257F05Fd6B51A55695ad0B69/mandate-grants"
+    },
+    "status": 500,
+    "response": {
+      "error": "A promote prerequisite is temporarily unavailable"
+    }
+  },
+  {
+    "path": "/api/knowledge-assets/forgery-a-a92cfb76a7b92fa6/swm/share",
+    "request": {
+      "contextGraphId": "0xeD1eeB64CaC09874257F05Fd6B51A55695ad0B69/mandate-grants"
+    },
+    "status": 500,
+    "response": {
+      "error": "A promote prerequisite is temporarily unavailable"
+    }
+  },
+  {
+    "path": "/api/knowledge-assets/forgery-a-a92cfb76a7b92fa6/swm/share",
+    "request": {
+      "contextGraphId": "0xeD1eeB64CaC09874257F05Fd6B51A55695ad0B69/mandate-grants"
+    },
+    "status": 500,
+    "response": {
+      "error": "[promote:encodeWorkspaceGossipPayload] A promote prerequisite is temporarily unavailable"
+    }
+  },
+  {
+    "path": "/api/knowledge-assets/forgery-a-a92cfb76a7b92fa6/swm/share",
+    "request": {
+      "contextGraphId": "0xeD1eeB64CaC09874257F05Fd6B51A55695ad0B69/mandate-grants"
+    },
+    "status": 500,
+    "response": {
+      "error": "A promote prerequisite is temporarily unavailable"
+    }
+  },
+  {
+    "path": "/api/knowledge-assets",
+    "request": {
+      "contextGraphId": "0x8EaA4857B22dddbfb5ebC476087FEc39336e0CB5/mandate-derivations",
+      "name": "forgery-a-a6ab5749d1c7774d",
+      "quads": [
+        {
+          "subject": "urn:mandate:state:a4fd01c01f7ce0b8",
+          "predicate": "http://www.w3.org/1999/02/22-rdf-syntax-ns#type",
+          "object": "https://oojae.github.io/mandate/ns/v1#GrantState"
+        },
+        {
+          "subject": "urn:mandate:state:a4fd01c01f7ce0b8",
+          "predicate": "https://oojae.github.io/mandate/ns/v1#stateOf",
+          "object": "urn:mandate:grant:0xed1eeb64cac09874257f05fd6b51a55695ad0b69:ana-s6c:f5b751b4b13bb895"
+        },
+        {
+          "subject": "urn:mandate:state:a4fd01c01f7ce0b8",
+          "predicate": "https://oojae.github.io/mandate/ns/v1#state",
+          "object": "\"active\""
+        },
+        {
+          "subject": "urn:mandate:state:a4fd01c01f7ce0b8",
+          "predicate": "https://oojae.github.io/mandate/ns/v1#stateAuthor",
+          "object": "did:dkg:agent:0xed1eeb64cac09874257f05fd6b51a55695ad0b69"
+        },
+        {
+          "subject": "urn:mandate:state:a4fd01c01f7ce0b8",
+          "predicate": "https://oojae.github.io/mandate/ns/v1#stateAt",
+          "object": "\"2026-09-13T15:45:29.603Z\"^^<http://www.w3.org/2001/XMLSchema#dateTime>"
+        }
+      ],
+      "finalize": true
+    },
+    "status": 201,
+    "response": {
+      "name": "forgery-a-a6ab5749d1c7774d",
+      "assertionUri": "did:dkg:context-graph:0x8EaA4857B22dddbfb5ebC476087FEc39336e0CB5/mandate-derivations/_working_memory/0x8eaa4857b22dddbfb5ebc476087fec39336e0cb5/3",
+      "alreadyExists": false,
+      "status": "wm-sealed",
+      "written": 5,
+      "merkleRoot": "0x9dd97e570b75a54ae94fdcb8a2a35a25e2f5b0e18fd72732073eb2e8487a316a",
+      "authorAddress": "0x8EaA4857B22dddbfb5ebC476087FEc39336e0CB5"
+    }
+  },
+  {
+    "path": "/api/knowledge-assets/forgery-a-a6ab5749d1c7774d/swm/share",
+    "request": {
+      "contextGraphId": "0x8EaA4857B22dddbfb5ebC476087FEc39336e0CB5/mandate-derivations"
+    },
+    "status": 200,
+    "response": {
+      "swmShared": true,
+      "promotedCount": 5,
+      "sealed": true,
+      "publishReady": true,
+      "shareOperationId": "mtzzkl49-t340t1"
+    }
+  },
+  {
+    "path": "/api/knowledge-assets/forgery-a-a6ab5749d1c7774d/vm/publish",
+    "request": {
+      "contextGraphId": "0x8EaA4857B22dddbfb5ebC476087FEc39336e0CB5/mandate-derivations"
+    },
+    "status": 200,
+    "response": {
+      "kaId": "64529287789852937627707493375911794044462126645639507861563942126180125114371",
+      "status": "confirmed",
+      "ual": "did:dkg:base:84532/0x8eaa4857b22dddbfb5ebc476087fec39336e0cb5/3",
+      "txHash": "0xaedeab9cf4456c117d851c4fa52e7eb6de2af8bd60bab5f8ef7b013720deebd0",
+      "assertionUri": "did:dkg:context-graph:0x8EaA4857B22dddbfb5ebC476087FEc39336e0CB5/mandate-derivations/assertion/0x8EaA4857B22dddbfb5ebC476087FEc39336e0CB5/forgery-a-a6ab5749d1c7774d",
+      "authorAddress": "0x8EaA4857B22dddbfb5ebC476087FEc39336e0CB5",
+      "merkleRoot": "0x9dd97e570b75a54ae94fdcb8a2a35a25e2f5b0e18fd72732073eb2e8487a316a",
+      "blockNumber": 46773049,
+      "storageAckPeerIds": [
+        "12D3KooWAbLiM6Xy2TfXtFpUrXqttnTSuctW8Lo1mkauaijsNrWw",
+        "12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M",
+        "12D3KooWPyTpqBBtU1AvzSsd5rWXCQzFcGtG44qDmeYenWcpzsge"
+      ]
+    }
+  },
+  {
+    "path": "/api/knowledge-assets",
+    "request": {
+      "contextGraphId": "0x8EaA4857B22dddbfb5ebC476087FEc39336e0CB5/mandate-derivations",
+      "name": "forgery-b-00d9be2e29b46234",
+      "quads": [
+        {
+          "subject": "urn:mandate:grant:0xed1eeb64cac09874257f05fd6b51a55695ad0b69:ana-s6c:7f61d7c7afd56459",
+          "predicate": "http://www.w3.org/1999/02/22-rdf-syntax-ns#type",
+          "object": "https://oojae.github.io/mandate/ns/v1#LikenessGrant"
+        },
+        {
+          "subject": "urn:mandate:grant:0xed1eeb64cac09874257f05fd6b51a55695ad0b69:ana-s6c:7f61d7c7afd56459",
+          "predicate": "https://oojae.github.io/mandate/ns/v1#grantor",
+          "object": "did:dkg:agent:0xed1eeb64cac09874257f05fd6b51a55695ad0b69"
+        },
+        {
+          "subject": "urn:mandate:grant:0xed1eeb64cac09874257f05fd6b51a55695ad0b69:ana-s6c:7f61d7c7afd56459",
+          "predicate": "https://oojae.github.io/mandate/ns/v1#subject",
+          "object": "\"0xed1eeb64cac09874257f05fd6b51a55695ad0b69:ana-s6c\""
+        },
+        {
+          "subject": "urn:mandate:grant:0xed1eeb64cac09874257f05fd6b51a55695ad0b69:ana-s6c:7f61d7c7afd56459",
+          "predicate": "https://oojae.github.io/mandate/ns/v1#permitsCapability",
+          "object": "\"face-swap-video\""
+        },
+        {
+          "subject": "urn:mandate:grant:0xed1eeb64cac09874257f05fd6b51a55695ad0b69:ana-s6c:7f61d7c7afd56459",
+          "predicate": "https://oojae.github.io/mandate/ns/v1#permitsCapability",
+          "object": "\"talking-head\""
+        },
+        {
+          "subject": "urn:mandate:grant:0xed1eeb64cac09874257f05fd6b51a55695ad0b69:ana-s6c:7f61d7c7afd56459",
+          "predicate": "https://oojae.github.io/mandate/ns/v1#permitsUseClass",
+          "object": "\"advertising\""
+        },
+        {
+          "subject": "urn:mandate:grant:0xed1eeb64cac09874257f05fd6b51a55695ad0b69:ana-s6c:7f61d7c7afd56459",
+          "predicate": "https://oojae.github.io/mandate/ns/v1#maxSpendUsd",
+          "object": "\"1000\"^^<http://www.w3.org/2001/XMLSchema#decimal>"
+        }
+      ],
+      "finalize": true
+    },
+    "status": 201,
+    "response": {
+      "name": "forgery-b-00d9be2e29b46234",
+      "assertionUri": "did:dkg:context-graph:0x8EaA4857B22dddbfb5ebC476087FEc39336e0CB5/mandate-derivations/_working_memory/0x8eaa4857b22dddbfb5ebc476087fec39336e0cb5/4",
+      "alreadyExists": false,
+      "status": "wm-sealed",
+      "written": 7,
+      "merkleRoot": "0xea868078408032593868ea3ba475df25f09d2b9f0fc2d36473670a59cb940735",
+      "authorAddress": "0x8EaA4857B22dddbfb5ebC476087FEc39336e0CB5"
+    }
+  },
+  {
+    "path": "/api/knowledge-assets/forgery-b-00d9be2e29b46234/swm/share",
+    "request": {
+      "contextGraphId": "0x8EaA4857B22dddbfb5ebC476087FEc39336e0CB5/mandate-derivations"
+    },
+    "status": 200,
+    "response": {
+      "swmShared": true,
+      "promotedCount": 7,
+      "sealed": true,
+      "publishReady": true,
+      "shareOperationId": "mtzzmqz9-zwp7px"
+    }
+  },
+  {
+    "path": "/api/knowledge-assets/forgery-b-00d9be2e29b46234/vm/publish",
+    "request": {
+      "contextGraphId": "0x8EaA4857B22dddbfb5ebC476087FEc39336e0CB5/mandate-derivations"
+    },
+    "status": 200,
+    "response": {
+      "kaId": "64529287789852937627707493375911794044462126645639507861563942126180125114372",
+      "status": "confirmed",
+      "ual": "did:dkg:base:84532/0x8eaa4857b22dddbfb5ebc476087fec39336e0cb5/4",
+      "txHash": "0xd18895bdec0f1af1a250db71722a31541f2888f7eb9b97cb118db4f6f6aa3adf",
+      "assertionUri": "did:dkg:context-graph:0x8EaA4857B22dddbfb5ebC476087FEc39336e0CB5/mandate-derivations/assertion/0x8EaA4857B22dddbfb5ebC476087FEc39336e0CB5/forgery-b-00d9be2e29b46234",
+      "authorAddress": "0x8EaA4857B22dddbfb5ebC476087FEc39336e0CB5",
+      "merkleRoot": "0xea868078408032593868ea3ba475df25f09d2b9f0fc2d36473670a59cb940735",
+      "blockNumber": 46773095,
+      "storageAckPeerIds": [
+        "12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M",
+        "12D3KooWPyTpqBBtU1AvzSsd5rWXCQzFcGtG44qDmeYenWcpzsge",
+        "12D3KooWAbLiM6Xy2TfXtFpUrXqttnTSuctW8Lo1mkauaijsNrWw"
+      ]
+    }
+  },
+  {
+    "path": "/api/knowledge-assets",
+    "request": {
+      "contextGraphId": "0xeD1eeB64CaC09874257F05Fd6B51A55695ad0B69/mandate-grants",
+      "name": "forgery-c-8665404b845dee95",
+      "quads": [
+        {
+          "subject": "urn:mandate:grant:0xed1eeb64cac09874257f05fd6b51a55695ad0b69:ana-s6c:a509f68bf982c495",
+          "predicate": "http://www.w3.org/1999/02/22-rdf-syntax-ns#type",
+          "object": "https://oojae.github.io/mandate/ns/v1#LikenessGrant"
+        },
+        {
+          "subject": "urn:mandate:grant:0xed1eeb64cac09874257f05fd6b51a55695ad0b69:ana-s6c:a509f68bf982c495",
+          "predicate": "https://oojae.github.io/mandate/ns/v1#grantor",
+          "object": "did:dkg:agent:0x8eaa4857b22dddbfb5ebc476087fec39336e0cb5"
+        },
+        {
+          "subject": "urn:mandate:grant:0xed1eeb64cac09874257f05fd6b51a55695ad0b69:ana-s6c:a509f68bf982c495",
+          "predicate": "https://oojae.github.io/mandate/ns/v1#subject",
+          "object": "\"0xed1eeb64cac09874257f05fd6b51a55695ad0b69:ana-s6c\""
+        },
+        {
+          "subject": "urn:mandate:grant:0xed1eeb64cac09874257f05fd6b51a55695ad0b69:ana-s6c:a509f68bf982c495",
+          "predicate": "https://oojae.github.io/mandate/ns/v1#permitsCapability",
+          "object": "\"face-swap-video\""
+        },
+        {
+          "subject": "urn:mandate:grant:0xed1eeb64cac09874257f05fd6b51a55695ad0b69:ana-s6c:a509f68bf982c495",
+          "predicate": "https://oojae.github.io/mandate/ns/v1#permitsCapability",
+          "object": "\"talking-head\""
+        },
+        {
+          "subject": "urn:mandate:grant:0xed1eeb64cac09874257f05fd6b51a55695ad0b69:ana-s6c:a509f68bf982c495",
+          "predicate": "https://oojae.github.io/mandate/ns/v1#permitsUseClass",
+          "object": "\"advertising\""
+        },
+        {
+          "subject": "urn:mandate:grant:0xed1eeb64cac09874257f05fd6b51a55695ad0b69:ana-s6c:a509f68bf982c495",
+          "predicate": "https://oojae.github.io/mandate/ns/v1#maxSpendUsd",
+          "object": "\"1000\"^^<http://www.w3.org/2001/XMLSchema#decimal>"
+        }
+      ],
+      "finalize": true
+    },
+    "status": 201,
+    "response": {
+      "name": "forgery-c-8665404b845dee95",
+      "assertionUri": "did:dkg:context-graph:0xeD1eeB64CaC09874257F05Fd6B51A55695ad0B69/mandate-grants/_working_memory/0x8eaa4857b22dddbfb5ebc476087fec39336e0cb5/5",
+      "alreadyExists": false,
+      "status": "wm-sealed",
+      "written": 7,
+      "merkleRoot": "0xcd73eb67a71dcf42b5accedb197c4b3c3a8939f56acdfcef113c4493241dd682",
+      "authorAddress": "0x8EaA4857B22dddbfb5ebC476087FEc39336e0CB5"
+    }
+  },
+  {
+    "path": "/api/knowledge-assets/forgery-c-8665404b845dee95/swm/share",
+    "request": {
+      "contextGraphId": "0xeD1eeB64CaC09874257F05Fd6B51A55695ad0B69/mandate-grants"
+    },
+    "status": 500,
+    "response": {
+      "error": "[promote:encodeWorkspaceGossipPayload] A promote prerequisite is temporarily unavailable"
+    }
+  },
+  {
+    "path": "/api/knowledge-assets/forgery-c-8665404b845dee95/swm/share",
+    "request": {
+      "contextGraphId": "0xeD1eeB64CaC09874257F05Fd6B51A55695ad0B69/mandate-grants"
+    },
+    "status": 500,
+    "response": {
+      "error": "[promote:encodeWorkspaceGossipPayload] A promote prerequisite is temporarily unavailable"
+    }
+  },
+  {
+    "path": "/api/knowledge-assets/forgery-c-8665404b845dee95/swm/share",
+    "request": {
+      "contextGraphId": "0xeD1eeB64CaC09874257F05Fd6B51A55695ad0B69/mandate-grants"
+    },
+    "status": 500,
+    "response": {
+      "error": "A promote prerequisite is temporarily unavailable"
+    }
+  },
+  {
+    "path": "/api/knowledge-assets/forgery-c-8665404b845dee95/swm/share",
+    "request": {
+      "contextGraphId": "0xeD1eeB64CaC09874257F05Fd6B51A55695ad0B69/mandate-grants"
+    },
+    "status": 500,
+    "response": {
+      "error": "A promote prerequisite is temporarily unavailable"
+    }
+  },
+  {
+    "path": "/api/knowledge-assets",
+    "request": {
+      "contextGraphId": "0x8EaA4857B22dddbfb5ebC476087FEc39336e0CB5/mandate-derivations",
+      "name": "forgery-c-7276de3a5049e2b9",
+      "quads": [
+        {
+          "subject": "urn:mandate:grant:0xed1eeb64cac09874257f05fd6b51a55695ad0b69:ana-s6c:a509f68bf982c495",
+          "predicate": "http://www.w3.org/1999/02/22-rdf-syntax-ns#type",
+          "object": "https://oojae.github.io/mandate/ns/v1#LikenessGrant"
+        },
+        {
+          "subject": "urn:mandate:grant:0xed1eeb64cac09874257f05fd6b51a55695ad0b69:ana-s6c:a509f68bf982c495",
+          "predicate": "https://oojae.github.io/mandate/ns/v1#grantor",
+          "object": "did:dkg:agent:0x8eaa4857b22dddbfb5ebc476087fec39336e0cb5"
+        },
+        {
+          "subject": "urn:mandate:grant:0xed1eeb64cac09874257f05fd6b51a55695ad0b69:ana-s6c:a509f68bf982c495",
+          "predicate": "https://oojae.github.io/mandate/ns/v1#subject",
+          "object": "\"0xed1eeb64cac09874257f05fd6b51a55695ad0b69:ana-s6c\""
+        },
+        {
+          "subject": "urn:mandate:grant:0xed1eeb64cac09874257f05fd6b51a55695ad0b69:ana-s6c:a509f68bf982c495",
+          "predicate": "https://oojae.github.io/mandate/ns/v1#permitsCapability",
+          "object": "\"face-swap-video\""
+        },
+        {
+          "subject": "urn:mandate:grant:0xed1eeb64cac09874257f05fd6b51a55695ad0b69:ana-s6c:a509f68bf982c495",
+          "predicate": "https://oojae.github.io/mandate/ns/v1#permitsCapability",
+          "object": "\"talking-head\""
+        },
+        {
+          "subject": "urn:mandate:grant:0xed1eeb64cac09874257f05fd6b51a55695ad0b69:ana-s6c:a509f68bf982c495",
+          "predicate": "https://oojae.github.io/mandate/ns/v1#permitsUseClass",
+          "object": "\"advertising\""
+        },
+        {
+          "subject": "urn:mandate:grant:0xed1eeb64cac09874257f05fd6b51a55695ad0b69:ana-s6c:a509f68bf982c495",
+          "predicate": "https://oojae.github.io/mandate/ns/v1#maxSpendUsd",
+          "object": "\"1000\"^^<http://www.w3.org/2001/XMLSchema#decimal>"
+        }
+      ],
+      "finalize": true
+    },
+    "status": 201,
+    "response": {
+      "name": "forgery-c-7276de3a5049e2b9",
+      "assertionUri": "did:dkg:context-graph:0x8EaA4857B22dddbfb5ebC476087FEc39336e0CB5/mandate-derivations/_working_memory/0x8eaa4857b22dddbfb5ebc476087fec39336e0cb5/6",
+      "alreadyExists": false,
+      "status": "wm-sealed",
+      "written": 7,
+      "merkleRoot": "0xcd73eb67a71dcf42b5accedb197c4b3c3a8939f56acdfcef113c4493241dd682",
+      "authorAddress": "0x8EaA4857B22dddbfb5ebC476087FEc39336e0CB5"
+    }
+  },
+  {
+    "path": "/api/knowledge-assets/forgery-c-7276de3a5049e2b9/swm/share",
+    "request": {
+      "contextGraphId": "0x8EaA4857B22dddbfb5ebC476087FEc39336e0CB5/mandate-derivations"
+    },
+    "status": 200,
+    "response": {
+      "swmShared": true,
+      "promotedCount": 7,
+      "sealed": true,
+      "publishReady": true,
+      "shareOperationId": "mtzzpdu0-ehvlj3"
+    }
+  },
+  {
+    "path": "/api/knowledge-assets/forgery-c-7276de3a5049e2b9/vm/publish",
+    "request": {
+      "contextGraphId": "0x8EaA4857B22dddbfb5ebC476087FEc39336e0CB5/mandate-derivations"
+    },
+    "status": 200,
+    "response": {
+      "kaId": "64529287789852937627707493375911794044462126645639507861563942126180125114374",
+      "status": "confirmed",
+      "ual": "did:dkg:base:84532/0x8eaa4857b22dddbfb5ebc476087fec39336e0cb5/6",
+      "txHash": "0x564112634c5fa49e654c379f80ab339d5e0cdb97c3715760d57492c61a943e0d",
+      "assertionUri": "did:dkg:context-graph:0x8EaA4857B22dddbfb5ebC476087FEc39336e0CB5/mandate-derivations/assertion/0x8EaA4857B22dddbfb5ebC476087FEc39336e0CB5/forgery-c-7276de3a5049e2b9",
+      "authorAddress": "0x8EaA4857B22dddbfb5ebC476087FEc39336e0CB5",
+      "merkleRoot": "0xcd73eb67a71dcf42b5accedb197c4b3c3a8939f56acdfcef113c4493241dd682",
+      "blockNumber": 46773156,
+      "storageAckPeerIds": [
+        "12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M",
+        "12D3KooWJqhnnfouiNRUyJBEREpuKtV4A448LUbS6JiVCe8Q82bZ",
+        "12D3KooWAbLiM6Xy2TfXtFpUrXqttnTSuctW8Lo1mkauaijsNrWw"
+      ]
+    }
+  }
+]

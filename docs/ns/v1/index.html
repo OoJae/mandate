@@ -39,20 +39,25 @@
 <body>
 <main>
 <h1>Mandate: likeness and voice consent vocabulary</h1>
-<p class="meta">Version 1.0.0 · Namespace <code>https://oojae.github.io/mandate/ns/v1#</code> · Apache-2.0</p>
+<p class="meta">Version 1.1.1 · Namespace <code>https://oojae.github.io/mandate/ns/v1#</code> · Apache-2.0</p>
 <p>A vocabulary for publishing consent to render a person's likeness or voice, revoking it, and recording what was produced under it — so that the party who grants permission, the party who renders, and a third party who trusts neither can all reach the same verdict from the same graph.</p>
 
 <div class="rule">
-  <p><strong>The authorship rule.</strong> A <code>mandate:GrantState</code> assertion counts only when its
-  <code>mandate:stateAuthor</code> is the <code>mandate:grantor</code> of the grant it refers to. The graph is
-  append-only, so “active” and “revoked” assertions coexist and anyone can write either; a resolver that skips
-  this check lets the party that profits from rendering defeat any revocation.</p>
+  <p><strong>The authorship rule.</strong> Authorship is the address that anchored a Knowledge Asset, never a
+  value written inside it. A <code>mandate:LikenessGrant</code> counts only when anchored by the address in its
+  <code>mandate:subject</code>; a <code>mandate:GrantState</code> counts only when anchored by the address that
+  anchored its grant. The graph is append-only and anyone can write <code>mandate:grantor</code> or
+  <code>mandate:stateAuthor</code> naming anyone, so a resolver that trusts those values lets the party that
+  profits from rendering invent a grant or defeat a revocation. Version 1.0.0 made that mistake.</p>
 </div>
 
 <h2>Downloads</h2>
 <ul class="downloads">
   <li><a href="mandate.ttl">mandate.ttl</a> — the ontology, Turtle</li>
   <li><a href="context.jsonld">context.jsonld</a> — JSON-LD context</li>
+  <li><a href="1.1.1/mandate.ttl">1.1.1/mandate.ttl</a> — this version, served at <code>https://oojae.github.io/mandate/ns/v1/1.1.1</code>. It is not anchored, and differs from 1.1.0 in comments only. The fixed, anchored copy is version 1.1.0: <code>did:dkg:base:84532/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/30</code></li>
+  <li>1.0.0: anchored as <code>did:dkg:base:84532/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/26</code> (<a href="https://sepolia.basescan.org/tx/0x94ba6ea19e437c7afefbe920052a9069a1810554145c637bcad173a0f5f1dbaa">transaction</a>)</li>
+  <li>1.1.0: anchored as <code>did:dkg:base:84532/0xed1eeb64cac09874257f05fd6b51a55695ad0b69/30</code> (<a href="https://sepolia.basescan.org/tx/0x824da77be0835b10efe070d0322e7250447132b173197f25202dd832ee9bad9b">transaction</a>)</li>
   <li><a href="https://github.com/OoJae/mandate">github.com/OoJae/mandate</a> — reference resolver and gate</li>
 </ul>
 
@@ -60,31 +65,31 @@
 <article class="term" id="LikenessGrant">
   <h3><a href="#LikenessGrant">LikenessGrant</a></h3>
   <p class="iri"><code>https://oojae.github.io/mandate/ns/v1#LikenessGrant</code></p>
-  <p>Permission, authored by the depicted person's own agent, to render their likeness or voice with named capabilities, for named uses, in named territories, within a validity window and a spend ceiling. Identifies its subject by a declared identifier, never by biometric data.</p>
+  <p>Permission, published by the depicted person's own agent, to render their likeness or voice with named capabilities, for named uses, in named territories, within a validity window and a spend ceiling. A resolver MUST accept a grant only from the Knowledge Asset anchored by the address its mandate:subject names, and that address must also be the one in mandate:grantor. Identifies its subject by a declared identifier, never by biometric data.</p>
   
 </article>
 <article class="term" id="grantor">
   <h3><a href="#grantor">grantor</a></h3>
   <p class="iri"><code>https://oojae.github.io/mandate/ns/v1#grantor</code></p>
-  <p>The agent DID that authored the grant. Must be the depicted person's own agent.</p>
+  <p>The agent DID of the grantor, did:dkg:agent:0x&lt;address&gt;. Descriptive: a resolver checks it against the address that anchored the grant and rejects the grant if they differ.</p>
   <dl><dt>domain</dt><dd><code>mandate:LikenessGrant</code></dd><dt>range</dt><dd><code>rdfs:Resource</code></dd></dl>
 </article>
 <article class="term" id="subject">
   <h3><a href="#subject">subject</a></h3>
   <p class="iri"><code>https://oojae.github.io/mandate/ns/v1#subject</code></p>
-  <p>A declared, opaque identifier for the depicted person. Never derived from biometric data.</p>
+  <p>A declared identifier for the depicted person, of the form 0x&lt;grantor address&gt;:&lt;name&gt;, so only that address can grant or revoke for it. Never derived from biometric data. Every grant and derivation linked to a subject is public and permanent, so the name should be meaningless outside the relationship.</p>
   <dl><dt>domain</dt><dd><code>mandate:LikenessGrant</code></dd><dt>range</dt><dd><code>xsd:string</code></dd></dl>
 </article>
 <article class="term" id="consentClipSha256">
   <h3><a href="#consentClipSha256">consentClipSha256</a></h3>
   <p class="iri"><code>https://oojae.github.io/mandate/ns/v1#consentClipSha256</code></p>
-  <p>Hex SHA-256 of the recorded consent clip. The clip itself is never published.</p>
+  <p>Hex SHA-256 of the recorded consent clip. The clip itself is never published to the graph. The reference CLI writes it only when the transcript is a reading of the consent script it generated from the grant’s own terms, with nothing contradicted. A grant whose clip an operator confirmed by hand, with or without --force, carries no clip hash, and so does a grant made without a clip.</p>
   <dl><dt>domain</dt><dd><code>mandate:LikenessGrant</code></dd><dt>range</dt><dd><code>xsd:string</code></dd></dl>
 </article>
 <article class="term" id="consentTranscript">
   <h3><a href="#consentTranscript">consentTranscript</a></h3>
   <p class="iri"><code>https://oojae.github.io/mandate/ns/v1#consentTranscript</code></p>
-  <p>Optional transcript of the spoken consent, for human review against the granted scope.</p>
+  <p>Transcript of the spoken consent. Publishing it makes a person's own words permanent and public, so the reference implementation refuses to write it unless explicitly asked; publish mandate:consentClipSha256 instead.</p>
   <dl><dt>domain</dt><dd><code>mandate:LikenessGrant</code></dd><dt>range</dt><dd><code>xsd:string</code></dd></dl>
 </article>
 <article class="term" id="permitsCapability">
@@ -96,7 +101,7 @@
 <article class="term" id="permitsUseClass">
   <h3><a href="#permitsUseClass">permitsUseClass</a></h3>
   <p class="iri"><code>https://oojae.github.io/mandate/ns/v1#permitsUseClass</code></p>
-  <p>A use class the grant permits, such as advertising. If any are present, unlisted uses are refused.</p>
+  <p>A use class the grant permits, such as advertising. If any are present, unlisted uses are refused. The reference gate refuses a request whose declared use-class label is on its deny list (adult, sexual, deceptive-impersonation and synonyms) whatever a grant says. That is a check on the label the producer declares; nothing inspects the prompt or the media.</p>
   <dl><dt>domain</dt><dd><code>mandate:LikenessGrant</code></dd><dt>range</dt><dd><code>xsd:string</code></dd></dl>
 </article>
 <article class="term" id="forbidsUseClass">
@@ -114,57 +119,57 @@
 <article class="term" id="validFrom">
   <h3><a href="#validFrom">validFrom</a></h3>
   <p class="iri"><code>https://oojae.github.io/mandate/ns/v1#validFrom</code></p>
-  
+  <p>Start of the validity window, an xsd:dateTime with an explicit Z or ±hh:mm offset. Absent means no start. A value that is not a real date and time is refused by the gate and verifies TAINTED with sub-status MALFORMED.</p>
   <dl><dt>domain</dt><dd><code>mandate:LikenessGrant</code></dd><dt>range</dt><dd><code>xsd:dateTime</code></dd></dl>
 </article>
 <article class="term" id="validUntil">
   <h3><a href="#validUntil">validUntil</a></h3>
   <p class="iri"><code>https://oojae.github.io/mandate/ns/v1#validUntil</code></p>
-  
+  <p>End of the validity window, an xsd:dateTime with an explicit Z or ±hh:mm offset, later than mandate:validFrom. Absent means no end. After it, new renders are refused, and a file rendered inside the window verifies TAINTED with sub-status EXPIRED: the grant lapsed, which is not a withdrawal of consent.</p>
   <dl><dt>domain</dt><dd><code>mandate:LikenessGrant</code></dd><dt>range</dt><dd><code>xsd:dateTime</code></dd></dl>
 </article>
 <article class="term" id="maxSpendUsd">
   <h3><a href="#maxSpendUsd">maxSpendUsd</a></h3>
   <p class="iri"><code>https://oojae.github.io/mandate/ns/v1#maxSpendUsd</code></p>
-  <p>Ceiling on total estimated spend across all renders authorised by this grant.</p>
+  <p>Ceiling in US dollars on spend across renders authorised by this grant, summed from mandate:billedUsd on the derivations of trusted producers in the derivations graphs the gate reads. Enforced by the producer’s own gate before dispatch, in whole micro-dollars: prior spend and the estimate rounded up, the ceiling rounded down. An unknown cost, or an unreadable record from a trusted producer, under a ceiling is refused. Not a platform limit.</p>
   <dl><dt>domain</dt><dd><code>mandate:LikenessGrant</code></dd><dt>range</dt><dd><code>xsd:decimal</code></dd></dl>
 </article>
 <h2>Grant state assertion</h2>
 <article class="term" id="GrantState">
   <h3><a href="#GrantState">GrantState</a></h3>
   <p class="iri"><code>https://oojae.github.io/mandate/ns/v1#GrantState</code></p>
-  <p>An append-only assertion that a grant is active or revoked. Because the graph has no delete, assertions accumulate and anyone can write one. A state assertion counts only when its mandate:stateAuthor is the mandate:grantor of the grant it refers to; among those, the newest wins.</p>
+  <p>An append-only assertion that a grant is revoked. Because the graph has no delete, assertions accumulate and anyone can write one. A state assertion counts only when the Knowledge Asset holding it was anchored by the same address that anchored the grant it refers to. Revocation is terminal: any counted revocation ends the grant for good, an “active” assertion has no effect, and renewing consent means publishing a new grant.</p>
   
 </article>
 <article class="term" id="stateOf">
   <h3><a href="#stateOf">stateOf</a></h3>
   <p class="iri"><code>https://oojae.github.io/mandate/ns/v1#stateOf</code></p>
-  
+  <p>The grant this state assertion is about. Exactly one grant IRI. Once it names a grant anchored by the same address that anchored this assertion, the assertion counts as a revocation even if its other values are malformed, and even if the same object is also typed as a grant or a derivation.</p>
   <dl><dt>domain</dt><dd><code>mandate:GrantState</code></dd><dt>range</dt><dd><code>mandate:LikenessGrant</code></dd></dl>
 </article>
 <article class="term" id="state">
   <h3><a href="#state">state</a></h3>
   <p class="iri"><code>https://oojae.github.io/mandate/ns/v1#state</code></p>
-  <p>Either “active” or “revoked”.</p>
+  <p>“revoked”. Any other value is treated as revoked by a fail-closed resolver; “active” has no effect.</p>
   <dl><dt>domain</dt><dd><code>mandate:GrantState</code></dd><dt>range</dt><dd><code>xsd:string</code></dd></dl>
 </article>
 <article class="term" id="stateAuthor">
   <h3><a href="#stateAuthor">stateAuthor</a></h3>
   <p class="iri"><code>https://oojae.github.io/mandate/ns/v1#stateAuthor</code></p>
-  <p>The agent DID that wrote this state assertion. A resolver MUST ignore any state assertion whose author is not the mandate:grantor of the referenced grant. Without this rule, the party that profits from rendering can write its own “active” assertion and defeat any revocation.</p>
+  <p>The agent DID that wrote this state assertion. Descriptive only: anyone can write any DID here. A resolver MUST attribute a state assertion to the address that anchored its Knowledge Asset, and count it only when that address anchored the referenced grant. A stateAuthor that disagrees with the anchoring address makes the assertion malformed, and a malformed assertion by the grant’s own publisher still counts as a revocation. Version 1.0.0 of this vocabulary compared this value instead, which let a forger name the grantor.</p>
   <dl><dt>domain</dt><dd><code>mandate:GrantState</code></dd><dt>range</dt><dd><code>rdfs:Resource</code></dd></dl>
 </article>
 <article class="term" id="stateAt">
   <h3><a href="#stateAt">stateAt</a></h3>
   <p class="iri"><code>https://oojae.github.io/mandate/ns/v1#stateAt</code></p>
-  
+  <p>When the state was asserted, an xsd:dateTime with an explicit offset. Descriptive: it never decides whether a revocation counts, because revocation is terminal whatever the time it claims.</p>
   <dl><dt>domain</dt><dd><code>mandate:GrantState</code></dd><dt>range</dt><dd><code>xsd:dateTime</code></dd></dl>
 </article>
 <h2>Derivation</h2>
 <article class="term" id="Derivation">
   <h3><a href="#Derivation">Derivation</a></h3>
   <p class="iri"><code>https://oojae.github.io/mandate/ns/v1#Derivation</code></p>
-  <p>A record of one produced artifact, identified by the SHA-256 of its bytes, linking it to the capability that served it and the grant that authorised it. Written before the artifact is released, so that revocation can enumerate everything produced under a grant.</p>
+  <p>A record of one produced artifact, identified by the SHA-256 of its bytes, linking it to the capability that served it and the grant that authorised it. Each derivation has its own IRI. Written and anchored before the artifact is released, so that revocation can enumerate everything produced under a grant. A verifier judges a file only by derivations anchored by producers it trusts.</p>
   
 </article>
 <article class="term" id="outputSha256">
@@ -182,74 +187,74 @@
 <article class="term" id="servedModelId">
   <h3><a href="#servedModelId">servedModelId</a></h3>
   <p class="iri"><code>https://oojae.github.io/mandate/ns/v1#servedModelId</code></p>
-  
+  <p>The provider model that served the render, when the platform reports it. Descriptive; not read by the reference verifier.</p>
   <dl><dt>domain</dt><dd><code>mandate:Derivation</code></dd><dt>range</dt><dd><code>xsd:string</code></dd></dl>
 </article>
 <article class="term" id="authorizedUnder">
   <h3><a href="#authorizedUnder">authorizedUnder</a></h3>
   <p class="iri"><code>https://oojae.github.io/mandate/ns/v1#authorizedUnder</code></p>
-  
+  <p>The grant the producer rendered under. A verifier judges the derivation against that grant as published by the address its IRI names; a grant id published more than once is malformed.</p>
   <dl><dt>domain</dt><dd><code>mandate:Derivation</code></dd><dt>range</dt><dd><code>mandate:LikenessGrant</code></dd></dl>
 </article>
 <article class="term" id="loraId">
   <h3><a href="#loraId">loraId</a></h3>
   <p class="iri"><code>https://oojae.github.io/mandate/ns/v1#loraId</code></p>
-  <p>Identifier of a fine-tune trained under the grant, so artifacts rendered through it can be found on revocation.</p>
+  <p>Identifier of a fine-tune trained under the grant, so artifacts rendered through it can be found on revocation. Written if given; not yet read by the reference resolver.</p>
   <dl><dt>domain</dt><dd><code>mandate:Derivation</code></dd><dt>range</dt><dd><code>xsd:string</code></dd></dl>
 </article>
 <article class="term" id="sessionId">
   <h3><a href="#sessionId">sessionId</a></h3>
   <p class="iri"><code>https://oojae.github.io/mandate/ns/v1#sessionId</code></p>
-  <p>The render platform's job or session id, joining its billing records to this graph.</p>
+  <p>The render platform's job id, joining its billing records to this graph.</p>
   <dl><dt>domain</dt><dd><code>mandate:Derivation</code></dd><dt>range</dt><dd><code>xsd:string</code></dd></dl>
 </article>
 <article class="term" id="billedUsd">
   <h3><a href="#billedUsd">billedUsd</a></h3>
   <p class="iri"><code>https://oojae.github.io/mandate/ns/v1#billedUsd</code></p>
-  <p>Estimated spend at list price. An estimate, not an invoice.</p>
+  <p>What the render cost in US dollars: the platform’s reported cost when it gives one, otherwise a list-price estimate that does not depend on operator input, otherwise absent (unknown). Written with at most six decimals, rounded up, so a positive amount is never written as 0. Not an invoice.</p>
   <dl><dt>domain</dt><dd><code>mandate:Derivation</code></dd><dt>range</dt><dd><code>xsd:decimal</code></dd></dl>
 </article>
 <article class="term" id="derivedAt">
   <h3><a href="#derivedAt">derivedAt</a></h3>
   <p class="iri"><code>https://oojae.github.io/mandate/ns/v1#derivedAt</code></p>
-  
+  <p>When the producer says the artifact was rendered, an xsd:dateTime with an explicit offset. Required. It is the producer’s own claim, so a verifier believes it only when it counts against the producer: a render outside the grant’s validity window.</p>
   <dl><dt>domain</dt><dd><code>mandate:Derivation</code></dd><dt>range</dt><dd><code>xsd:dateTime</code></dd></dl>
 </article>
 <h2>Refusal</h2>
 <article class="term" id="Refusal">
   <h3><a href="#Refusal">Refusal</a></h3>
   <p class="iri"><code>https://oojae.github.io/mandate/ns/v1#Refusal</code></p>
-  <p>A record that a render was refused, naming the clause that denied it and the spend avoided. Producing a refusal never invokes the refused capability.</p>
+  <p>A record that a render was refused, naming the clause that denied it and the spend it avoided. Producing a refusal never invokes the refused capability. Defined for integrators; the reference implementation does not publish refusals.</p>
   
 </article>
 <article class="term" id="refusedCapability">
   <h3><a href="#refusedCapability">refusedCapability</a></h3>
   <p class="iri"><code>https://oojae.github.io/mandate/ns/v1#refusedCapability</code></p>
-  
+  <p>The capability that was requested and refused.</p>
   <dl><dt>domain</dt><dd><code>mandate:Refusal</code></dd><dt>range</dt><dd><code>xsd:string</code></dd></dl>
 </article>
 <article class="term" id="refusedSubject">
   <h3><a href="#refusedSubject">refusedSubject</a></h3>
   <p class="iri"><code>https://oojae.github.io/mandate/ns/v1#refusedSubject</code></p>
-  
+  <p>The declared subject identifier the refused render was for.</p>
   <dl><dt>domain</dt><dd><code>mandate:Refusal</code></dd><dt>range</dt><dd><code>xsd:string</code></dd></dl>
 </article>
 <article class="term" id="deniedByClause">
   <h3><a href="#deniedByClause">deniedByClause</a></h3>
   <p class="iri"><code>https://oojae.github.io/mandate/ns/v1#deniedByClause</code></p>
-  <p>One of: grant-exists, capability-permitted, use-class-permitted, territory-permitted, validity-window, not-revoked, spend-ceiling.</p>
+  <p>One of: malformed-request, use-class-prohibited, read-inconsistent, grant-exists, capability-permitted, use-class-permitted, territory-permitted, validity-window, not-revoked, spend-ceiling.</p>
   <dl><dt>domain</dt><dd><code>mandate:Refusal</code></dd><dt>range</dt><dd><code>xsd:string</code></dd></dl>
 </article>
 <article class="term" id="spendAvoidedUsd">
   <h3><a href="#spendAvoidedUsd">spendAvoidedUsd</a></h3>
   <p class="iri"><code>https://oojae.github.io/mandate/ns/v1#spendAvoidedUsd</code></p>
-  <p>Exact, because a refusal never invokes the capability.</p>
+  <p>What the refused render would have cost, estimated at list price. Nothing was spent: a refusal never invokes the capability.</p>
   <dl><dt>domain</dt><dd><code>mandate:Refusal</code></dd><dt>range</dt><dd><code>xsd:decimal</code></dd></dl>
 </article>
 <article class="term" id="refusedAt">
   <h3><a href="#refusedAt">refusedAt</a></h3>
   <p class="iri"><code>https://oojae.github.io/mandate/ns/v1#refusedAt</code></p>
-  
+  <p>When the render was refused, an xsd:dateTime with an explicit offset.</p>
   <dl><dt>domain</dt><dd><code>mandate:Refusal</code></dd><dt>range</dt><dd><code>xsd:dateTime</code></dd></dl>
 </article>
 </main>

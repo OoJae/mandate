@@ -1,0 +1,143 @@
+name: release
+
+# Publishes to npm from a version tag, with provenance, through npm trusted
+# publishing: the npm package lists this workflow as its trusted publisher, so no
+# token is stored anywhere.
+#
+# Three jobs, so that no third-party code runs before the tarball is fixed, and
+# none runs where a publish token can be minted.
+#
+#   pack     packs straight from the tagged checkout. It installs nothing and runs
+#            no script (the package has no build step), so no dependency code has
+#            run when the tarball and its sha256 are recorded. Provenance points at
+#            the tag, and this is what makes that claim hold.
+#   test     a separate job. It first packs its own clean checkout and requires the
+#            same digest, so the tests judge the bytes that will ship. Then it runs
+#            npm ci --ignore-scripts, the tests and the smoke test. Dependency code
+#            does run here (the suite imports n3 and the MCP SDK), which is why this
+#            job uploads nothing and passes nothing on; publish only waits for it.
+#   publish  holds id-token, runs in the protected `npm` environment, installs
+#            nothing from the project, and publishes the tarball pack uploaded,
+#            fetched by artifact id and checked against pack's digest.
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+jobs:
+  pack:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      tarball: ${{ steps.pack.outputs.tarball }}
+      sha256: ${{ steps.pack.outputs.sha256 }}
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
+    steps:
+      # Actions are pinned to commit SHAs; the comment names the release.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # No dependency cache in a release build.
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24.21.0'
+      - name: Tag matches package.json
+        run: test "v$(node -p "require('./package.json').version")" = "${GITHUB_REF_NAME}"
+      # --ignore-scripts below would skip a build step silently and ship a
+      # tarball without its output. Refuse instead, so adding one forces this
+      # workflow to be redesigned rather than quietly weakened.
+      - name: The package has no lifecycle scripts to skip
+        run: |
+          node -e '
+            const s = require("./package.json").scripts ?? {}
+            const hooks = ["preinstall", "install", "postinstall", "prepare", "prepack", "postpack", "prepublish", "prepublishOnly", "publish", "postpublish"]
+            const found = hooks.filter(h => h in s)
+            if (found.length) { console.error(`package.json has lifecycle scripts: ${found.join(", ")}`); process.exit(1) }
+          '
+      - name: Pack
+        id: pack
+        run: |
+          mkdir dist
+          npm pack --ignore-scripts --pack-destination dist
+          test "$(ls dist/*.tgz | wc -l)" = 1
+          tarball="$(cd dist && ls *.tgz)"
+          echo "tarball=${tarball}" >> "$GITHUB_OUTPUT"
+          echo "sha256=$(sha256sum "dist/${tarball}" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        id: upload
+        with:
+          name: package
+          path: dist/*.tgz
+          if-no-files-found: error
+          retention-days: 7
+
+  test:
+    needs: pack
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24.21.0'
+      # Before anything is installed. npm pack is reproducible (fixed mtimes,
+      # sorted entries) with the same Node and npm. Every job pins the same exact
+      # Node release, 24.21.0, and pack and test use the npm bundled with it
+      # (11.19.0), so a Node release landing between the two jobs cannot change
+      # the bytes. If reproducibility ever stops holding, the release stops here
+      # rather than publishing bytes nobody tested.
+      - name: This checkout packs to the tarball pack produced
+        env:
+          TARBALL: ${{ needs.pack.outputs.tarball }}
+          SHA256: ${{ needs.pack.outputs.sha256 }}
+        run: |
+          mkdir "${RUNNER_TEMP}/repack"
+          npm pack --ignore-scripts --pack-destination "${RUNNER_TEMP}/repack"
+          echo "${SHA256}  ${RUNNER_TEMP}/repack/${TARBALL}" | sha256sum --check --strict
+      - run: npm ci --ignore-scripts
+      - run: npm test
+      - run: node scripts/smoke-pack.mjs
+
+  publish:
+    # needs test only as a gate: nothing test produces is read here.
+    needs: [pack, test]
+    runs-on: ubuntu-latest
+    # Protected environment: set required reviewers on it in the repository
+    # settings, and name it in the npm trusted publisher configuration.
+    environment: npm
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24.21.0'
+          registry-url: 'https://registry.npmjs.org'
+      # By id, not name, so no other upload in this run can stand in for it.
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.pack.outputs.artifact-id }}
+          path: dist
+          merge-multiple: true
+      - name: Tarball is the one pack produced
+        env:
+          TARBALL: ${{ needs.pack.outputs.tarball }}
+          SHA256: ${{ needs.pack.outputs.sha256 }}
+        run: |
+          test "$(ls dist | wc -l)" = 1
+          echo "${SHA256}  dist/${TARBALL}" | sha256sum --check --strict
+      # Trusted publishing needs npm 11.5.1 or later. Pinned exactly, and npm
+      # itself has no install scripts; --ignore-scripts keeps it that way.
+      - name: npm, pinned
+        run: npm install --global --ignore-scripts npm@11.19.1
+      - name: Publish
+        env:
+          TARBALL: ${{ needs.pack.outputs.tarball }}
+        run: npm publish "dist/${TARBALL}" --provenance --access public --ignore-scripts

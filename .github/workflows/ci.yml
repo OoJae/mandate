@@ -14,21 +14,75 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        node: ['22.13', '24']
+        node: ['22.13', '24', '26']
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      # Actions are pinned to commit SHAs; the comment names the release.
+      # No credentials left in .git/config: npm test runs dependency code.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ matrix.node }}
-          cache: npm
-      - run: npm ci
-      - name: Unit tests
+      # No dependency install script runs in CI: the suite needs none (it imports
+      # only n3 and the MCP SDK, both plain JavaScript), and a compromised
+      # dependency's install script would otherwise run with the checkout.
+      - run: npm ci --ignore-scripts
+      - name: Unit, adversarial and CLI tests (no network)
         run: npm test
       - name: Namespace documents are current
         run: |
           node scripts/build-vocab-docs.mjs
-          git diff --exit-code -- docs/ns
+          # git diff alone ignores untracked files, so a new version directory
+          # nobody committed (the ontology's versionIRI) would pass. Porcelain
+          # status lists modified and untracked paths alike.
+          changes="$(git status --porcelain --untracked-files=all -- docs/ns)"
+          if [ -n "$changes" ]; then
+            echo "docs/ns is not what scripts/build-vocab-docs.mjs generates; run it and commit:"
+            echo "$changes"
+            git diff -- docs/ns
+            exit 1
+          fi
       - name: Packed tarball works with no peers installed
         run: node scripts/smoke-pack.mjs
-      - name: Production dependency audit
-        run: npm audit --omit=dev
+      # The published package has no runtime dependencies, so this covers the
+      # package alone. Optional peers are audited by whoever installs them.
+      - name: Audit runtime dependencies (none)
+        run: npm audit --omit=dev --omit=peer
+
+  # Removing a security guard must turn CI red. Each mutant in
+  # scripts/mutations.json deletes or weakens one guard in a temporary copy of
+  # the repository; the job fails if the tests still pass for any of them.
+  mutation:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    # About 640 mutants (638 when this was written), split into eleven shards
+    # that run as parallel jobs, every 11th entry each, so the ~85 mutants that
+    # reach the slow cli.test phase (about 70 s each) are spread evenly: about 8
+    # in one shard. A local run of 584 took 103 worker-minutes on a 10-core
+    # machine; the heaviest shard of 50 took 12. A 4-vCPU runner runs 2 workers,
+    # so a shard of 57 needs about 7 minutes plus a 1-minute baseline at local
+    # speed, and stays inside the 35-minute budget even on a runner three times
+    # slower. Not yet measured on a runner.
+    #
+    # --timeout-ms bounds each test phase of one mutant: the CLI phase takes about
+    # 70 s, so 300 s leaves room for a slow runner. A hang is reported as TIMEOUT
+    # with the files still running and fails the job; it is never counted as a
+    # kill. --budget-minutes stops the shard ten minutes before the job timeout
+    # would kill it, reports every mutant not yet judged as UNFINISHED and still
+    # prints each survivor, so a slow shard never hides one behind a bare timeout.
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+      - run: npm ci --ignore-scripts
+      - name: Every security guard is protected by a failing test
+        run: npm run test:mutation -- --jobs 2 --timeout-ms 300000 --budget-minutes 35 --shard ${{ matrix.shard }}/11

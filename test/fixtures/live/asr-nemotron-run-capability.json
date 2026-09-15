@@ -1,0 +1,21 @@
+{
+  "note": "run_capability nemotron-asr structuredContent, captured 2026-09-13 on /api/mcp/raw. The clip URL is replaced by an example path.",
+  "structuredContent": {
+    "ok": true,
+    "capability": "nemotron-asr",
+    "output_kind": "text",
+    "result": {
+      "text": "This render was authorized by a grant I published myself.",
+      "model_id": "nvidia/nemotron-asr-multilingual/asr"
+    },
+    "cost_usd_estimated": 0.0007,
+    "cost_unit_kind": "second",
+    "cost_units": 5,
+    "source_url": "https://agent.livepeer.org/a/example.mp4",
+    "inputs": {
+      "audio_url": "https://agent.livepeer.org/a/example.mp4"
+    },
+    "budget_headroom_usd": 36.8373,
+    "requested_capability": "nemotron-asr"
+  }
+}

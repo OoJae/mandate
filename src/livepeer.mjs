@@ -36,7 +36,7 @@ function headers(surface) {
 }
 
 export async function connect(surface = RAW) {
-  const client = new Client({ name: 'mandate', version: '0.1.0' }, { capabilities: {} })
+  const client = new Client({ name: 'mandate', version: '0.2.0' }, { capabilities: {} })
   await client.connect(new StreamableHTTPClientTransport(
     new URL(`${BASE}/${surface}`), { requestInit: { headers: headers(surface) } },
   ))
@@ -45,22 +45,49 @@ export async function connect(surface = RAW) {
 
 export const textOf = r => (r.content || []).map(c => c.text || '').join('\n')
 
-/** Parse the prose `describe_capability` answer into something checkable. */
-export function parseCapability(text) {
-  const head = (text.split('\n')[0] || '')
-  return {
-    availability: (head.split('—')[1] || '').split('·')[0].trim() || 'unknown',
-    kind: (head.split('·')[1] || '').trim() || '',
-    price: (text.match(/price:\s*([^\n]+)/) || [])[1] || null,
-    latency: (text.match(/latency:\s*([^\n]+)/) || [])[1] || null,
-    text,
+/** A tool call the platform answered with isError. */
+export class LivepeerToolError extends Error {
+  constructor(message, { tool, structured = null, text = '' } = {}) {
+    super(message)
+    this.tool = tool
+    this.structured = structured
+    this.text = text
   }
 }
 
+/**
+ * Call a tool and return its structured and text content; throw when the
+ * platform marks the result as an error. Earlier versions read only the text
+ * and treated an error message as a result.
+ */
+export async function callStrict(client, name, args = {}, { timeoutMs } = {}) {
+  const r = await client.callTool({ name, arguments: args }, undefined, timeoutMs ? { timeout: timeoutMs } : undefined)
+  const text = textOf(r)
+  const structured = r.structuredContent ?? null
+  if (r.isError) {
+    const detail = structured?.error ?? text
+    throw new LivepeerToolError(`${name} failed: ${String(detail).slice(0, 500)}`, { tool: name, structured, text })
+  }
+  return { structured, text }
+}
+
+/** The capability's detail card: price, latency SLA, availability. */
 export async function describeCapability(client, name) {
-  return parseCapability(textOf(await client.callTool({
-    name: 'describe_capability', arguments: { name },
-  })))
+  return (await callStrict(client, 'describe_capability', { name })).structured
+}
+
+/** The live rate-card row for one capability, or null if the platform has none. */
+export async function getPricing(client, name) {
+  const { structured } = await callStrict(client, 'get_pricing', { name })
+  return structured?.capabilities?.find(c => c.name === name) ?? null
+}
+
+/**
+ * Read the account's rolling 24h spend cap. Mandate never sets it: the cap is
+ * the operator's, and a grant's ceiling is enforced by the gate instead.
+ */
+export async function readSpendCap(client) {
+  return (await callStrict(client, 'spend_cap', { action: 'read' })).structured
 }
 
 /**
@@ -69,48 +96,106 @@ export async function describeCapability(client, name) {
  * without a key.
  */
 export async function requestUpload(client, kind = 'video') {
-  const text = textOf(await client.callTool({ name: 'request_upload', arguments: { kind } }))
+  const { structured, text } = await callStrict(client, 'request_upload', { kind })
   return {
-    pageUrl: (text.match(/https:\/\/agent\.livepeer\.org\/u\/[a-f0-9]+/) || [])[0] || null,
-    token: (text.match(/\b[a-f0-9]{24}\b/) || [])[0] || null,
+    pageUrl: structured?.page_url ?? (text.match(/https:\/\/agent\.livepeer\.org\/u\/[a-f0-9]+/) || [])[0] ?? null,
+    token: structured?.token ?? (text.match(/\b[a-f0-9]{24}\b/) || [])[0] ?? null,
+    expiresAt: structured?.expires_at ?? null,
     text,
   }
 }
 
-export async function getUpload(client, token, waitSeconds = 20) {
-  const text = textOf(await client.callTool({
-    name: 'get_upload', arguments: { token, wait_seconds: waitSeconds },
-  }))
-  const url = (text.match(/https?:\/\/\S+\.(?:mp4|mov|jpg|jpeg|png|heic|webm|m4a|wav)\b/i) || [])[0] || null
-  return { url, pending: !url, text }
+const UPLOAD_DONE = new Set(['done', 'complete', 'completed', 'uploaded', 'received', 'ready', 'succeeded', 'success'])
+/** The capture page itself, or any other page on the agent site that is not hosted media. */
+function isAgentPage(u) {
+  return u.hostname === 'agent.livepeer.org' && !u.pathname.startsWith('/a/')
+}
+
+// The clip's hash becomes the evidence, so it is only fetched over TLS. Plain
+// http is allowed for loopback alone, where there is no network to tamper with.
+function parsedHttps(s) {
+  try {
+    const u = new URL(String(s))
+    if (u.protocol === 'https:') return u
+    return u.protocol === 'http:' && ['127.0.0.1', 'localhost', '[::1]'].includes(u.hostname) ? u : null
+  } catch { return null }
+}
+
+/** Typographic apostrophes as straight ones, and hyphens and dashes as spaces, as the platform's own summaries use them. */
+const plainPunctuation = text => String(text ?? '').replace(/[\u2018\u2019\u201b\u02bc`\u00b4]/g, "'").replace(/[-\u2010-\u2015\u2212]+/g, ' ')
+
+/**
+ * Only "expired" said as a fact counts: "not expired yet", "hasn\u2019t expired"
+ * and "not-expired" are still waiting.
+ */
+export function saysExpired(text) {
+  const t = plainPunctuation(text)
+  return /\bexpired\b/i.test(t) && !/(\bnot|\bnever|n't|\bhasnt|\bisnt)\s+(yet\s+|been\s+|already\s+)?expired\b/i.test(t)
+}
+
+const ARRIVED = /\b(received|uploaded|complete|completed|done|ready)\b/i
+// A negator a few words before the arrival word: "not received", "never
+// uploaded", "hasn't been received", "not yet complete", "no upload received".
+const NOT_ARRIVED = /(\bnot|\bnever|\bno|n't|\bhasnt|\bhavent|\bisnt|\bwasnt|\barent|\bnothing|\bnone|\bnor|\bwithout)\s+(?:[a-z]+\s+){0,3}?(received|uploaded|complete|completed|done|ready)\b|\b(incomplete|unreceived|not\s*yet)\b/i
+/** Text that says the upload never arrived; getUpload refuses a link in it. */
+const saysNotArrived = text => NOT_ARRIVED.test(plainPunctuation(text))
+const saysReceived = text => ARRIVED.test(plainPunctuation(text))
+
+/** Text that says the upload has not arrived yet, so a link in it is not the clip. */
+function saysWaiting(text) {
+  const t = plainPunctuation(text)
+  return /\b(wait|waiting|pending|not yet|not expired|hasn't expired|still|in progress|uploading|no file)\b/i.test(t)
 }
 
 /**
- * Dispatch a gated capability.
- *
- * Nothing in this module decides whether a dispatch is allowed — that is the
- * gate's job, and it runs before this is ever called. Keeping the two apart is
- * what makes the policy auditable in one file.
+ * A clip URL named in the reply text, used only when the structured reply has
+ * none. It must be media hosted by the platform itself, an
+ * agent.livepeer.org/a/ path: any other https link in prose (a docs page, an
+ * example file) could be hashed as the person's recording. Two different
+ * candidates are ambiguous and give none.
  */
-export async function runCapability(client, capability, args, { timeout = 700, requestTimeoutMs } = {}) {
-  // Two different clocks, and conflating them wastes money. `timeout` is the
-  // server-side render budget; the MCP SDK imposes its own 60s request timeout,
-  // and when that fires the render keeps going and is still billed. So the
-  // transport timeout is always given room beyond the render budget.
-  return textOf(await client.callTool(
-    { name: 'run_capability', arguments: { capability, timeout, ...args } },
-    undefined,
-    { timeout: requestTimeoutMs ?? (timeout * 1000 + 60000) },
-  ))
+export function uploadUrlFromText(text) {
+  const found = new Set()
+  for (const raw of String(text ?? '').match(/https:\/\/[^\s<>"'\]\[)(]+/g) ?? []) {
+    const u = parsedHttps(raw.replace(/[.,;:!?]+$/, ''))
+    if (!u || u.protocol !== 'https:' || u.hostname !== 'agent.livepeer.org' || !u.pathname.startsWith('/a/')) continue
+    found.add(u.href)
+  }
+  return found.size === 1 ? [...found][0] : null
 }
 
-/** Second belt beneath our own ceiling check — see the note in gate.mjs. */
-export async function setSpendCap(client, capUsd) {
-  return textOf(await client.callTool({
-    name: 'spend_cap', arguments: { action: 'set', cap_usd: capUsd },
-  }))
+export async function getUpload(client, token, waitSeconds = 20) {
+  const { structured, text } = await callStrict(client, 'get_upload', { token, wait_seconds: waitSeconds })
+  const given = typeof structured?.status === 'string' ? structured.status.trim().toLowerCase() : null
+  const status = given ?? (saysExpired(text) ? 'expired' : null)
+  let url = null
+  // A status that is not a finished upload wins over any link in the reply.
+  if (status === null || UPLOAD_DONE.has(status)) {
+    const s = parsedHttps(structured?.url)
+    if (s && !isAgentPage(s)) url = s.href
+    // A link in prose is the clip only when nothing says the upload is still to
+    // come or that it never arrived, and, with no structured status to lean on,
+    // the text says it arrived.
+    else if (structured?.url == null && !saysWaiting(text) && !saysNotArrived(text) && (status !== null || saysReceived(text))) url = uploadUrlFromText(text)
+  }
+  return { url, status: url ? (status ?? 'done') : (status && !UPLOAD_DONE.has(status) ? status : 'pending'), pending: !url, mime: structured?.mime ?? null, text, structured }
+}
+
+/**
+ * Dispatch a capability and return its text. Throws on a platform error.
+ *
+ * Nothing in this module decides whether a dispatch is allowed — that is the
+ * gate's job, and it runs before this is ever called.
+ */
+export async function runCapability(client, capability, args, { timeout = 280, requestTimeoutMs } = {}) {
+  // Two different clocks: `timeout` is the server-side render budget; the MCP
+  // SDK has its own request timeout, and when that fires the render keeps going
+  // and is still billed. The transport always gets room beyond the budget.
+  const { text } = await callStrict(client, 'run_capability', { capability, timeout, ...args },
+    { timeoutMs: requestTimeoutMs ?? (timeout * 1000 + 10_000) })
+  return text
 }
 
 export async function costReport(client, scope = 'session') {
-  return textOf(await client.callTool({ name: 'get_cost_report', arguments: { scope } }))
+  return (await callStrict(client, 'get_cost_report', { scope })).text
 }
