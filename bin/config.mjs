@@ -3,16 +3,29 @@
  *
  * Deployment details — which nodes, which context graphs, which producers to
  * trust — belong to whoever runs Mandate, not to the library. Values come from
- * the environment, with a `.env` in the working directory filling in anything
- * unset (see `.env.example`).
+ * the environment, with one env file filling in anything unset (see
+ * `.env.example`). That file is, in order: the one named by `--env-path`, the
+ * one named by MANDATE_ENV_FILE, else `$MANDATE_HOME/.env` (default
+ * `~/.mandate/.env`).
  *
- * Only Mandate's own keys are read from `.env`. A `.env` is often shared or
- * copied between projects, and a stray NODE_OPTIONS or PATH in one should not
- * change how this process, or anything it starts, runs.
+ * A `.env` in the working directory is never read. It decides which producers
+ * a verifier trusts, which graphs it reads, whether freshness is checked and
+ * where local state lives, and a folder someone else sent (a delivery with a
+ * video and a `.env`) must not be able to change that by being the place
+ * `mandate verify` is run from.
+ *
+ * Only Mandate's own keys are read from the file. An env file is often shared
+ * or copied between projects, and a stray NODE_OPTIONS or PATH in one should
+ * not change how this process, or anything it starts, runs.
+ *
+ * The flag is `--env-path`, not `--env-file`: Node.js (seen on v26) scans the
+ * whole command line for `--env-file`, even after the script name, and applies
+ * a NODE_OPTIONS from that file before any Mandate code runs.
  */
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, readFileSync, statSync } from 'node:fs'
 import { parseEnv } from 'node:util'
-import { join } from 'node:path'
+import { homedir } from 'node:os'
+import { join, resolve } from 'node:path'
 import { DkgNode } from '../src/dkg.mjs'
 import { contextGraphAddress } from '../src/resolve.mjs'
 import { assertContextGraphId } from '../src/queries.mjs'
@@ -36,7 +49,82 @@ export function loadEnvFile(path, env = process.env) {
   return { loaded, ignored }
 }
 
-export const envLoad = loadEnvFile(join(process.cwd(), '.env'))
+/**
+ * Where the env file is looked for: `flag` (--env-path), then MANDATE_ENV_FILE,
+ * then `$MANDATE_HOME/.env`, with MANDATE_HOME (default ~/.mandate) taken from
+ * the real environment. `explicit` is true for the first two, which must exist.
+ */
+export function envFileLocation({ flag, env = process.env } = {}) {
+  if (typeof flag === 'string' && flag) return { path: resolve(flag), source: '--env-path', explicit: true }
+  if (env.MANDATE_ENV_FILE) return { path: resolve(env.MANDATE_ENV_FILE), source: 'MANDATE_ENV_FILE', explicit: true }
+  return { path: join(env.MANDATE_HOME || join(homedir(), '.mandate'), '.env'), source: 'MANDATE_HOME', explicit: false }
+}
+
+/**
+ * What loadMandateEnv did: `path` is the file loaded (null when none was),
+ * `searched` where it looked, and `warnings` anything the operator should see.
+ */
+export const envLoad = { path: null, source: null, searched: null, loaded: [], ignored: [], warnings: [] }
+
+/**
+ * Load the env file (see envFileLocation) into `env`. An explicitly named file
+ * that cannot be read is a ConfigError; a missing default file is not. A file
+ * others can write to is loaded with a warning, since whoever can change it can
+ * change which producers and graphs this machine trusts.
+ */
+export function loadMandateEnv({ flag, env = process.env } = {}) {
+  const where = envFileLocation({ flag, env })
+  Object.assign(envLoad, { path: null, source: where.source, searched: where.path, loaded: [], ignored: [], warnings: [] })
+  let st
+  try {
+    st = statSync(where.path)
+  } catch (e) {
+    if (e.code === 'ENOENT' && !where.explicit) return envLoad
+    throw new ConfigError(`the env file ${where.path} (from ${where.source}) cannot be read: ${e.code ?? e.message}`)
+  }
+  if (!st.isFile()) throw new ConfigError(`the env file ${where.path} (from ${where.source}) is not a file`)
+  if (st.mode & 0o022) {
+    envLoad.warnings.push(`the env file ${where.path} is ${st.mode & 0o002 ? 'world' : 'group'}-writable: whoever can change it can change which producers and graphs this machine trusts. Run: chmod 600 ${where.path}`)
+  }
+  let r
+  try {
+    r = loadEnvFile(where.path, env)
+  } catch (e) {
+    throw new ConfigError(`the env file ${where.path} (from ${where.source}) cannot be read: ${e.code ?? e.message}`)
+  }
+  Object.assign(envLoad, { path: where.path, loaded: r.loaded, ignored: r.ignored })
+  return envLoad
+}
+
+/**
+ * For a script run from the repository (publish-ontology, the spikes): load the
+ * same env file as the CLI from `--env-path <path>` in `argv`, refusing Node's
+ * own --env-file. Prints warnings and the file used; exits 1 on a bad flag or
+ * an unreadable named file. Returns envLoad.
+ */
+export function loadScriptEnv(argv = process.argv.slice(2), { log = console.log, error = console.error, exit = process.exit } = {}) {
+  if (argv.some(a => /^--env-file(?:-if-exists)?(?:=|$)/.test(a))) {
+    error('--env-file is read by Node.js itself, which applies a NODE_OPTIONS from that file; name the env file with --env-path <path> instead')
+    return exit(1)
+  }
+  const at = argv.indexOf('--env-path')
+  const flag = at === -1 ? undefined : argv[at + 1]
+  if (at !== -1 && (!flag || flag.startsWith('--'))) {
+    error('--env-path needs a path')
+    return exit(1)
+  }
+  let loaded
+  try {
+    loaded = loadMandateEnv({ flag })
+  } catch (e) {
+    if (!(e instanceof ConfigError)) throw e
+    error(e.message)
+    return exit(1)
+  }
+  for (const w of loaded.warnings) error(`warning: ${w}`)
+  log(loaded.path ? `env file: ${loaded.path}` : `env file: none (looked for ${loaded.searched})`)
+  return loaded
+}
 
 const env = (k, d) => process.env[k] ?? d
 

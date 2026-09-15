@@ -2,7 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { createServer } from 'node:http'
 import { createHash } from 'node:crypto'
-import { mkdtempSync, mkdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
 import { spawn } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -10,7 +10,7 @@ import { dispatchRender, extractMediaUrl, pollJob, RenderError, collectInputUrls
 import { callStrict, LivepeerToolError } from '../src/livepeer.mjs'
 import { checkInputs, dispatchMode, estimateFromPricing } from '../src/capabilities.mjs'
 import { sha256OfUrl, FetchBytesError } from '../src/fetch-bytes.mjs'
-import { renderKey, pendingStore, PendingConflictError, PendingInvariantError, PendingReadError, mergeDerivationAttempt, mayBeBilled } from '../src/pending.mjs'
+import { renderKey, pendingStore, PendingConflictError, PendingInvariantError, PendingReadError, mergeDerivationAttempt, mayBeBilled, grantLockPath } from '../src/pending.mjs'
 import { verifyMedia, hashUrl } from '../src/verify.mjs'
 
 const IMG = 'https://agent.livepeer.org/a/img.jpg'
@@ -506,7 +506,9 @@ test('payment classification ignores URLs, input-fetch credential errors and tok
   assert.equal(classifyFailure({ status_code: 401 }, 'fetching image_url failed'), 'tool')
   assert.equal(classifyFailure({ status_code: 401 }, 'bad bearer token'), 'payment')
   assert.equal(classifyFailure({ status_code: 403 }, 'unauthorized'), 'tool')
-  assert.equal(classifyFailure({ http_status: 500 }, 'insufficient credits'), 'tool')
+  // Unambiguous payment text outranks a generic status code (round three).
+  assert.equal(classifyFailure({ http_status: 500 }, 'insufficient credits'), 'payment')
+  assert.equal(classifyFailure({ http_status: 500 }, 'provider crashed'), 'tool')
   assert.equal(classifyFailure(null, 'fetch failed for https://x.example/payment/receipt.jpg'), 'tool')
   assert.equal(classifyFailure(null, 'prompt exceeds the token allowance'), 'tool')
   assert.equal(classifyFailure(null, 'monthly credit allowance used up'), 'payment')
@@ -769,6 +771,436 @@ test('an unreadable pending record is a PendingReadError naming the file', () =>
     writeFileSync(join(dir, `${key}.json`), '{ not json')
     assert.throws(() => store.load(key), e => e instanceof PendingReadError && e.file.endsWith(`${key}.json`))
     assert.throws(() => store.list(), PendingReadError)
+  } finally {
+    done()
+  }
+})
+
+// --- round three: execute and fetch-bytes (execute-fetch stream) ----------------------
+
+import { describe } from 'node:test'
+
+describe('round three: execute and fetch-bytes', () => {
+  const JOB = 'mjob_abcdef123456'
+  const PAGE = `https://agent.livepeer.org/jobs/${JOB}`
+
+  test('a done structured url must look like media: a job page is polled, or is no media', async () => {
+    const polled = stubClient({
+      run_capability: [ok({ job_id: JOB, status: 'done', url: PAGE })],
+      get_create_media: [ok({ status: 'done', url: OUT })],
+    })
+    const r = await dispatchRender(polled, { ...TH, poll: noSleep })
+    assert.equal(r.url, OUT)
+    assert.equal(r.mode, 'async')
+    assert.equal(polled.calls.filter(c => c.name === 'get_create_media').length, 1)
+    await assert.rejects(dispatchRender(stubClient({ run_capability: [ok({ status: 'done', url: PAGE })] }), { ...TH, poll: noSleep }), e => e.kind === 'no-media')
+    await assert.rejects(pollJob(stubClient({ get_create_media: [ok({ status: 'done', url: 'https://cdn.test/status' })] }), JOB, noSleep), e => e.kind === 'no-media' && e.jobId === JOB)
+    assert.equal(extractMediaUrl({ url: 'https://cdn.test/a/xyz' }), null)
+    // The platform's own media path serves files without an extension.
+    const bare = 'https://agent.livepeer.org/a/aHR0cHM6Ly9jZG4.443036d1/H4f1o5X4'
+    assert.equal(extractMediaUrl({ url: bare }), bare)
+    assert.equal(extractMediaUrl({ url: 'https://agent.livepeer.org/a/' }), null)
+  })
+
+  test('an ok:false reply saying the render timed out or continues in the background may have started', async () => {
+    for (const error of ['render timed out after 280s', 'the render continues in the background', 'DEADLINE_EXCEEDED inline budget exhausted']) {
+      await assert.rejects(dispatchRender(stubClient({ run_capability: [ok({ ok: false, error })] }), TH),
+        e => e instanceof RenderError && e.kind === 'timeout' && e.mayHaveStarted === true && e.jobId === null, error)
+    }
+    await assert.rejects(dispatchRender(stubClient({ run_capability: [err(null, 'DEADLINE_EXCEEDED inline budget exhausted')] }), TH), e => e.kind === 'timeout' && e.mayHaveStarted === true)
+    await assert.rejects(dispatchRender(stubClient({ run_capability: [ok({ ok: false, error: 'prompt rejected' })] }), TH), e => e.kind === 'tool' && e.mayHaveStarted === false)
+  })
+
+  test('poll options: null is empty, and a bad onStatus, now or poll value is refused before dispatch', async () => {
+    const queued = () => stubClient({ run_capability: [ok({ job_id: JOB, status: 'queued' })], get_create_media: [ok({ status: 'done', url: OUT })] })
+    let job = null
+    const r = await dispatchRender(queued(), { ...TH, poll: null, onJob: id => { job = id } })
+    assert.equal(r.url, OUT)
+    assert.equal(job, JOB)
+    for (const poll of [{ ...noSleep, onStatus: 5 }, { ...noSleep, now: 5 }, 5]) {
+      const client = queued()
+      job = null
+      await assert.rejects(dispatchRender(client, { ...TH, poll, onJob: id => { job = id } }), TypeError, JSON.stringify(poll))
+      assert.equal(client.calls.length, 0)
+      assert.equal(job, null)
+    }
+    const direct = queued()
+    await assert.rejects(pollJob(direct, JOB, { now: 5 }), TypeError)
+    assert.equal(direct.calls.length, 0)
+  })
+
+  test('a clock that is not a number, or any unexpected error after the job exists, is a RenderError with the job id', async () => {
+    let sleeps = 0
+    const running = stubClient({ get_create_media: [ok({ status: 'running' })] })
+    await within(assert.rejects(pollJob(running, JOB, { maxWaitMs: 0, now: () => NaN, sleep: async () => { if (++sleeps > 5) throw new Error('looped') } }),
+      e => e instanceof RenderError && e.kind === 'tool' && e.jobId === JOB && e.mayHaveStarted === true && /cannot time/.test(e.message)), 2000, 'NaN clock')
+    await assert.rejects(pollJob(running, JOB, { sleep: async () => { throw new Error('sleep broke') } }),
+      e => e instanceof RenderError && e.jobId === JOB && e.mayHaveStarted === true && /sleep broke/.test(e.message))
+    const queued = () => stubClient({ run_capability: [ok({ job_id: JOB, status: 'queued' })], get_create_media: [ok({ status: 'running' }), ok({ status: 'done', url: OUT })] })
+    await assert.rejects(dispatchRender(queued(), { ...TH, poll: { ...noSleep, onStatus: () => { throw new Error('status sink broke') } } }),
+      e => e instanceof RenderError && e.jobId === JOB && e.mayHaveStarted === true)
+    await assert.rejects(dispatchRender(queued(), { ...TH, poll: noSleep, onJob: () => { throw new Error('disk full') } }),
+      e => e instanceof RenderError && e.jobId === JOB && e.mayHaveStarted === true && /disk full/.test(e.message))
+  })
+
+  test('malformed reply content is read as no text, never a TypeError', async () => {
+    const client = stubClient({ get_create_media: [
+      { content: 'x', structuredContent: { status: 'running' } },
+      { content: [null, 7], structuredContent: { status: 'running' } },
+      { content: { text: 'y' }, structuredContent: { status: 'done', url: OUT } },
+    ] })
+    const r = await pollJob(client, JOB, noSleep)
+    assert.equal(r.url, OUT)
+    assert.equal(r.text, '')
+  })
+
+  test('a text header naming another job is a mismatch even when structured content has a status', async () => {
+    const client = stubClient({ get_create_media: [ok({ status: 'done', url: 'https://cdn.test/other.mp4' }, 'Media job mjob_zzzzzz999999: done')] })
+    await assert.rejects(pollJob(client, JOB, noSleep), e => e instanceof RenderError && e.kind === 'tool' && e.jobId === JOB && /another job/.test(e.message))
+    const same = stubClient({ get_create_media: [ok({ status: 'done', url: OUT }, `Media job ${JOB.toUpperCase()}: done`)] })
+    assert.equal((await pollJob(same, JOB, noSleep)).url, OUT)
+  })
+
+  test('echo detection ignores a trailing-dot host and a default port on either scheme', () => {
+    const input = 'https://cdn.test/prev.png'
+    assert.equal(extractMediaUrl({ url: 'https://cdn.test./prev.png' }, '', [input]), null)
+    assert.equal(extractMediaUrl({ url: input }, '', ['https://CDN.test./prev.png']), null)
+    assert.equal(extractMediaUrl({ url: 'http://cdn.test:443/prev.png' }, '', [input]), null)
+    assert.equal(extractMediaUrl({ url: 'https://cdn.test:80/prev.png' }, '', ['http://cdn.test/prev.png']), null)
+    assert.equal(extractMediaUrl({ url: 'https://cdn.test:8443/prev.png' }, '', [input]), 'https://cdn.test:8443/prev.png')
+  })
+
+  test('payment text outranks a generic status code; a 401/403 about fetching an input stays tool', () => {
+    assert.equal(classifyFailure({ status_code: 403 }, 'insufficient credits'), 'payment')
+    assert.equal(classifyFailure({ status_code: 500 }, 'payment required'), 'payment')
+    assert.equal(classifyFailure({ status_code: 401 }, 'insufficient credits to retrieve result'), 'payment')
+    assert.equal(classifyFailure({ status_code: 403 }, 'payment required fetching image_url'), 'tool')
+    assert.equal(classifyFailure({ status_code: 401 }, 'HTTP 402 payment required while downloading audio_url'), 'tool')
+    assert.equal(classifyFailure({ status_code: 500 }, 'provider crashed'), 'tool')
+    assert.equal(classifyFailure(null, 'fetch failed for cdn.x/payment/receipt.jpg'), 'tool')
+    assert.equal(classifyFailure(null, 'input at media.example.com/payments/r.png was empty'), 'tool')
+    assert.equal(classifyFailure(null, 'fetch failed for https://x.example/payment/receipt.jpg'), 'tool')
+    assert.equal(classifyFailure(null, 'no payment method on the account'), 'payment')
+  })
+
+  test('a finished inline reply with a structured media url is not queued because its text mentions get_create_media', async () => {
+    const client = stubClient({ run_capability: [ok({ status: 'done', url: OUT }, 'Finished. (you can also use get_create_media)')] })
+    const r = await dispatchRender(client, { ...TH, poll: noSleep })
+    assert.equal(r.url, OUT)
+    assert.equal(r.mode, 'inline')
+    await assert.rejects(dispatchRender(stubClient({ run_capability: [ok({ status: 'done' }, 'Finished. (you can also use get_create_media)')] }), TH),
+      e => e.kind === 'tool' && e.mayHaveStarted === true && /queued job/.test(e.message))
+  })
+
+  test('a body whose cancel never settles, or that has no cancel, cannot hold an over-size fetch', async () => {
+    let fetches = 0
+    const body = cancel => ({ ...(cancel ? { cancel } : {}), [Symbol.asyncIterator]: () => ({ next: () => new Promise(() => {}) }) })
+    for (const cancel of [() => new Promise(() => {}), null]) {
+      fetches = 0
+      const fetch = async () => { fetches++; return fakeRes(body(cancel), { 'content-length': '1000' }) }
+      await within(assert.rejects(sha256OfUrl('https://h.test/a.mp4', { maxBytes: 10, timeoutMs: 300, backoffMs: 0, fetch }),
+        e => e instanceof FetchBytesError && e.final === true && /over the 10-byte limit/.test(e.message)), 1000, 'cancel')
+      assert.equal(fetches, 1)
+    }
+  })
+
+  test('surviving guards: served fallback, poll inputUrls, text media extension, first-reply failure, backoffMs, ArrayBuffer chunks', async () => {
+    const r = await dispatchRender(stubClient({ run_capability: [ok({ status: 'done', url: OUT })] }), { ...TH, capability: 'Flux Dev', poll: noSleep })
+    assert.equal(r.servedCapability, null)
+    assert.ok(r.warnings.some(w => /not a capability name/.test(w)))
+
+    const extra = 'https://cdn.test/extra.mp4'
+    const echoing = stubClient({ run_capability: [ok({ job_id: JOB, status: 'queued' })], get_create_media: [ok({ status: 'done', url: extra })] })
+    await assert.rejects(dispatchRender(echoing, { ...TH, poll: { ...noSleep, inputUrls: [extra] } }), e => e.kind === 'no-media' && e.jobId === JOB)
+
+    assert.equal(extractMediaUrl(null, 'status page https://cdn.test/jobs/1 ready', []), null)
+    await assert.rejects(dispatchRender(stubClient({ run_capability: [ok({ ok: true }, 'see https://cdn.test/status')] }), TH), e => e.kind === 'no-media')
+
+    await assert.rejects(dispatchRender(stubClient({ run_capability: [ok({ status: 'failed', error: 'insufficient credits' })] }), TH),
+      e => e.kind === 'payment' && e.mayHaveStarted === true)
+
+    for (const backoffMs of [NaN, -1, 'x']) {
+      let fetched = false
+      const fetch = async () => { fetched = true; return fakeRes(iterBody(['abc'])) }
+      await assert.rejects(sha256OfUrl('https://h.test/a.mp4', { backoffMs, fetch }), e => e instanceof FetchBytesError && e.final === true && /backoffMs/.test(e.message), String(backoffMs))
+      assert.equal(fetched, false)
+    }
+
+    const ab = new TextEncoder().encode('abc').buffer
+    const hashed = await sha256OfUrl('https://h.test/a.mp4', { fetch: async () => fakeRes(iterBody([ab])) })
+    assert.equal(hashed.sha256, createHash('sha256').update('abc').digest('hex'))
+    assert.equal(hashed.bytes, 3)
+  })
+
+  test('guards killed only by the full suite: negative cost, queued without an id, reader stop on timeout, no attempt past the deadline', async () => {
+    const neg = await dispatchRender(stubClient({ run_capability: [ok({ status: 'done', url: OUT, cost_usd_estimated: -1 })] }), TH)
+    assert.equal(neg.costUsdEstimated, null)
+    assert.ok(neg.warnings.some(w => /cost estimate/.test(w)))
+
+    let job = 'unset'
+    await assert.rejects(dispatchRender(stubClient({ run_capability: [ok({ status: 'queued' })] }), { ...TH, onJob: id => { job = id } }),
+      e => e instanceof RenderError && e.kind === 'tool' && e.mayHaveStarted === true && /returned no job id/.test(e.message))
+    assert.equal(job, 'unset')
+
+    let returned = false
+    const hanging = { cancel: async () => {}, [Symbol.asyncIterator]: () => ({ next: () => new Promise(() => {}), return: async () => { returned = true; return { done: true } } }) }
+    await within(assert.rejects(sha256OfUrl('https://h.test/a.mp4', { timeoutMs: 100, attempts: 1, fetch: async () => fakeRes(hanging) }), /timed out/), 2000, 'hanging read')
+    await new Promise(r => setTimeout(r, 10))
+    assert.equal(returned, true)
+
+    const times = [0, 0, 50, 50, 200]
+    let fetches = 0
+    const clock = () => times.length > 1 ? times.shift() : times[0]
+    await assert.rejects(sha256OfUrl('https://h.test/a.mp4', { timeoutMs: 100, attempts: 3, backoffMs: 0, sleep: async () => {}, now: clock,
+      fetch: async () => { fetches++; throw new TypeError('socket closed') } }),
+    e => e instanceof FetchBytesError && e.final === true && /^timed out fetching media$/.test(e.message))
+    assert.equal(fetches, 1)
+  })
+})
+
+// --- round three: pending records ----------------------------------------------------------
+
+test('D3: a sent attempt that crashed, then a resumed attempt that fails cleanly, stays submitted and billed', () => {
+  const { store, done } = tmpStore({ isAlive: () => false })
+  try {
+    const key = renderKey({ grantId: 'urn:g', capability: 'crash-resume' })
+    store.beginAttempt({ key, idempotencyKey: key })
+    const sent = store.markSent(key)
+    // markSent stamps the attempt, so a crash from here on leaves it possibly billed.
+    assert.match(sent.attempts.at(-1).sentAt, /^\d{4}-/)
+    assert.equal(mayBeBilled(store.load(key)), true)
+    // The process dies here. A rerun resumes under the stored key.
+    const again = store.beginAttempt({ key, idempotencyKey: key })
+    assert.equal(again.resumed, true)
+    assert.equal(again.record.idempotencyKey, key)
+    assert.equal(again.record.mayHaveStarted, true)
+    // The first attempt carries no mayHaveStarted of its own: only its sentAt says it was sent.
+    assert.equal(again.record.attempts[0].mayHaveStarted, undefined)
+    // The account spend cap refuses the rerun before anything is sent.
+    const after = store.finishAttempt(key, { status: 'failed', mayHaveStarted: false, errorKind: 'spend-cap' })
+    assert.equal(after.status, 'submitted')
+    assert.equal(after.lastOutcome, 'failed')
+    assert.equal(mayBeBilled(after), true)
+    assert.throws(() => store.beginAttempt({ key, idempotencyKey: `mandate-${'9'.repeat(32)}` }), PendingInvariantError)
+    // A resumed record is possibly billed on its own, even with no sentAt kept on any attempt.
+    const k2 = renderKey({ grantId: 'urn:g', capability: 'resumed-flag' })
+    store.save({ key: k2, idempotencyKey: k2, status: 'submitted', attempts: [{ n: 1, pid: 999_999_003, idempotencyKey: k2, endedAt: '2026-09-14T00:00:00Z', status: 'submitted' }] })
+    const r2 = store.beginAttempt({ key: k2, idempotencyKey: k2 })
+    assert.equal(r2.resumed, true)
+    assert.equal(r2.record.mayHaveStarted, true)
+    assert.equal(store.save({ ...store.load(k2), status: 'failed', attempts: [...store.load(k2).attempts] }, { allowResolve: true }).status, 'failed')
+    assert.equal(mayBeBilled({ ...r2.record, status: 'dispatching', attempts: [{ n: 1 }] }), true)
+    // finishAttempt refuses a mayHaveStarted that is not a boolean, writing nothing.
+    const before = JSON.stringify(store.load(key))
+    assert.throws(() => store.finishAttempt(key, { status: 'failed', mayHaveStarted: 'yes' }), PendingInvariantError)
+    assert.equal(JSON.stringify(store.load(key)), before)
+  } finally {
+    done()
+  }
+})
+
+test('R3: a derivation stage that may have sent, or is permanent, is never replaced by a generic error or an unsent stage', () => {
+  const name = 'derivation-0123456789abcdef-fedcba9876543210'
+  const base = { id: ID, name, ual: 'did:dkg:base:84532/0xabc/7', txHash: `0x${'ab'.repeat(32)}` }
+  for (const stage of ['unbound', 'resume-refused']) {
+    const prev = { ...base, stage, mayHaveSent: true }
+    const next = mergeDerivationAttempt(prev, { stage: 'error', ual: null, txHash: null, mayHaveSent: false })
+    assert.equal(next.stage, stage)
+    assert.equal(next.lastErrorStage, 'error')
+    assert.equal(next.ual, base.ual)
+    // Permanent against a specific stage too.
+    assert.equal(mergeDerivationAttempt(prev, { stage: 'share' }).stage, stage)
+    assert.equal(mergeDerivationAttempt({ ...prev, mayHaveSent: false }, { stage: 'publish' }).stage, stage)
+    assert.equal(mergeDerivationAttempt({ ...prev, mayHaveSent: false }, { stage: 'recorded' }).stage, stage)
+  }
+  // unbound replaces publish-transport: both may have sent.
+  assert.equal(mergeDerivationAttempt({ ...base, stage: 'publish-transport', mayHaveSent: true }, { stage: 'unbound' }).stage, 'unbound')
+  for (const stage of ['started', 'publish-transport', 'publish', 'share']) {
+    const kept = mergeDerivationAttempt({ ...base, stage, mayHaveSent: false }, { stage: 'error', mayHaveSent: false })
+    assert.equal(kept.stage, stage, stage)
+    assert.equal(kept.lastErrorStage, 'error')
+  }
+  // A possibly-sent attempt is not relabelled as never sent.
+  assert.equal(mergeDerivationAttempt({ ...base, stage: 'publish-transport', mayHaveSent: false }, { stage: 'share' }).stage, 'publish-transport')
+  assert.equal(mergeDerivationAttempt({ ...base, stage: 'publish', mayHaveSent: true }, { stage: 'create' }).stage, 'publish')
+  // The normal path still moves on: started to share, share to publish, publish to recorded.
+  assert.equal(mergeDerivationAttempt({ ...base, stage: 'started', mayHaveSent: false }, { stage: 'share' }).stage, 'share')
+  assert.equal(mergeDerivationAttempt({ ...base, stage: 'share', mayHaveSent: false }, { stage: 'publish' }).stage, 'publish')
+  assert.equal(mergeDerivationAttempt({ ...base, stage: 'publish-transport', mayHaveSent: true }, { stage: 'recorded' }).stage, 'recorded')
+  // With nothing saved before, a generic error is the stage.
+  assert.equal(mergeDerivationAttempt(null, { stage: 'error' }).stage, 'error')
+  assert.equal(mergeDerivationAttempt({ ...base, stage: 'share' }, { stage: 'publish' }).lastErrorStage, undefined)
+})
+
+test('a failed-confirmed render is settled: not billed, not counted, and a rerun starts a new attempt keeping the history', () => {
+  const { store, done } = tmpStore({ isAlive: () => false })
+  try {
+    const key = renderKey({ grantId: 'urn:g', capability: 'job-failed' })
+    store.beginAttempt({ key, idempotencyKey: key })
+    store.markSent(key)
+    store.finishAttempt(key, { status: 'submitted', jobId: 'mjob_aaaaaaaaaaaa', mayHaveStarted: true })
+    assert.equal(mayBeBilled(store.load(key)), true)
+    const settled = store.save({ ...store.load(key), status: 'failed-confirmed' }, { allowResolve: true })
+    assert.equal(settled.status, 'failed-confirmed')
+    assert.equal(settled.mayHaveStarted, true)
+    assert.equal(mayBeBilled(settled), false)
+    const next = store.beginAttempt({ key, idempotencyKey: key })
+    assert.equal(next.resumed, false)
+    assert.equal(next.record.attempts.length, 2)
+  } finally {
+    done()
+  }
+})
+
+test('the stale-lock takeover never removes a fresh lock another process took after the stale one was read', () => {
+  const DEAD = 999_999_004
+  let lockPath
+  let racedIn = false
+  const other = JSON.stringify({ pid: 999_999_005, at: 'now', token: 'other' })
+  const { dir, store, done } = tmpStore({
+    isAlive: pid => {
+      if (pid === DEAD && !racedIn) {
+        // Between this process reading the dead holder and clearing it, another process clears it and takes the lock.
+        rmSync(lockPath)
+        writeFileSync(lockPath, other)
+        racedIn = true
+        return false
+      }
+      return true
+    },
+  })
+  try {
+    const key = renderKey({ grantId: 'urn:g', capability: 'takeover' })
+    lockPath = join(dir, `${key}.json.lock`)
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(lockPath, JSON.stringify({ pid: DEAD, at: 'then' }))
+    assert.throws(() => store.beginAttempt({ key, idempotencyKey: key }), e => e instanceof PendingConflictError && e.inFlight)
+    assert.equal(racedIn, true)
+    assert.equal(store.load(key), null)
+    assert.equal(readFileSync(lockPath, 'utf8'), other)
+    assert.equal(existsSync(`${lockPath}.takeover`), false)
+  } finally {
+    done()
+  }
+  // Release removes only this call's own lock, never one that replaced it meanwhile.
+  let swap = null
+  const t = tmpStore({ isAlive: () => true, now: () => { swap?.(); return new Date() } })
+  try {
+    const key = renderKey({ grantId: 'urn:g', capability: 'release' })
+    const lock = join(t.dir, `${key}.json.lock`)
+    swap = () => { swap = null; writeFileSync(lock, other) }
+    t.store.beginAttempt({ key, idempotencyKey: key })
+    assert.equal(readFileSync(lock, 'utf8'), other)
+    rmSync(lock)
+    t.store.markSent(key)
+    assert.equal(existsSync(lock), false)
+  } finally {
+    t.done()
+  }
+})
+
+test('a lock older than the stale age is cleared even when its holder is alive; a crashed takeover file is cleared by age', () => {
+  const { dir, store, done } = tmpStore({ isAlive: () => true })
+  try {
+    const key = renderKey({ grantId: 'urn:g', capability: 'old-lock' })
+    const lock = join(dir, `${key}.json.lock`)
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(lock, JSON.stringify({ pid: 999_999_006, at: 'long ago' }))
+    const old = new Date(Date.now() - 60_000)
+    utimesSync(lock, old, old)
+    writeFileSync(`${lock}.takeover`, '')
+    utimesSync(`${lock}.takeover`, old, old)
+    assert.equal(store.beginAttempt({ key, idempotencyKey: key }).resumed, false)
+    assert.equal(existsSync(lock), false)
+    assert.equal(existsSync(`${lock}.takeover`), false)
+  } finally {
+    done()
+  }
+})
+
+// --- round four: pending records ----------------------------------------------------------
+
+test('B5: a rerun after a settled failure starts clean; the old job id, media and derivation stay only in that attempt\'s history', () => {
+  const { store, done } = tmpStore({ isAlive: () => false })
+  try {
+    const key = renderKey({ grantId: 'urn:g', capability: 'clean-rerun' })
+    store.beginAttempt({ key, idempotencyKey: key })
+    store.markSent(key)
+    store.finishAttempt(key, { status: 'submitted', jobId: 'mjob_oldjob000001', mayHaveStarted: true })
+    store.save({ ...store.load(key), status: 'failed-confirmed', error: 'model crashed', errorKind: 'tool', jobStatus: 'failed', failedConfirmedAt: '2026-09-14T00:00:00Z', mediaUrl: 'https://x.test/old.mp4', derivationAttempt: { id: ID, name: 'derivation-0123456789abcdef-fedcba9876543210', stage: 'error' } }, { allowResolve: true })
+    const next = store.beginAttempt({ key, idempotencyKey: key })
+    assert.equal(next.resumed, false)
+    for (const field of ['jobId', 'mediaUrl', 'error', 'errorKind', 'jobStatus', 'failedConfirmedAt', 'derivationAttempt', 'mayHaveStarted']) {
+      assert.equal(next.record[field], undefined, field)
+      assert.equal(store.load(key)[field], undefined, field)
+    }
+    assert.equal(next.record.status, 'dispatching')
+    assert.equal(next.record.attempts.length, 2)
+    const settled = next.record.attempts[0].settled
+    assert.equal(settled.jobId, 'mjob_oldjob000001')
+    assert.equal(settled.mediaUrl, 'https://x.test/old.mp4')
+    assert.equal(settled.derivationAttempt.name, 'derivation-0123456789abcdef-fedcba9876543210')
+    assert.equal(next.record.attempts[1].settled, undefined)
+  } finally {
+    done()
+  }
+})
+
+test('B4: a key\'s lease is exclusive while its holder lives, taken over when it dies or stops touching it, and released only by its own holder', () => {
+  let alive = true
+  const { dir, store, done } = tmpStore({ isAlive: () => alive })
+  try {
+    const key = renderKey({ grantId: 'urn:g', capability: 'lease' })
+    const lease = `${join(dir, key)}.json.lease`
+    const held = store.acquireLease(key)
+    assert.ok(existsSync(lease))
+    // The same process asking again is refused too: a render and a record never share a key.
+    assert.throws(() => store.acquireLease(key), e => e instanceof PendingConflictError && e.inFlight && /in use by another mandate process/.test(e.message))
+    held.release()
+    held.release()
+    assert.equal(existsSync(lease), false)
+
+    // Held by another live process: refused at once, not waited on for minutes.
+    writeFileSync(lease, JSON.stringify({ pid: 999_999_030, at: 'now', token: 'other' }))
+    const t0 = Date.now()
+    assert.throws(() => store.acquireLease(key), PendingConflictError)
+    assert.ok(Date.now() - t0 < 5000)
+    // Its holder died: taken over.
+    alive = false
+    const mine = store.acquireLease(key)
+    assert.notEqual(readFileSync(lease, 'utf8'), JSON.stringify({ pid: 999_999_030, at: 'now', token: 'other' }))
+    // A lease that replaced this one is never removed by this holder's release.
+    writeFileSync(lease, 'someone else')
+    mine.release()
+    assert.equal(readFileSync(lease, 'utf8'), 'someone else')
+    // A live holder that stopped touching it for longer than the stale age.
+    alive = true
+    writeFileSync(lease, JSON.stringify({ pid: 999_999_031, at: 'then', token: 'old' }))
+    const old = new Date(Date.now() - 60_000)
+    utimesSync(lease, old, old)
+    store.acquireLease(key).release()
+    assert.equal(existsSync(lease), false)
+  } finally {
+    done()
+  }
+})
+
+test('B3: the grant lock is exclusive, waits for its holder, and is taken over from a dead one', () => {
+  let alive = true
+  const { dir, store, done } = tmpStore({ isAlive: () => alive })
+  try {
+    const lock = grantLockPath(dir, 'urn:mandate:grant:x')
+    assert.equal(grantLockPath(dir, 'urn:mandate:grant:x'), lock)
+    assert.notEqual(grantLockPath(dir, 'urn:mandate:grant:y'), lock)
+    assert.equal(store.withGrantLock('urn:mandate:grant:x', () => { assert.ok(existsSync(lock)); return 7 }), 7)
+    assert.equal(existsSync(lock), false)
+    // Not a pending record: list() never reads it.
+    store.withGrantLock('urn:mandate:grant:x', () => assert.deepEqual(store.list(), []))
+    // A dead holder is taken over.
+    writeFileSync(lock, JSON.stringify({ pid: 999_999_032, at: 'then', token: 't' }))
+    alive = false
+    assert.equal(store.withGrantLock('urn:mandate:grant:x', () => 'taken'), 'taken')
+    assert.throws(() => store.withGrantLock('', () => 1), /grant id/)
   } finally {
     done()
   }

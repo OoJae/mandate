@@ -3,6 +3,7 @@
  *
  *   node scripts/publish-skill.mjs                 # dry run: print the payload and limits
  *   node scripts/publish-skill.mjs --publish       # publish (requires LIVEPEER_AGENT_KEY)
+ *   add --env-path <path> to read settings from that file (default ~/.mandate/.env)
  *
  * The task/domain/persona tags and scope are a closed vocabulary that no tool
  * exposes; if publish_skill rejects them, its error names the problem. Override
@@ -12,18 +13,32 @@
  * can later update or delete, since ownership is verified by API key.
  */
 import { readFileSync } from 'node:fs'
-import { loadEnvFile } from '../bin/config.mjs'
-
-// Only MANDATE_* and LIVEPEER_AGENT_KEY come from .env. This request carries the
-// key, so a stray NODE_TLS_REJECT_UNAUTHORIZED=0 or proxy setting copied into
-// .env must not reach it.
-const { ignored } = loadEnvFile('.env')
-if (ignored.length) console.log(`.env: ignored ${ignored.join(', ')} (only MANDATE_* and LIVEPEER_AGENT_KEY are read)`)
+import { loadMandateEnv } from '../bin/config.mjs'
 
 const arg = (name, def) => {
   const i = process.argv.indexOf(`--${name}`)
   return i > -1 ? process.argv[i + 1] : def
 }
+
+// The same env file as the CLI: --env-path <path>, else MANDATE_ENV_FILE, else
+// $MANDATE_HOME/.env (default ~/.mandate/.env); a .env in the working directory
+// is never read. Only MANDATE_* and LIVEPEER_AGENT_KEY come from it. This
+// request carries the key, so a stray NODE_TLS_REJECT_UNAUTHORIZED=0 or proxy
+// setting copied into the file must not reach it.
+if (process.argv.slice(2).some(a => /^--env-file(?:-if-exists)?(?:=|$)/.test(a))) {
+  console.error('--env-file is read by Node.js itself, which applies a NODE_OPTIONS from that file; name the env file with --env-path <path> instead')
+  process.exit(1)
+}
+let envFile
+try {
+  envFile = loadMandateEnv({ flag: arg('env-path') })
+} catch (e) {
+  console.error(e.message)
+  process.exit(1)
+}
+for (const w of envFile.warnings) console.error(`warning: ${w}`)
+console.log(envFile.path ? `env file: ${envFile.path}` : `env file: none (looked for ${envFile.searched})`)
+if (envFile.ignored.length) console.log(`.env: ignored ${envFile.ignored.join(', ')} (only MANDATE_* and LIVEPEER_AGENT_KEY are read)`)
 const list = (name, def) => arg(name, def).split(',').map(s => s.trim()).filter(Boolean)
 
 const payload = {
@@ -61,7 +76,7 @@ if (!process.argv.includes('--publish')) {
   process.exit(0)
 }
 if (!process.env.LIVEPEER_AGENT_KEY) {
-  console.error('\nLIVEPEER_AGENT_KEY is not set. Add it to .env (gitignored); refusing to publish keyless.')
+  console.error('\nLIVEPEER_AGENT_KEY is not set. Add it to your env file (~/.mandate/.env, or pass --env-path); refusing to publish keyless.')
   process.exit(2)
 }
 if (process.env.LIVEPEER_AGENT_KEY.startsWith('sk_')) {

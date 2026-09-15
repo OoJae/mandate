@@ -20,6 +20,12 @@ install the superseded version too. Until `npm view mandate-consent version` pri
 npm install "github:OoJae/mandate#fix/adversarial-study"
 ```
 
+This installs whatever the branch holds **on GitHub**, not a local checkout. The fixes
+described here must be pushed to that branch first: until they are, the command above
+(and the `git clone` below) fetches an older state of the branch. Compare
+`git ls-remote https://github.com/OoJae/mandate fix/adversarial-study` with the commit
+you expect before relying on it.
+
 Once 0.2.0 is merged and published, use `npm install mandate-consent`.
 
 > **0.1.0 is superseded.** An adversarial review found that its resolver decided
@@ -113,7 +119,7 @@ Nothing in Mandate believes a value written inside the graph about who wrote it.
    address can grant for it, and a revocation counts when that address anchored it, so
    nobody else can speak for Ana by writing her name. One exception fails the other
    way: a revocation that appears only in a node's merged view of the grants graph,
-   with no Verifiable Memory copy from which to read its publisher, is honoured,
+   with no Verifiable Memory copy under the grant owner's own prefix, is honoured,
    because refusing is the safe side of not knowing. That view can be left out of an
    answer like any other graph; how far the resolver can detect that is under Known
    limitations.
@@ -272,13 +278,18 @@ A read-only node can read the demo's public graphs and run every check. It never
 publishes, so it needs no wallet funds.
 
 ```bash
-# The 0.2.0 branch, by name: main still holds 0.1.0 until it is merged.
+# The 0.2.0 branch, by name: main still holds 0.1.0 until it is merged, and the branch
+# holds these fixes only once they are pushed (see Install).
 git clone -b fix/adversarial-study https://github.com/OoJae/mandate && cd mandate && npm install
 npm test && npm run smoke:pack                  # no network needed
 
-cp .env.example .env    # then set the two graph ids to the read-only ones listed in it
+# Settings live in ~/.mandate/.env (see Configuration below), never in a .env here.
+mkdir -p ~/.mandate && cp .env.example ~/.mandate/.env && chmod 600 ~/.mandate/.env
+# then set the two graph ids in ~/.mandate/.env to the read-only ones listed in it
 node scripts/nodes.mjs up verifier              # first boot takes ~2 min; catching up took ~10
 node scripts/nodes.mjs doctor verifier          # subscribed, and current with the chain (exit 9 if not, or if the node's reconcile reply has no whole-number head or watermark)
+# With a token that gets 403 on subscriptions, doctor reports each graph's subscription
+# as unknown (that alone is not exit 9) and still checks freshness.
 
 # Resolve the forgery subject on your own node: PERMITTED under G2, with the rejected
 # records listed. G2 is valid until 2026-12-12; after that add --at 2026-10-01T00:00:00Z.
@@ -303,7 +314,7 @@ publishing uses TRAC. `scripts/nodes.mjs init` does not request faucet funds the
 interactive `dkg init --network testnet` does, so fund the wallets yourself.
 
 ```bash
-cp .env.example .env
+mkdir -p ~/.mandate && cp .env.example ~/.mandate/.env && chmod 600 ~/.mandate/.env
 # 1. Start the nodes. Graph ids do not exist yet, so `up` stops after starting them.
 node scripts/nodes.mjs up grantor producer verifier
 
@@ -318,7 +329,7 @@ DKG_HOME=~/.dkg-mandate-grantor  npx dkg context-graph register 0x<grantor>/mand
 DKG_HOME=~/.dkg-mandate-producer npx dkg context-graph create mandate-derivations
 DKG_HOME=~/.dkg-mandate-producer npx dkg context-graph register 0x<producer>/mandate-derivations --publish-policy 1
 
-# 4. Put both ids in .env (MANDATE_GRANTS_CG, MANDATE_DERIVATIONS_CG), then:
+# 4. Put both ids in ~/.mandate/.env (MANDATE_GRANTS_CG, MANDATE_DERIVATIONS_CG), then:
 node scripts/nodes.mjs subscribe && node scripts/nodes.mjs connect && node scripts/nodes.mjs sync
 node scripts/nodes.mjs doctor
 
@@ -331,6 +342,52 @@ node bin/mandate.mjs revoke --id <grant id>
 node bin/mandate.mjs blast-radius --grant <grant id>
 node bin/mandate.mjs record                      # renders whose derivation did not commit
 ```
+
+#### Configuration
+
+Every `mandate` command, `scripts/nodes.mjs`, `scripts/publish-skill.mjs`,
+`scripts/publish-ontology.mjs` and the live spikes read their settings from the real environment, plus **one** env file that fills in anything the
+environment leaves unset. That file is, in order:
+
+1. the file named with `--env-path <path>` (any command or script);
+2. the file named by the `MANDATE_ENV_FILE` variable;
+3. `$MANDATE_HOME/.env`, which is `~/.mandate/.env` by default. `MANDATE_HOME` for this
+   lookup comes from the real environment only.
+
+**A `.env` in the working directory is never read.** A folder someone sent you (a
+delivery holding a video and a `.env`) must not be able to change which producers you
+trust, which graphs you read, where local state lives, or whether the freshness check
+runs, just because you ran `mandate verify` inside it. Setup for one machine:
+
+```bash
+mkdir -p ~/.mandate && cp .env.example ~/.mandate/.env && chmod 600 ~/.mandate/.env
+$EDITOR ~/.mandate/.env                     # set MANDATE_GRANTS_CG, MANDATE_DERIVATIONS_CG
+node bin/mandate.mjs status                 # prints the env file it loaded and the keys it set
+# A second configuration, such as a verifier with its own trust list:
+node bin/mandate.mjs verify --sha256 <hash> --env-path ~/verifier.env
+```
+
+- Only `MANDATE_*` keys and `LIVEPEER_AGENT_KEY` are taken from the file; anything else
+  in it (`NODE_OPTIONS`, `PATH`) is ignored and listed as ignored. A variable already set
+  in the environment wins over the file.
+- A file named with `--env-path` or `MANDATE_ENV_FILE` that is missing or unreadable is
+  exit 1. A missing `~/.mandate/.env` is not an error: the command runs on the
+  environment alone and says it looked there.
+- A group- or world-writable env file is loaded with a warning on stderr (whoever can
+  write it chooses your trusted producers): run `chmod 600` on it.
+- `mandate status` and `mandate verify` print, and return as `config` in `--json`, the env
+  file loaded (or `none (looked for …)`), the keys it set, the trusted producers, the
+  grants and derivations graphs, and whether the freshness check is on. With
+  `MANDATE_CHECK_FRESHNESS=0` they print `FRESHNESS CHECK OFF`, and every read carries a
+  `freshness not checked` warning.
+- The flag is `--env-path`; Mandate refuses `--env-file` and `--env-file-if-exists`
+  (exit 1) and points to `--env-path`, because Node.js reads `--env-file` itself from
+  anywhere on the command line, even after the script name, and applies a `NODE_OPTIONS`
+  from that file before Mandate starts. The refusal cannot undo what Node has already
+  applied, so never pass `--env-file` to a Node script you do not want that file to reach
+  (docs/SPIKES.md).
+- `demo/full.mjs` passes the repository's own `.env` to every command it runs, with
+  `--env-path`; give the demo `--env-path ~/.mandate/.env` to use your machine's file.
 
 Once installed as a package, the same commands are `npx mandate …`. `mandate help
 [command]`, `--help` or `-h` on any command lists its flags, and `--json` prints one
@@ -358,18 +415,33 @@ terms, for example:
 > 13 December 2026. Spending is capped at 5 US dollars.
 
 It then mints a phone link, waits for the clip, transcribes it, and compares the words.
-Off a terminal it exits 3 before any link is requested, with or without `--yes`. On a
-terminal with `--json` it needs `--yes` (otherwise exit 1, also before any link).
+Off a terminal it exits 3 before any link is requested, with or without `--yes`. With
+`--json`, a grant with no ceiling or no territory also exits 3 before any
+link, because the script never states those and they must be typed; otherwise on a
+terminal with `--json` it needs `--yes` (else exit 1, also before any link).
 
 **Consent is confirmed automatically only when the transcript is a reading of that
 script.** Both are put in one canonical form first (case, punctuation and hyphens
 ignored; `lipsync` and `lip-sync`, `U.K.` and `UK`, `13th of December` and
-`December the 13th`, `$5` and `five US dollars` each count as one form). Then every
-script word must appear in order. `I`, `consent`, every capability, use class and
-territory word, `until`, the date, `capped` and the amount must all be there exactly.
-At most two other short words may be missing, and the only extra words allowed are
-filler (`um`, `uh`, `hi`, `so`, `okay`, `yes` and a few more; never `but`, `not`,
-`if` or similar). Anything else is **not confirmed**, however consent-like it sounds.
+`December the 13th`, `US$5`, `5 USD` and `five US dollars` each count as one form; a
+bare `$5` or `five dollars` names no country, so it is not `US dollars`, and an ordinal
+such as `a fifth` is never an amount). Then every
+script word must appear in order. Every script word is required exactly except the
+seven joining words `to`, `of`, `for`, `in`, `and`, `is` and `at`, and at most two of
+those may be missing (so `I`, `consent`, every capability, use class and territory word,
+`my likeness`, `until`, the date, `spending`, `capped`, the amount and `US dollars` are
+all required). The only extra words allowed are five: `hi`, `hello`, `a`, `an` and `the`.
+**Hesitation sounds are not filler.** `um`, `uh`, `er`, `ah`, `hmm`, `mm`, `mhm` and their
+spellings, and `yes`, `yeah`, `okay`, `ok`, `so`, `well` and `hey`, each make a clip
+**not a reading** of the script, so a person must review it: `uh-uh`, `mm-mm` and
+`nuh-uh` are a spoken "no", and `yeah, yeah` or `well…` can be one, and the heuristics
+below do not hear any of them as a refusal. Re-record for an automatic match.
+A question mark
+counts as an extra word, and so does any run of letters, digits or symbols that does not
+fold to a-z or 0-9 (another script, an emoji), so a question or a word in another
+language beside the script blocks the match. The refusal heuristics must also hear an
+affirmative first-person consent in it. Anything else is **not confirmed**, however
+consent-like it sounds.
 No list of refusal phrasings is complete, which is why nothing but the script can pass
 on its own.
 
@@ -384,7 +456,12 @@ What happens next:
   `none` typed, and one with no territory needs `anywhere`. Only this grant is published
   with the clip's SHA-256, so on the graph a clip hash always means the words matched the
   script.
-- **Anything else** prints the script, the transcript, and the missing and extra words.
+- **Anything else** prints the script, the **whole** transcript, and the missing and extra
+  words, before any question is asked. Nothing a person confirms is cut: control
+  characters are removed and line breaks become spaces, but every word is shown in full.
+  A transcript over 4000 characters, or with 50 or more words outside the script (a list
+  that long may itself be cut), is **too long to review** and is refused (exit 3, "Re-record")
+  before any question. A contradiction is still exit 8 first.
   It is refused (exit 3) if it has no affirmative first-person consent, or if a requested
   capability, use class or territory was not heard and `--force` was not given. Otherwise
   a person must watch the clip and type `matches` (the transcript is what was said),
@@ -407,26 +484,33 @@ A grant or revocation whose publish answer is lost (the node timed out, answered
 reported a transaction without confirming it) may still land on-chain. The command exits
 7 and prints, and returns in `--json`, the grant id (and for a revocation, its state id),
 the asset name, the stage, any UAL or transaction, `mayHaveSent: true` and a `check`
-command. Do not publish again under a new id. For a grant, `mandate revoke --id <grant
-id>` answers "not anchored" until it lands; once it has, the same command revokes it.
-For a revocation, the same command answers "already revoked" once it lands, and publishing
-a second revocation before then is harmless.
+command. Do not publish again under a new id. The `check` command is
+`mandate blast-radius --grant <grant id>`, which only reads, from the producer node (which
+may lag the grantor's): "not found in the grants graph" means the grant has not landed or
+not synced yet, a UAL means it landed, and "revoked" means a revocation landed. To end a
+grant that landed, run `mandate revoke --id <grant id>` yourself; a second revocation
+published before the first lands is harmless.
 
 #### Exit codes
 
 | Exit | Meaning |
 |---|---|
 | 0 | success, permitted, CLEAR; `help` and `--version`; a rerun of a render already recorded; a revocation already in place |
-| 1 | usage or configuration error (a bad flag, a missing or malformed `MANDATE_*` graph id, no graph under the node's own address, a producer not in `MANDATE_TRUSTED_PRODUCERS`, `--at` with `--execute`, the "publish" confirmation needed off a terminal or with `--json` and no `--yes`, an `--idempotency-key` that differs from the one a possibly billed render was sent with) |
+| 1 | usage or configuration error (a bad flag, a missing or malformed `MANDATE_*` graph id, no graph under the node's own address, a producer not in `MANDATE_TRUSTED_PRODUCERS` (for `render --execute` before dispatch, and for `record --pending` before anything is published), an env file named with `--env-path` or `MANDATE_ENV_FILE` that is missing or unreadable, `--env-file` given instead of `--env-path`, `--at` with `--execute`, the "publish" confirmation needed off a terminal or with `--json` and no `--yes`, an `--idempotency-key` that differs from the one a possibly billed render was sent with) |
 | 2 | refused by the gate; TAINTED or UNKNOWN |
-| 3 | consent not confirmed: no clip, transcription failed, no first-person consent, a requested term not heard (without `--force`), not a reading of the consent script with no typed confirmation given, or a typed confirmation that is impossible (off a terminal, or `--json`); nothing is published |
-| 4 | rendered, but its derivation failed to commit, at any stage (including `unbound`, `publish-transport`, `resume-refused` and `resume-unverified`); the result carries `stage`, `asset`, `ual`, `txHash` and `mayHaveSent`. Run `mandate record --pending <key>`, which never publishes an asset whose last publish may have been sent |
-| 5 | render failed, or a rerun found the render already submitted with a job id, rendered, or being dispatched by another process |
+| 3 | consent not confirmed: no clip, transcription failed, no first-person consent, a requested term not heard (without `--force`), a transcript too long to review in full, not a reading of the consent script with no typed confirmation given, or a typed confirmation that is impossible (off a terminal, or `--json`); nothing is published |
+| 4 | rendered, but its derivation failed to commit, at any stage (including `unbound`, `publish-transport`, `resume-refused`, `resume-unverified` and `served-unknown`); the result carries `stage`, `asset`, `ual`, `txHash` and `mayHaveSent`. Run `mandate record --pending <key>`, which never publishes an asset whose last publish may have been sent |
+| 5 | render failed, or a rerun found the render already submitted with a job id, rendered, or being dispatched by another process; a `render --execute` or `record --pending` whose key another `mandate` process on this machine holds (it exits at once, `outcome: 'in-use'` for `record`); a render whose decision moved to another grant while it waited for the grant lock (`decisionChanged`) |
 | 6 | grant or revocation write failed before anchoring (`create`, `share`, `author`) |
 | 7 | grant or revocation anchor not confirmed: minted but unbound, refused at publish, or unknown after send; the result names the grant id (and state id) and the asset to check |
 | 8 | consent contradicted; never overridable |
 | 9 | INCONCLUSIVE: node unreachable, stale or read incomplete; a media download, node token, or `~/.mandate` state or pending file that could not be read; a Livepeer failure that is not about credentials; a render whose outcome is unknown (it may have been billed) |
-| 10 | Livepeer payment or credential problem, including a render over the account's remaining 24 h budget |
+| 10 | Livepeer payment or credential problem, including a render over the account's remaining 24 h budget (when an earlier attempt of the same render may have been billed, that refusal is 9 instead: the outcome is unknown) |
+
+`scripts/nodes.mjs doctor` exits 9 when a node is unreachable, or a configured graph is
+behind the chain, its freshness cannot be established, or it is not subscribed. When
+the token cannot list subscriptions (403) the subscription is reported as unknown, which
+alone does not make it 9.
 
 ## How Livepeer Agent is used
 
@@ -445,7 +529,13 @@ derived from the grant and inputs, so that a retried request returns the first r
 instead of billing again; that replay is Livepeer's behaviour, and Mandate has not yet
 exercised it live. A render whose request timed out, or whose platform error says it may
 still complete, may still be rendering with no job id: it is saved as `submitted` and
-exits 9.
+exits 9. So is one whose error reply says it timed out, its deadline was exceeded, or it
+continues in the background. A reply's URL is taken as the rendered media only when it
+names a media file (`.mp4`, `.png`, `.wav` and similar) or is under
+`agent.livepeer.org/a/`; a job or status page is followed with `get_create_media`
+instead. An error whose status code is generic (a 500, a 403) but whose text can only
+mean money is a payment problem (exit 10); a 401 or 403 about fetching an input stays a
+render failure unless it says the account has no funds or credit left.
 
 A render that **may have been billed is never marked failed** and never gets a new key.
 Rerunning the same command replays it under the idempotency key it was first sent with
@@ -456,10 +546,62 @@ recorded, even if a later attempt fails cleanly. A rerun never dispatches again 
 already submitted with a job id, rendered, recorded, or being dispatched by another
 `mandate` process on this machine.
 
+**Two processes never work on one render at once, and parallel renders under one grant
+decide one at a time.** On one machine (processes sharing one `MANDATE_HOME`):
+
+- A `render --execute` holds a **lease on its render key** for its whole life: dispatch,
+  polling and the derivation write. `record --pending <key>` takes the same lease before
+  it even loads the record. A second `render` or `record` of that key does not wait: it
+  says the pending render is in use by another mandate process (`record` adds `nothing was
+  done here`) and exits 5 at once, having sent, polled and published nothing. Wait for the
+  first to finish, then run `mandate record --pending <key>`. A lease whose process died is
+  taken over at once; one whose process stopped refreshing it (every 5 s) is taken over
+  after 30 s.
+- Before dispatching, a render takes the **grant's lock**, reads this machine's pending
+  renders again, lets the gate decide again with them counted, and saves its
+  `dispatching` record before releasing the lock. So of several renders started at once
+  under a ceiling that fits one, exactly one dispatches; the others print `REFUSED —
+  clause: spend-ceiling` and exit 2. A render that waited while another used the grant up,
+  and would now be permitted under a different grant, is not dispatched (exit 5, `Run the
+  command again`). A render recorded on this machine keeps counting until the graph
+  read shows its derivation. A waiter gives up after about 15 s (exit 5).
+- A rerun after `record` settled a render as `failed-confirmed` starts a clean attempt:
+  the old job id, media URL and derivation stay only in that attempt's history, so the new
+  attempt's outcome is never judged by the old job.
+
+`record --pending` checks that the producer node is in `MANDATE_TRUSTED_PRODUCERS` before
+hashing or publishing anything (exit 1, nothing recorded, media URL withheld). A replayed
+render counts as already recorded only when a trusted derivation under the grant has the
+**same output SHA-256** (and, when both carry a job id, the same job); otherwise the bytes
+actually released get their own derivation.
+
+**A job the platform reports failed is settled by `record`.** When `get_create_media`
+answers with a failed status (failed, cancelled, expired and similar) for that job id,
+`mandate record --pending <key>` marks the render `failed-confirmed` and exits 5 (10 when
+the failure reads as a payment problem). It then stops counting against the ceiling on
+this machine, its attempts are kept, and a rerun may dispatch it again. A timeout, an
+unrecognised status or a reply about another job settles nothing. Trade-off: a job the
+platform called failed may still have been billed, and that amount is no longer counted
+here.
+
+**A serving capability that cannot be recorded stops the derivation.** If the platform
+names a serving capability that is not a capability name, nothing is anchored (exit 4,
+stage `served-unknown`): recording the requested capability instead would claim no
+substitution happened. The render may be billed, so its URL is withheld and it keeps
+counting against the ceiling on this machine; `record --pending` stops at the same
+point.
+
 Recorded spend is the platform's reported cost when it gives one. Without one, a
 per-second estimate is not recorded as spend (it scales with a number the operator
 typed); `billedUsd` is left unknown, and later renders under a ceiling refuse. Renders
-on this machine not yet recorded on the graph also count against the ceiling here.
+on this machine not yet recorded on the graph also count against the ceiling here,
+including ones running at the same time in other processes (see above).
+
+**A per-second estimate relies on `--seconds`.** Under a ceiling, the gate's estimate for a
+per-second (or per-character) price is the unit price times `--seconds`, taken as the
+operator typed it: it is not sent to Livepeer or checked against the inputs, and the
+render is billed for its real length. The CLI says so on every such render and in
+`price.note` in `--json`.
 
 ## The vocabulary
 
@@ -483,7 +625,7 @@ resolves only once that version is merged there.
 
 | Where | What | Who can see it |
 |---|---|---|
-| **This machine** | `.env`, DKG node API tokens and keys, `~/.mandate` (anchors and revocations seen, pending renders) | this machine |
+| **This machine** | the env file (`~/.mandate/.env`, or the one named with `--env-path` or `MANDATE_ENV_FILE`; never a `.env` in the working directory), DKG node API tokens and keys, `~/.mandate` (anchors and revocations seen, pending renders and their lock and lease files) | this machine. Whoever can write the env file decides which producers and graphs this machine trusts, so keep it `chmod 600`; `status` and `verify` print what was loaded. |
 | **Livepeer Agent and its providers** | the consent clip (uploaded through `request_upload`, transcribed by `nemotron-asr`), its transcript, reference images and audio, prompts, and the rendered output | Livepeer and the provider serving the call. Uploads and outputs sit at URLs anyone holding the link can fetch; retention follows Livepeer's policy. |
 | **DKG Verifiable Memory (permanent, public)** | subject identifier (including the name you give it), DIDs, grant clauses, dates, ceiling, consent-clip SHA-256, output SHA-256, serving capability and model id when given, job id, billed amount | anyone who syncs the graph |
 
@@ -511,14 +653,28 @@ consent clip is evidence bound to the grant by SHA-256.
 - **CLEAR is narrower than the gate.** It does not check use class, territory,
   prohibited uses or the spend ceiling; derivations do not record them.
 - **The deny list checks declared labels.** A producer that labels a sexual or
-  impersonating render as something else is not caught by it. Matching inflections and
-  joined words also refuses some innocent labels.
+  impersonating render as something else is not caught by it, and neither is leetspeak
+  such as `p0rn`. Matching inflections, joined words and prohibited stems inside a word
+  (`pornvideo`, `impersonator`) also refuses some innocent labels (`adult-education`,
+  `sextant`).
 - **Spoken consent is only as good as the script.** Only a reading of the generated script
   is confirmed without a person, and that compares words, not meaning: "Georgia" read from
   the script names whatever territory the grant names. A clip that is not a reading of the
   script is judged by the operator who types the confirmation, and on the graph such a
   grant looks the same as one granted without any clip (no clip hash); nothing else marks
-  it. The refusal heuristics can stop a clip, never pass one.
+  it. The refusal heuristics can stop a clip, never pass one, and they do not hear a
+  spoken "no" made of sounds (`uh-uh`, `mm-mm`): such a clip is never confirmed
+  automatically, but on the typed path the operator watching it is what catches it.
+  Every question mark Unicode classes as punctuation (the Armenian `՞`, the Ethiopic `፧`
+  and the Greek `;` included) is a word of its own, so a reading said as a question is
+  never confirmed; a plain semicolon is not a question mark.
+- **The deny list is incomplete.** It refuses common honest labels (`undressing`,
+  `topless`, `stripper`, `bdsm`, `impostor`, `catfishing`), but `lingerie`, `boudoir`,
+  `scam`, `fraud` and `voice-clone` pass today. A grant's `permitsUseClass` list is the
+  control that holds.
+- **The release has one step left outside this repository.** The sharded mutation job
+  (10 shards, 35-minute budget each) has only been sized from local timings; 0.2.0 is
+  tagged only after one green CI run of the pushed branch.
 - **The CLI cannot tell whether the verifier node is independent.** `verify` reads from the
   node at `MANDATE_VERIFIER_PORT`; nothing checks that it is not the producer's own node
   under another port.
@@ -532,9 +688,15 @@ consent clip is evidence bound to the grant by SHA-256.
   The resolver catches that when the node has shown the view on some attempt, or when its
   probe for the view went unanswered on any attempt. A node that leaves the view out of the
   probe and of every answer on every attempt looks exactly like a node that holds no view,
-  and is believed. The check applies only when the grantor has published a Verifiable
-  Memory state about the grant in question. On a node that holds no view, it spends every
-  retry (about 1.75 s) each time it applies.
+  and is believed. The check is per context graph, and assumes a node holds one merged
+  view graph per context graph, as live v10.0.16 nodes do: when a view is expected, the
+  resolver always looks at least twice, and when several view graphs of one context graph
+  show on different attempts the read is inconsistent. A node holding several view graphs
+  that leaves the one with the revocation out of every attempt, while another still
+  shows, is not caught. The check applies only when the grantor has published a
+  Verifiable Memory state about the grant in question. On a node that holds no view, it
+  spends every retry (about 1.75 s) each time it applies, and on one that holds the view
+  it spends one extra attempt (250 ms).
 - **`mandate record` finishes only renders `render --execute` started.** There is no
   command yet to record a render made some other way (`record --url --grant --capability`
   is planned); such a file verifies `UNKNOWN`.
@@ -568,6 +730,18 @@ consent clip is evidence bound to the grant by SHA-256.
   cost or list-price estimates and trusted producers' records in the derivations graphs
   it reads. It is advisory, not a platform limit, and estimates are not invoices; failed
   renders can still be billed by the provider.
+- **The ceiling holds across concurrent processes on one machine, not across machines.**
+  The grant lock and the pending records live in `$MANDATE_HOME/pending`, and a lock's
+  holder is judged alive by process id on this machine. Renders under one grant on two
+  machines (or under two `MANDATE_HOME`s on one machine) see each other only once a
+  derivation is anchored and synced, so renders running at the same time there can
+  together exceed the ceiling. Two machines sharing one `MANDATE_HOME` over a network
+  filesystem are not protected from each other either.
+- **A per-second estimate relies on `--seconds`.** The gate trusts the duration the
+  operator types; a smaller `--seconds` can bring a render under the ceiling while
+  Livepeer bills the real length. The CLI warns. Unless the platform reports the render's
+  cost, its recorded spend is unknown (never the typed estimate), so later renders under
+  that ceiling refuse.
 - **Every render costs a DKG publish as well.** Each derivation is its own anchored
   Knowledge Asset, paid in gas and TRAC by the producer, on top of the Livepeer render.
 - **Large graphs are read in pages**, up to `MANDATE_READ_MAX_ROWS` rows per publisher

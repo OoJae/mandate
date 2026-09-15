@@ -31,7 +31,7 @@ export const EXIT_HELP = [
   [EXIT.REFUSED, 'refused by the gate; TAINTED or UNKNOWN'],
   [EXIT.CONSENT_UNCONFIRMED, 'consent not confirmed: transcription failed, no first-person consent, terms not heard, not a reading of the consent script with no typed confirmation given, or a typed confirmation impossible (off a terminal, or --json)'],
   [EXIT.DERIVATION_FAILED, 'rendered, but its derivation failed to commit (any stage, including unbound, resume-refused and the retryable resume-unverified; run mandate record --pending <key>)'],
-  [EXIT.RENDER_FAILED, 'render failed, or a rerun found the render already submitted with a job id, rendered, or being dispatched by another process'],
+  [EXIT.RENDER_FAILED, 'render failed, or a rerun found the render already submitted with a job id, rendered, or being dispatched by another process; a render or record whose key another mandate process is rendering, polling or recording (it exits at once rather than wait)'],
   [EXIT.DKG_WRITE_FAILED, 'DKG write failed before anchoring'],
   [EXIT.DKG_ANCHOR_FAILED, 'grant or revocation anchor not confirmed: minted but unbound, refused at publish, or unknown after send (the result names the grant or state id and asset to check)'],
   [EXIT.CONSENT_CONTRADICTED, 'consent contradicted; never overridable'],
@@ -129,6 +129,7 @@ export const FLAGS = [
   ['help', 'bool', ['*'], 'show help'],
   ['version', 'bool', ['*'], 'print the version'],
   ['json', 'bool', ['*'], 'print one machine-readable result object'],
+  ['env-path', 'string', ['*'], 'read MANDATE_* settings and LIVEPEER_AGENT_KEY from this file (else MANDATE_ENV_FILE, else $MANDATE_HOME/.env, by default ~/.mandate/.env). A .env in the working directory is never read'],
 
   ['subject', 'string', ['grant'], 'the depicted person: a name (prefixed with this node\'s address) or a full subject', { required: ['grant'] }],
   ['subject', 'subject', ['render'], 'subject as 0x<grantor address>:<name>', { required: ['render'] }],
@@ -191,6 +192,9 @@ export function parseArgs(argv) {
     const eq = raw.indexOf('=')
     const name = raw.slice(2, eq === -1 ? undefined : eq)
     const def = flagFor(command ?? '*', name)
+    if (name === 'env-file' || name === 'env-file-if-exists') {
+      throw new UsageError(`--${name} is read by Node.js itself even after the script name, which applies a NODE_OPTIONS from that file before Mandate starts; name Mandate's env file with --env-path <path> (or MANDATE_ENV_FILE) instead`)
+    }
     if (!def) {
       const valid = FLAGS.filter(([, , c]) => c.includes(command) || c.includes('*')).map(([n]) => `--${n}`)
       throw new UsageError(`unknown flag --${name}${command ? ` for ${command}` : ''}. Valid: ${[...new Set(valid)].join(' ')}`)

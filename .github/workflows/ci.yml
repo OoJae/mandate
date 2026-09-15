@@ -17,7 +17,10 @@ jobs:
         node: ['22.13', '24', '26']
     steps:
       # Actions are pinned to commit SHAs; the comment names the release.
+      # No credentials left in .git/config: npm test runs dependency code.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ matrix.node }}
@@ -53,15 +56,33 @@ jobs:
   mutation:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
-    # About 300 mutants; most runs take seconds.
-    timeout-minutes: 90
+    # About 580 mutants (584 when this was written), split into ten shards that
+    # run as parallel jobs, every 10th entry each, so the ~80 mutants that reach
+    # the slow cli.test phase (about 70 s each) are spread evenly: about 8 in
+    # one shard. A local run of the whole list took 103 worker-minutes on a
+    # 10-core machine; the heaviest shard of 50 took 12. A 4-vCPU runner runs
+    # 2 workers, so that shard needs about 6 minutes plus a 1-minute baseline at
+    # local speed, and stays inside the 35-minute budget even on a runner three
+    # times slower. Not yet measured on a runner.
+    #
+    # --timeout-ms bounds each test phase of one mutant: the CLI phase takes about
+    # 70 s, so 300 s leaves room for a slow runner. A hang is reported as TIMEOUT
+    # with the files still running and fails the job; it is never counted as a
+    # kill. --budget-minutes stops the shard ten minutes before the job timeout
+    # would kill it, reports every mutant not yet judged as UNFINISHED and still
+    # prints each survivor, so a slow shard never hides one behind a bare timeout.
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: '24'
       - run: npm ci --ignore-scripts
       - name: Every security guard is protected by a failing test
-        # A hang is reported as TIMEOUT and fails the job, never counted as a kill,
-        # so there is no reason to wait the default five minutes for one.
-        run: npm run test:mutation -- --timeout-ms 120000
+        run: npm run test:mutation -- --jobs 2 --timeout-ms 300000 --budget-minutes 35 --shard ${{ matrix.shard }}/10

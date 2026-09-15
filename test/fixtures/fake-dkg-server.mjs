@@ -12,7 +12,8 @@
  *   publish: 'unbound'  (207, minted but not bound)
  *   publish: 'lost'     (503 after send; the asset stays shared until confirm(name))
  *   publish: 'refused'  (409, refused before any chain call; the asset stays shared)
- *   ualSuffix, txHash   (what a successful publish reports)
+ *   ualSuffix, txHash   (what a successful or unbound publish reports)
+ *   unboundError        the contextGraphError an unbound publish reports
  *   reconcile           fields that replace the reconcile reply's own (e.g. headOrdinal: null)
  */
 import { createServer } from 'node:http'
@@ -91,7 +92,7 @@ export async function startFakeDkg({ address, name = 'fake', token = 'test-token
       const txHash = scenario.txHash ?? `0x${'ab'.repeat(32)}`
       if (scenario.publish === 'unbound') {
         const minted = ka({ cg: a.cg, publisher: address.toLowerCase(), quads: a.quads })
-        return send(res, 207, { ual: minted.ual, txHash, contextGraphError: 'binding reverted' })
+        return send(res, 207, { ual: `${minted.ual}${scenario.ualSuffix ?? ''}`, txHash, contextGraphError: scenario.unboundError ?? 'binding reverted' })
       }
       if (scenario.publish === 'lost') return send(res, 503, { error: 'chain connection lost' })
       if (scenario.publish === 'refused') return send(res, 409, { error: 'no funded wallet for this author' })

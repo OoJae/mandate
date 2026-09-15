@@ -27,7 +27,11 @@ The shapes every module agrees on. Change them here first.
   is wrong, and `'revoked'` otherwise (a missing, duplicated or unreadable `stateAt`,
   `state` or `stateAuthor`, or a `stateAuthor` naming another address). A state about a
   grant owned by another address is a forgery. A `GrantState` in the grantor's own
-  prefix whose `stateOf` cannot be read makes the read inconsistent.
+  prefix whose `stateOf` cannot be read makes the read inconsistent, and so does any
+  object there, whatever its types (untyped, or only `LikenessGrant`), with Mandate
+  predicates and a `stateOf` value naming a current grant of the publisher that cannot be
+  read as exactly one IRI (a literal, or several values): it is listed as unreadable and
+  reported as a trusted `malformed` forgery.
 - **A grantor's statement about its own grant is a state, whatever else it is.** In a
   grants graph, an object typed `GrantState` (with any other types), or any object whose
   one `stateOf` names a current grant owned by the anchoring publisher, is read as a state
@@ -36,19 +40,38 @@ The shapes every module agrees on. Change them here first.
   so the state is malformed and counts as a revocation.
 - **Revocation is terminal per grant IRI.** `active` has no effect.
 - **Tiers.** `vm` may permit or clear. `swm` revocations warn. A revocation seen
-  only in the merged `<cg>/context/<id>` graph with no twin in any
-  `_verifiable_memory` graph is honoured (tier `context`). For hand-built knowledge, the
+  only in the merged `<cg>/context/<id>` graph is honoured (tier `context`) unless it
+  has a Verifiable Memory twin **under the grant owner's own prefix**: a state or forgery
+  of the grantor read with that subject IRI, or a discovery row with that subject in a
+  `_verifiable_memory/<owner>/` graph. A stranger's Verifiable Memory object reusing the
+  subject IRI explains nothing, so it cannot cancel the view row. Trade-off: a non-active
+  state a stranger published, if a node shows it in its merged view, is honoured there as
+  a revocation, because its only twin is the stranger's. Live v10.0.16 nodes build views
+  only from data they published, so only the stranger's own node shows it that way, and
+  no stranger can block a grant on anyone else's node. For hand-built knowledge, the
   gate and verifier count a state from the grant's publisher with no tier or an
-  unrecognised one, or a `vm` state with `malformed: true`, as a revocation whatever its
-  `state` says.
+  unrecognised one, or a `vm` state whose `malformed` flag is anything but absent, `null`
+  or `false` (so `1` or `"true"` counts), as a revocation whatever its `state` says. A
+  state with neither a string `publisher` nor a `vm`, `context` or `swm` tier cannot be
+  attributed: it is a knowledge problem, so the gate refuses at `read-inconsistent` and
+  the verifier returns `INCONCLUSIVE`.
 - **Deny list.** `PROHIBITED_USE_CLASSES` (`src/policy.mjs`): `adult`, `sexual`,
   `deceptive-impersonation` and synonyms. A request's use-class label is normalised
   (lowercase; spaces, underscores and dots become hyphens) and split into letter-only
   words at hyphens and digits. It is refused when any word, or any run of adjacent words
   joined together, is on the list, either as written or with one common inflection
   removed (`s`, `es`, `ing`, `ed`, `ised`, `ized`, `ly`, `ness`, `y` and similar, with and
-  without a restored final `e`). Deliberate trade-off: innocent labels such as
-  `adult-education` are refused. It is a check on the declared label only.
+  without a restored final `e`), or when any single word contains one of
+  `PROHIBITED_STEMS` (`porn`, `sexual`, `sext`, `adult`, `deepfake`, `impersonat`, `nudi`,
+  `nude`, `naked`, `erotic`, `explicit`, `nsfw`, `xxx`, `xrated`, `lewd`, `hentai`,
+  `fetish`, `onlyfan`, `smut`, `kink`, `camgirl`, `undress`, `topless`, `bdsm`, `impostor`,
+  `imposter`) as a substring. `stripper`, `striptease` and `catfish` are whole words only,
+  so `comic-strip` passes and `catfishing` is refused. Deliberate trade-offs: innocent
+  labels such as `adult-education`, `sextant`, `nudibranch` or `catfish-recipe` are
+  refused. Named limits: it is a check on the declared label only; leetspeak that splits
+  at a digit (`p0rn`, `s3x`) passes; and the list is incomplete (`lingerie`, `boudoir`,
+  `scam`, `fraud` and `voice-clone` pass), so a grant's `permitsUseClass` is the control
+  that holds.
 
 ## Read consistency
 
@@ -98,14 +121,28 @@ node-admin token:
 
 A context graph that reads empty everywhere, and that the freshness check did not
 already find current under that exact id, is checked against the node's subscriptions:
-an id the node does not hold, or holds in another case, is inconsistent. If the
+an id the node does not hold, or holds in another case, is inconsistent. An entry counts
+as held only when its `subscribed` flag is exactly `true` (a missing flag, or the string
+`"false"`, is not a subscription). If the
 subscriptions cannot be listed (a transport error, 404, 5xx, or an answer of an
 unexpected shape), the empty read is inconsistent too. Deliberate trade-off (fail-open):
 a 403, or a node with no subscriptions call, is only a warning, because a token without
 node-admin rights gets 403 here and from reconcile, and refusing would block every
 decision against a graph that is legitimately empty. On such a node a mis-typed or
 unsubscribed graph id still reads as empty. `checkFreshness` is off unless the caller
-sets it (the CLI does).
+sets it (the CLI does, unless `MANDATE_CHECK_FRESHNESS=0`). When it is not truthy, every
+read adds the warning `freshness not checked: a node behind the chain can miss a
+revocation or a render (checkFreshness is off)`, and `decide` passes it through.
+
+**Hand-composed knowledge.** The gate and verifier believe `consistency.ok`. A caller that
+builds knowledge from `anchorsFromMeta` and `reduceSlice` instead of `readKnowledge` must
+itself apply `readPublisher`'s rules and set `ok: false` when any fails: `checkConsistency`
+over each publisher prefix, no `anchorsFromMeta` problem, no content row with an
+unreadable graph, an **empty `unreadable` list** from `reduceSlice` (a grantor's
+revocation whose `stateOf` cannot be read lands there, not in `states`, and skipping the
+rule loses it), and an empty read believed only when every attempt answered. Such
+knowledge also lacks merged-view and shared-memory revocations, remembered anchors and
+revocations, and the freshness check.
 
 Outside the publisher's prefix, `readKnowledge` only discovers things; it never
 reads other graphs in full. Discovery queries use `SELECT DISTINCT`, send grant ids
@@ -119,9 +156,10 @@ write to an open graph can deny service this way, but never obtain a permit.
 | Grant for the subject | another address's VM graph | forgery `grant-not-by-subject` (`misplaced-grant` in a derivations graph) |
 | State about a candidate grant | the grantor's own VM graph, absent from the grantor read | read inconsistent |
 | States about candidate grants published by the grantor, on a node shown (by the probe or a view row, on any attempt) to hold a merged view of that graph | the merged view (`<cg>/context/`) left out of every answer | read inconsistent |
+| More than one view graph of one context graph in state discovery | shown on different sets of attempts | read inconsistent (a node is expected to hold one view graph per context graph) |
 | The one-row probe for whether the node holds any merged view of that graph, while no attempt has shown one | not answered on every attempt | read inconsistent |
 | A state with any row whose value is not exactly `active` | `_shared_memory/…` | warning only |
-| A state with any row whose value is not exactly `active` | merged view (`<cg>/context/<id>`) with no VM copy anywhere | revocation, tier `context` |
+| A state with any row whose value is not exactly `active` | merged view (`<cg>/context/<id>`) with no Verifiable Memory copy under the grant owner's own prefix | revocation, tier `context` |
 | Derivation for a file | an untrusted address's VM graph | shown in `untrusted`, never believed |
 
 Discovered forgeries carry their UAL, and the transaction hash where their `_meta`
@@ -140,10 +178,18 @@ grants in question; without one, no view is expected. Deliberate trade-offs:
 
 - a node that never materialises views (a producer or verifier node) spends every
   attempt here (about 1.75 s of backoff with the defaults) whenever the check runs;
+- when a view is expected, discovery never stops after its first attempt, so a view left
+  out of one answer has a second to show in; that costs one extra attempt (one backoff,
+  250 ms with the defaults) on a node that holds the view;
 - a node that leaves the view out of the probe and out of the state query on every single
   attempt is not caught, because nothing else distinguishes it from a node that holds no
   view. Remembering per node that a view was once seen would close that for later reads;
-  it is not done.
+  it is not done;
+- the check is per context graph, not per view graph. It assumes one merged view graph
+  per context graph, as live v10.0.16 nodes materialise, and enforces only that several
+  view graphs show on the same attempts: a node holding several view graphs that leaves
+  the one holding the revocation out of every attempt, while another still shows, is not
+  caught.
 
 ## Wire terms
 
@@ -259,7 +305,14 @@ Clause order: `malformed-request`, `use-class-prohibited`, `read-inconsistent`,
 
 - Grants are checked independently, in id order then UAL order. A refusal names the
   furthest clause any grant reached.
-- A grant id held by more than one authentic grant is refused at `grant-exists`.
+- A grant id held by more than one authentic grant is refused at `grant-exists`. A trusted
+  forgery whose id is a grant IRI naming its own publisher (the grantor's own unreadable
+  copy) counts as a copy too: the reason reads `(N copies, M of them unreadable)`. A copy
+  published by any other address is a forgery, not a copy, and is not counted. The
+  verifier applies the same rule (`unreadableGrantCopies` in `src/gate.mjs`, used by
+  `judgeEdge`): a file made under such a grant verifies `TAINTED / MALFORMED` with the same
+  `(N copies, M of them unreadable)` reason, and the unreadable copy is listed in the
+  result's `forgeries`.
 - Clause lists must be arrays (`null` is empty); anything else refuses at that clause.
 - `grants`, `states`, `derivations` and `forgeries` must all be arrays; otherwise the
   request refuses at `read-inconsistent`.
@@ -336,27 +389,55 @@ claiming the grant; when it is non-zero, `billedUnknown` is true.
   ceiling parts are left out when not requested; a parenthesis in a territory name is not
   spoken.
 - `scriptWords(text)` puts script and transcript in one canonical form: lowercase,
-  accents stripped, `&` to `and`, punctuation and hyphens split; `lipsync` to `lip sync`,
+  accents stripped, `&` to `and`, punctuation and hyphens split; a question mark (`?`,
+  `¿`, `؟`, `‽`, `⸮`, the Armenian `՞`, Ethiopic `፧`, Limbu, Old Nubian, Vai, Bamum,
+  Chakma and Adlam marks, anything NFKD folds to `?`, and the Greek question mark U+037E,
+  matched before NFKD folds it to `;`) kept as a word of its own; every run of letters, digits, symbols
+  or marks that does not fold to a-z0-9 (another script, small capitals, emoji) kept as
+  one word; `lipsync` to `lip sync`,
   `faceswap` to `face swap`, `St` to `saint`; `U.K.`/`UK` to `united kingdom`,
   `U.S.`/`US`/`USA` to `united states`; ordinals and number words to digits (including
-  years said in pairs and "two thousand and twenty six"); `$5`, `5 dollars`, `five US
-  dollars` and `5 USD` to `5 dollars`; decimals such as `2.50` and "two point five" to one
-  form; dates in day-month-year order.
+  years said in pairs and "two thousand and twenty six"), except that a number phrase with
+  an ordinal after `a`/`an` or right before a currency or `point` word stays as said, so
+  `a fifth US dollars` is not `5`; every spoken form of US dollars (`US dollars`,
+  `U.S. dollars`, `American dollars`, `United States dollars`, `USD`, `US$5`) to one word,
+  `usdollars`, while a bare `dollars`, `dollar` or `$5` stays `dollars`, which is not the
+  script's word; decimals such as `2.50` and "two point five" to one form; dates in
+  day-month-year order.
 - `matchScript(transcript, requested)` aligns the two word lists (longest common
   subsequence, critical words weighted so they are never traded for others). `matched`
-  only when no **critical** word is missing (`I`, `consent`, every capability, use class
-  and territory word, `until`, the date, `capped`, the amount; stricter than the minimum,
-  deliberately), at most `SCRIPT_MAX_MISSES` (2) other script words are missing, and
-  every transcript word outside the alignment is filler: `um umm uh uhh er erm ah hmm mm
-  hi hello hey so okay ok yes yeah well a an the`. No negators, conjunctions or
+  only when no **critical** word is missing, at most `SCRIPT_MAX_MISSES` (2) script words
+  are missing, and every transcript word outside the alignment is filler. The filler is exactly: `hi hello a an the`
+  (`SCRIPT_FILLER`): words that cannot say no alone or in any combination. **Hesitation
+  sounds are not filler**: `um`, `uh`, `er`, `erm`, `ah`, `hmm`, `mm`, `mhm`, `nuh` and their
+  spellings are extra, because hyphens are split before comparing and `uh-uh`, `mm-mm`,
+  `hmm-mm`, `ah-ah` and `nuh-uh` are a spoken "no"; so are `yes`, `yeah`, `okay`, `ok`,
+  `so`, `well` and `hey` (`yeah, yeah`, `well…`, `hey!`). A transcript with any of them is
+  unconfirmed and needs a person. Only the joining
+  words `to`, `of`, `for`, `in`, `and` (between listed terms), `is` and `at` are
+  non-critical; every other script word is critical (`I`, `consent`, every capability,
+  use class and territory word, `my`, `likeness`, `until`, each word of the date,
+  `spending`, `capped`, the amount and `usdollars`). So a `?` or a word in another script
+  is extra and blocks the match, and `of the likeness` or `is capped at 5` does not
+  match. No negators, conjunctions or
   conditionals are filler. `missing` lists the script words not found, `extra` the
   non-filler words not aligned. A transcript longer than 4 × script words + 64 is not
   aligned and never matches.
-- `confirmed` is `scriptMatch.matched` with nothing contradicted. Anything else is
-  UNCONFIRMED, however the heuristics read it, and needs a person.
+- `confirmed` is `scriptMatch.matched`, with nothing contradicted, and `checks[0].matched`
+  (the heuristics hear an affirmative first-person consent). Anything else is
+  UNCONFIRMED and needs a person. The heuristics can only take a confirmation away.
+  Trade-off: an article inside the consent clause (`I, the, consent to ...`) matches the
+  script but is not heard as affirmative, so it needs a person.
 - Named limits: the script's words are compared, not what the person meant by them (a
-  territory name read from the script names what the grant names); up to two short
-  non-critical words may be dropped.
+  territory name read from the script names what the grant names); up to two of the
+  seven joining words listed above may be dropped; `a`, `an`, `the`, `hi` and `hello` are
+  filler anywhere; and a use-class label that itself contains a negator makes the script contradict itself,
+  so every reading of it is exit 8 (fails closed).
+- The heuristics do not hear a refusal made only of sounds (`uh-uh`, `mm-mm`): it is never
+  `contradicted`. It is kept from confirmation only because those sounds are not filler, so
+  on the typed path the person watching the clip is what catches it. The heuristics'
+  `normalise` also drops text outside Latin letters; the script match compensates, since
+  such text is always extra there.
 
 **Open world: heuristics, for display and as a hard stop.**
 
@@ -410,7 +491,9 @@ claiming the grant; when it is non-zero, `billedUnknown` is true.
   recoverable. An inline call that times out on the client with no job id throws
   `kind 'timeout'`, `jobId null`, `mayHaveStarted true`.
   A platform error whose text says the render timed out or may still complete is
-  `kind 'timeout'` with `mayHaveStarted true`. An error reply carrying a malformed job id
+  `kind 'timeout'` with `mayHaveStarted true`; that includes an `ok: false` reply whose
+  error or text says it timed out, the deadline was exceeded, or the render continues in
+  the background. An error reply carrying a malformed job id
   is classified first and kept recoverable. This wording comes from plausible platform
   texts and has not been checked against a live timeout.
 - `dispatchRender(client, { capability, inputs, prompt, sourceUrl, idempotencyKey, mode, onJob, poll }) → { url, jobId, replay, mode, servedCapability, costUsdEstimated, warnings }`.
@@ -418,7 +501,16 @@ claiming the grant; when it is non-zero, `billedUnknown` is true.
   2147483647 ms). With a job id, the reply is the result only when its status is done and
   its structured URL is usable; otherwise the job is polled. Text is scanned for a URL
   only when there is no job id, and a queued reply whose job id is not in the accepted
-  shape stops with `mayHaveStarted true` instead.
+  shape stops with `mayHaveStarted true` instead. A structured `url` counts as the media
+  only when its path ends in a media file extension (`.mp4`, `.webm`, `.png`, `.wav` and
+  the rest of `MEDIA_EXT`) or it is under `agent.livepeer.org/a/`; a job or status page is
+  polled when there is a job id, and is `no-media` otherwise. `poll: null` is the same as
+  no poll options; a `poll` that is not an object, or an `onStatus` or `now` that is not a
+  function, is refused before dispatch. Once a job id exists, any error that is not
+  already a `RenderError` (an `onJob` callback that throws, a clock that returns a
+  non-number) becomes a `RenderError` `kind 'tool'` carrying that job id and
+  `mayHaveStarted true`. Reply content that is not a list, or holds non-objects, is read
+  as no text.
 - `pollJob(client, jobId, { inputUrls, pollIntervalMs, maxWaitMs, sleep, now, onStatus, capability }) → { url, structured, text, status, capability, servedCapability, costUsdEstimated, warnings }`.
   A reply marked `isError` is never a result, whatever status it carries (the job id is
   kept). A reply, structured or in its status header, about another job is refused.
@@ -429,6 +521,11 @@ claiming the grant; when it is non-zero, `billedUnknown` is true.
   otherwise `null` with a warning. `served(structured, requested)` returns the platform's
   claim, the requested capability when it names none, and `null` when its claim is
   unusable.
+- In the CLI, a `servedCapability` of `null` (the platform's claim was unusable) is saved
+  as `servedCapabilityUnknown: true`, never replaced by the requested capability, and
+  `commitDerivation` anchors nothing for it: exit 4, stage `served-unknown`, URL withheld.
+  Trade-off: the render stays billed and unrecorded and keeps counting against the
+  ceiling on this machine.
 - `extractMediaUrl(structured, text, inputUrls)` never returns one of the inputs,
   compared by lowercased host without a default port and the percent-decoded path with
   repeated slashes collapsed (scheme, query and fragment ignored). A structured URL that
@@ -436,7 +533,9 @@ claiming the grant; when it is non-zero, `billedUnknown` is true.
   nested objects and arrays.
 - `classifyFailure(structured, text)` removes URLs before matching. A numeric 402 is
   payment; a numeric 401 is payment unless the text names fetching an input; other
-  numeric codes are tool errors. A recognised payment code is payment (except
+  numeric codes are tool errors, unless the text uses a phrase that can mean nothing but
+  money (so `{ status_code: 500 }` or `403` with such text is payment); for a 401 or 403
+  about fetching an input, only account wording counts. A recognised payment code is payment (except
   `unauthorized` on an input fetch); any other code is payment only for phrases that can
   mean nothing but money.
 
@@ -445,8 +544,8 @@ claiming the grant; when it is non-zero, `billedUnknown` is true.
 `DkgNode.sealShareAnchor({ name, contextGraphId, quads, expectAuthor, resume = false, lastPublishUnknown = false }) → { name, ual, txHash, merkleRoot, … }`
 
 - `DkgWriteError { name (the asset name, when known), assetName, stage, status, body, ual, txHash, mayHaveSent }`.
-  Stages: `create`, `author`, `share`, `publish` (refused with a 4xx, before any chain
-  call; `mayHaveSent: false`), `publish-transport` (the answer could not be trusted and
+  Stages: `create`, `author`, `share`, `publish` (refused with a 4xx; `mayHaveSent:
+  false`, meaning no mint can follow, not that nothing reached the chain: see below), `publish-transport` (the answer could not be trusted and
   a transaction may have been sent), `unbound` (minted but not bound to the graph;
   `mayHaveSent: true`), `resume-refused` (the node's record rules out continuing; never
   retried) and `resume-unverified` (it could not be judged now; retryable, never
@@ -462,11 +561,17 @@ claiming the grant; when it is non-zero, `billedUnknown` is true.
   already sealed under that name, not the quads passed in. Deliberate trade-off: if an
   unknown publish in fact sent nothing, the asset stays unpublished until an operator
   checks.
-- `vm/publish` answers are sorted by what they can prove. A 4xx is refused before any
-  chain call (stage `publish`). Anything else that is not a `200` with
-  `status: 'confirmed'` and a UAL (a 500, 502, 503 or 504, status 0, a body cut off,
-  over the limit or unparseable, a `200` saying `pending` or `tentative`) is a lost
-  response. A lost response is success only when the descriptor is `vm-confirmed` with a
+- `vm/publish` answers are sorted by what they can prove. A 4xx whose body was read is
+  refused (stage `publish`; an unread 4xx body, such as one over the size limit, is a lost
+  response): it never follows a successful mint, so republishing cannot mint twice. It
+  does not prove nothing was sent. On v10.0.16 a `400 NO_FUNDED_PUBLISHER_WALLET` can
+  come after the node's TRAC approve transaction or a publish that reverted, and a 400
+  from context graph auto-registration can come after a registration transaction. Either
+  may have spent gas; neither mints. Anything else that is not a `200` with
+  `status: 'confirmed'` (a 500, 502, 503 or 504, status 0, a body cut off, over the limit
+  or unparseable, a `200` saying `pending` or `tentative`) is a lost response, and so is
+  a confirmed `200` whose UAL is missing or not chain-confirmed, names another author
+  than the sealing one, or whose reported `merkleRoot` is not the sealed root. A lost response is success only when the descriptor is `vm-confirmed` with a
   chain-confirmed (not tentative) UAL under the sealing author, its `vmCurrentAssertion`
   equals the sealed merkle root where exposed, and the `<cg>/_meta` rows about exactly
   that UAL pass `anchorsFromMeta` (`src/provenance.mjs`), the resolver's own anchor
@@ -491,21 +596,59 @@ claiming the grant; when it is non-zero, `billedUnknown` is true.
   checked before anything is fetched. On failure the error also carries `derivationId`.
 - `reconcile({ billedJobs, derivations })` counts only derivations with `trusted === true`.
 
+## CLI configuration
+
+`bin/config.mjs`. Nothing is loaded at import time. `main()` calls
+`loadMandateEnv({ flag: flags.envPath })` before every command and prints its warnings on
+stderr; `scripts/nodes.mjs` and `scripts/publish-skill.mjs` call it the same way.
+`scripts/publish-ontology.mjs` and the spikes that read `bin/config.mjs` (`s6`, `s6b`, `s6c`)
+call `loadScriptEnv(argv)` first: the same `--env-path` lookup and `--env-file` refusal,
+printing `env file: <path>` or `env file: none (looked for …)`, exit 1 on a bad flag or an
+unreadable named file. `s6c` hands the file it loaded to every CLI call with `--env-path`.
+
+- `envFileLocation({ flag, env }) → { path, source, explicit }`, first match wins:
+  `--env-path <path>` (source `--env-path`, explicit), `MANDATE_ENV_FILE` (explicit),
+  `$MANDATE_HOME/.env` with `MANDATE_HOME` from the real environment, default
+  `~/.mandate/.env` (source `MANDATE_HOME`, not explicit). A relative path resolves
+  against the working directory. **A `.env` in the working directory is never read.**
+- `loadMandateEnv` returns (and keeps in `envLoad`) `{ path, source, searched, loaded,
+  ignored, warnings }`. An explicit file that is missing, unreadable or not a regular file
+  is a `ConfigError` (exit 1); a missing default file is not, and `path` stays `null`. A
+  file with any group or world write bit (`mode & 0o022`) is loaded with a warning to
+  `chmod 600` it.
+- Only keys matching `ENV_KEY` (`MANDATE_*`, `LIVEPEER_AGENT_KEY`) are copied, and only when
+  unset in the environment: the real environment wins. Other keys are listed in `ignored`.
+- `--env-file` and `--env-file-if-exists` are refused by `parseArgs` (and by both scripts),
+  exit 1, pointing to `--env-path`: Node.js scans the whole argv for `--env-file`, even
+  after the script name, and applies a `NODE_OPTIONS` from that file before any Mandate
+  code runs.
+- `status` and `verify` print the configuration in effect and put it in the JSON result as
+  `config: { envFile, envFileSource, envFileSearched, envKeysLoaded, envFileWarnings,
+  trustedProducers, grantsCgs, derivationsCgs, checkFreshness }`. With the freshness check
+  off they print a yellow `FRESHNESS CHECK OFF` notice.
+- `demo/full.mjs` passes `--env-path <repo>/.env` (overridable with its own `--env-path`) to
+  every `mandate` and `scripts/nodes.mjs` child.
+
 ## CLI exit codes
 
 | Code | Meaning |
 |---|---|
-| 0 | success, permitted, CLEAR; `help`, `-h`, `--help` and `--version`; `render --execute` over a render already `recorded`; `revoke` of a grant already revoked |
-| 1 | usage or configuration error (`UsageError`, `TermError`, `ConfigError`, `PendingInvariantError`): a bad flag or graph id, a producer that is not trusted, `--at` with `--execute`, the "publish" confirmation needed off a terminal or with `--json` and no `--yes`, a gate `malformed-request`, an `--idempotency-key` that differs from the one a possibly billed render was sent with |
+| 0 | success, permitted, CLEAR; `help`, `-h`, `--help` and `--version`; `render --execute` over a render already `recorded`; `revoke` of a grant already revoked by a `vm`-tier revocation (a revocation seen only in this node's merged view, tier `context`, is warned about and an anchored one is published) |
+| 1 | usage or configuration error (`UsageError`, `TermError`, `ConfigError`, `PendingInvariantError`): a bad flag or graph id, a producer that is not trusted (`render --execute` before dispatch; `record --pending` before hashing or publishing, leaving the record as it was), an env file named with `--env-path` or `MANDATE_ENV_FILE` that is missing, unreadable or not a file, `--env-file` or `--env-file-if-exists` (refused in favour of `--env-path`), `--at` with `--execute`, the "publish" confirmation needed off a terminal or with `--json` and no `--yes`, a gate `malformed-request`, an `--idempotency-key` that differs from the one a possibly billed render was sent with |
 | 2 | refused by the gate; TAINTED or UNKNOWN; `revoke` of a grant not found or not this node's |
-| 3 | consent not confirmed: no clip before the link expired, transcription failed, no affirmative first-person consent, a requested term not heard without `--force`, not a reading of the consent script with a typed confirmation not given or wrong, or a typed confirmation needed but impossible (off a terminal, or `--json`); `grant --with-consent` off a terminal, with or without `--yes`, before any link; `consent` on anything but a reading of the script. Nothing is published |
-| 4 | render succeeded but its derivation failed to commit, at any stage (`create`, `share`, `author`, `publish`, `publish-transport`, `unbound`, `resume-refused`, `resume-unverified`); the result carries `stage`, `asset`, `derivationId`, `ual`, `txHash`, `mayHaveSent` |
-| 5 | render failed (tool error, no media), or a rerun found the render `submitted` with a job id, `rendered`, or being dispatched by another process (`PendingConflictError`); `record` on a job that failed or a render that never produced a job |
+| 3 | consent not confirmed: no clip before the link expired, transcription failed, no affirmative first-person consent, a requested term not heard without `--force`, a transcript too long to review in full (over 4000 characters, or 50 or more extra words) on the unconfirmed path, not a reading of the consent script with a typed confirmation not given or wrong, or a typed confirmation needed but impossible (off a terminal, or `--json`); `grant --with-consent` off a terminal, with or without `--yes`, before any link, and with `--json` for a grant with no ceiling or no territory (which must be typed), before any link; `consent` on anything but a reading of the script. Nothing is published |
+| 4 | render succeeded but its derivation failed to commit, at any stage (`create`, `share`, `author`, `publish`, `publish-transport`, `unbound`, `resume-refused`, `resume-unverified`, or `served-unknown` when the serving capability could not be recorded); the result carries `stage`, `asset`, `derivationId`, `ual`, `txHash`, `mayHaveSent` |
+| 5 | render failed (tool error, no media), or a rerun found the render `submitted` with a job id, `rendered`, or being dispatched by another process (`PendingConflictError`); a `render --execute` or `record --pending` whose key's lease another live process holds (at once, `inFlight: true`; `record` also `outcome: 'in-use'`); a render that waited over about 15 s for the grant lock, or whose in-lock decision permits under another grant (`decisionChanged: true`); `record` on a job that failed (settled as `failed-confirmed` when the platform reports that job id failed) or a render that never produced a job |
 | 6 | grant or revocation write failed before anchoring (`create`, `share`, `author`) |
 | 7 | grant or revocation anchor not confirmed (`unbound`, `publish`, `publish-transport`, or any `mayHaveSent`); the result carries the grant id, state id for a revocation, asset name, stage and a `check` command |
 | 8 | consent contradicted; never overridable |
-| 9 | INCONCLUSIVE: node unreachable, stale or read inconsistent; `DkgHttpError`, `ReadTruncatedError`, `FetchBytesError`; an unreadable `auth.token` (`NodeTokenError`), local state file (`StateReadError`) or pending file (`PendingReadError`, which names the file); a Livepeer failure that is not about credentials; `RenderError` `unknown-status`; a render whose outcome is unknown, from `render --execute` (still `submitted` after the attempt) or `record` (no answer saved, or a poll that timed out) |
-| 10 | Livepeer payment or credential problem, including `spend_cap` showing the estimate over the account's remaining 24 h budget |
+| 9 | INCONCLUSIVE: node unreachable, stale or read inconsistent; `DkgHttpError`, `ReadTruncatedError`, `FetchBytesError`; an unreadable `auth.token` (`NodeTokenError`), local state file (`StateReadError`) or pending file (`PendingReadError`, which names the file); a Livepeer failure that is not about credentials; `RenderError` `unknown-status`; a render whose outcome is unknown, from `render --execute` (still `submitted` after the attempt, including a rerun refused by `spend_cap`) or `record` (no answer saved, or a poll that timed out) |
+| 10 | Livepeer payment or credential problem, including `spend_cap` showing the estimate over the account's remaining 24 h budget, unless an earlier attempt of that render may have been billed: then the record stays `submitted`, the result carries `outcome: 'unknown'`, and the exit is 9 |
+
+`scripts/nodes.mjs doctor` sets exit 9 when a node is unreachable, or a configured graph
+is not current (behind, or freshness unknown) or not subscribed. When listing
+subscriptions answers 403, each graph's subscription is reported as unknown, which does
+not set 9, and freshness is still checked.
 
 Derivation failures are exit 4 whatever their stage, because the render exists and was
 billed; the DKG stages decide exit 6 or 7 only for grants and revocations.
@@ -516,8 +659,15 @@ billed; the DKG stages decide exit 6 or 7 only for grants and revocations.
   `scope.scriptMatch.matched`) with nothing contradicted needs no typed answer about its
   words; only what the script never states is typed (`none` for no ceiling, `anywhere`
   for no territory). Only such a grant is published with `consentClipSha256`.
-- Anything else prints the script, the transcript and `scriptMatch.missing` and `extra`
-  (to stderr too with `--json`). Without an affirmative first-person consent it is exit 3.
+- The transcript is printed before the heuristics' checks (over the limit below, only its
+  length), and a contradiction (exit 8) is decided first. Anything else prints the script, the transcript and `scriptMatch.missing`
+  and `extra` (to stderr too with `--json`), **in full**: control characters are removed and
+  tabs and line breaks become spaces, and nothing is cut. A transcript over
+  `TRANSCRIPT_REVIEW_MAX` (4000 characters, after that cleaning), a missing or extra list
+  over 4000 characters, or 50 or more extra words (`matchScript` lists at most 50 for a
+  transcript it does not align, so such a list may be cut) is exit 3, `TOO LONG TO REVIEW`,
+  before any question, with `reason: 'transcript too long to review'` in the summary.
+  Without an affirmative first-person consent it is exit 3.
   Requested terms the heuristics did not hear are exit 3 unless `--force`. Otherwise the
   operator types `matches`, `consents`, then each `unchecked` item (the end date as
   `YYYY-MM-DD`, the ceiling or `none`, `anywhere`), and the grant is published **without**
@@ -532,9 +682,11 @@ billed; the DKG stages decide exit 6 or 7 only for grants and revocations.
 **Grant and revocation writes.** A `DkgWriteError` from `sealShareAnchor` is reported,
 human and `--json`, with `outcome` (`unknown` when `mayHaveSent`, else `failed`), `error`,
 `stage`, `grantId` (and `stateId` for a revocation), `assetName`, `contextGraphId`, `ual`,
-`txHash`, `mayHaveSent`, `exitCode` and, when unknown, `check`: `mandate revoke --id
-<grantId>`. For a grant it answers "not anchored" until the grant lands and then revokes
-that same id; for a revocation it answers "already revoked" once it lands. The ids are
+`txHash`, `mayHaveSent`, `exitCode` and, when unknown, `check`: `mandate blast-radius --grant
+<grantId>`, which only reads (from the producer node, which may lag): "not found in the
+grants graph" until a grant lands, its UAL once it has, and "revoked" once a revocation
+lands. The check never publishes; revoking a landed grant, or publishing a second
+(harmless) revocation, is a separate `mandate revoke --id <grantId>`. The ids are
 generated before the write, so a retry never needs a new one to find the first.
 
 **Renders.**
@@ -546,11 +698,40 @@ generated before the write, so a retry never needs a new one to find the first.
   `--idempotency-key` sends it; a different one is exit 1 before sending), the attempt is
   added to `attempts[]`, and it stays in local pending spend until it is rendered and
   recorded. It is never saved as `failed`: a clean failure of a later attempt, or a
-  `spend_cap` refusal, leaves it `submitted` and exits 9 (or 10 for the refusal).
-- Local pending spend counts `dispatching`, `submitted` and `rendered` records and any
-  that may be billed, at the larger of the platform cost and the estimate when both are
-  known, otherwise by the same rule as the recorded `billedUsd` (an estimate scaled by
-  `--seconds` counts as unknown, which refuses under a ceiling).
+  `spend_cap` refusal, leaves it `submitted` with `outcome: 'unknown'` and exits 9 (the
+  refusal included; a `spend_cap` refusal with no earlier attempt open is 10).
+- Local pending spend counts `dispatching`, `submitted` and `rendered` records, any that
+  may be billed, and a `recorded` record whose derivation id is not among the knowledge's
+  derivations (knowledge read before another local render finished), at the larger of the
+  platform cost and the estimate when both are known, otherwise by the same rule as the
+  recorded `billedUsd` (an estimate scaled by `--seconds` counts as unknown, which refuses
+  under a ceiling).
+- **Concurrency.** `render --execute`, after the first permit and the trusted-producer
+  check, takes the key's lease (`pending.acquireLease(key)`), then runs inside
+  `pending.withGrantLock(grantId)`: it reads `pending.list()` again, rebuilds local pending
+  spend, calls `decide` again on the same knowledge, and saves the `dispatching` record with
+  `beginAttempt` before the lock is released. A refusal there prints `REFUSED` with the
+  clause (exit 2, 9 or 1 as for any refusal); a permit under a different grant is not
+  dispatched (exit 5, `decisionChanged: true`). The lease is held through dispatch,
+  polling and `commitDerivation`, and released in `finally`. `record --pending <key>` takes
+  the same lease before loading the record. A second process that finds the lease held
+  does not wait: `render` exits 5 with `inFlight: true`, `record` exits 5 with
+  `inFlight: true, outcome: 'in-use'`. So the ceiling holds across concurrent processes on
+  one machine that share `MANDATE_HOME`. It is not enforced across machines (or separate
+  `MANDATE_HOME`s): their renders count only once their derivations are read from the graph.
+- **`--seconds`.** When the decision has a ceiling, `--seconds` was given and the price unit
+  is `second` or `character`, `price.note` (human output and every JSON result that carries
+  `price`) says the estimate is the unit price times `--seconds`, taken as given, not sent to
+  Livepeer or checked against the inputs, and billed for the real length.
+- **Record.** `commitDerivation` reads the producer identity first and throws `ConfigError`
+  (exit 1: nothing recorded, the record left as it was, media URL withheld) when the
+  address is not in `trustedProducers`; an unreachable node is exit 4. For an idempotent
+  replay, an existing derivation is reused only when it is trusted, under the same grant,
+  has `outputSha256` equal to the hash of the released bytes, and does not carry a job id
+  different from the record's; otherwise a new derivation is anchored.
+- **Revoke.** Publishing is skipped only when `revocationOf(...).all` has a `vm`-tier state
+  (local-state memory is `vm` too). A revocation only in the merged view (tier `context`)
+  is warned about and an anchored revocation is published.
 
 **Derivation retries (`record --pending`).** An attempt that stopped at `create`, `share`
 or `author`, or at `publish` with a saved 4xx status, is continued. Any other attempt, or
@@ -562,6 +743,16 @@ one after `mayHaveSent`, or an unreadable descriptor is `resume-unverified` (ret
 `unbound` and `resume-refused` are permanent: the asset is never published again, and the
 render keeps counting against the ceiling on this machine.
 
+**A job that failed for certain.** When `pollJob` throws a `RenderError` (`tool` or
+`payment`) for the record's own job id whose structured status is a failed one (`failed`,
+`cancelled`, `expired`, `timed_out` and the rest of `src/execute.mjs`'s set) and names no
+other job, `record --pending` saves the record as `failed-confirmed` with
+`allowResolve`, keeping its attempts, and exits 5 (10 for payment). `mayBeBilled` is
+false for it, so it leaves local pending spend, and `beginAttempt` starts a fresh attempt
+for a rerun. A timeout, an unrecognised status, no media or a reply about another job
+leaves the record as it was. Named trade-off: a job the platform called failed may still
+be billed, and that amount is then not counted against the ceiling on this machine.
+
 ## Local state
 
 `~/.mandate` (`MANDATE_HOME` overrides). The `pending/` and `state/` directories are
@@ -569,7 +760,8 @@ mode 0700 and their files 0600, written atomically; `~/.mandate` itself is not c
 
 - `pending/<key>.json` holds a render record written before dispatch. Status moves
   `dispatching` → `submitted` (with a job id, or `mayHaveStarted`) → `rendered` →
-  `recorded`, or `failed`. Every dispatch is an entry in `attempts[]`
+  `recorded`, or `failed`, or `failed-confirmed` (set only by `record` for a job the
+  platform reported failed). Every dispatch is an entry in `attempts[]`
   (`{ n, startedAt, pid, idempotencyKey, sentAt?, endedAt?, status, jobId, errorKind, mayHaveStarted? }`).
 - Three rules hold for any record: its idempotency key never changes once saved
   (`PendingInvariantError`); `attempts[]` is never shortened; and a record that may be
@@ -580,18 +772,76 @@ mode 0700 and their files 0600, written atomically; `~/.mandate` itself is not c
   one that is `recorded`, `rendered` or `submitted` with a job id (`PendingConflictError`)
   or being dispatched by a live process on this machine (`inFlight`), or resumes one that
   may be billed under its stored key, or starts a fresh attempt (which may use a new key)
-  after a clean failure. `markSent(key)` is called immediately before `run_capability`.
-  `finishAttempt(key, outcome)` closes the attempt. `create`, `beginAttempt`, `markSent`
-  and `finishAttempt` run under an exclusive per-key lock file (`<key>.json.lock`), waited
-  on for about 1 s and then refused as in flight; a lock from a dead process or older than
-  30 s is cleared. Liveness is judged on this machine only: two machines sharing one
-  `MANDATE_HOME` are not protected from each other.
+  after a clean failure. That fresh attempt starts clean: `jobId`, `mediaUrl`,
+  `lastOutcome`, `error`, `errorKind`, `jobStatus`, `failedConfirmedAt`, `stage`,
+  `servedCapability`, `servedCapabilityUnknown`, `costUsdEstimated`, `replay`, `renderMs`,
+  `resumedFrom`, `mayHaveStarted`, `derivation`, `derivationAttempt` and
+  `derivationPublishStatus` are removed from the record, and any that were set are kept
+  under the previous attempt's `settled`. `markSent(key)` is called immediately before
+  `run_capability`. `finishAttempt(key, outcome)` closes the attempt.
+- Three kinds of lock file, all in the pending directory, all created with `wx` and
+  carrying `{ pid, at, token }`:
+  - **key lock** `<key>.json.lock`: `create`, `beginAttempt`, `markSent` and
+    `finishAttempt` run under it. Held for milliseconds; a waiter tries for about 1 s
+    (40 × 25 ms) and is then refused as in flight.
+  - **grant lock** `grant-<sha256>.lock` (the first 32 hex characters of the SHA-256 of
+    the grant id; `grantLockPath(dir, grantId)`): `withGrantLock(grantId, fn)` runs a
+    synchronous `fn` under it. A waiter tries for about 15 s (600 tries), then gets
+    `PendingConflictError` with `inFlight: true`.
+  - **key lease** `<key>.json.lease`: `acquireLease(key) → { release() }`. The waiter makes
+    only the short key-lock wait (about 1 s) and then gets `PendingConflictError`
+    (`inFlight: true`, "in use by another mandate process"). The holder touches the file
+    every 5 s on an unref'd timer.
+  A lock or lease is taken over when its holder's pid is not alive on this machine, or when
+  the file is older than 30 s (a live lease is kept younger by its heartbeat). Takeover
+  happens only under `<lock>.takeover`, and only if the file still holds what was judged
+  stale; release removes it only while it holds the caller's own token. Liveness is judged
+  on this machine only: two machines sharing one `MANDATE_HOME` are not protected from each
+  other.
 - A record written before `attempts[]` existed is legacy; a legacy `dispatching` record
   counts as possibly billed. A pending file that exists but cannot be read throws
   `PendingReadError` naming it.
 - `derivationAttempt` keeps the derivation's `id`, `name`, `ual`, `txHash`, `stage` and
   `mayHaveSent`; name and id never change once set, and `mayHaveSent` stays true. The
+  saved stage is never replaced by what a later attempt did not learn: a generic `error`
+  (a retry that failed before or outside the write) is kept only as `lastErrorStage`; a
+  permanent stage (`unbound`, `resume-refused`) is replaced only by another permanent one;
+  and an attempt that may have sent is never relabelled `create`, `share` or `author`. The
   record also keeps `derivationPublishStatus`, the HTTP status of a `publish` refusal.
 - `state/<context-graph>.json` is
   `{ version: 1, knownUals: { <addr>: [ual] }, revocations: { <grantId>: { id, ual, txHash, publisher, stateOf, stateAt } } }`.
   It is updated only after a consistent read, and entries are never removed.
+
+## Named limits left open
+
+Found in the final review of 0.2.0 and not fixed in it. Each is written here so that an
+operator, a library caller or a later version does not rely on the opposite.
+
+- **Spend across machines.** The grant lock, the key lease and local pending spend live in
+  one `MANDATE_HOME` on one machine. Renders under one grant on several machines count
+  against each other only once their derivations are anchored and read, so concurrent
+  renders there can exceed a ceiling.
+- **`--seconds` is taken as given** for a per-second or per-character estimate under a
+  ceiling (see Renders). The recorded spend is unknown unless the platform reports a cost.
+- **Consent matching.** Sounds-only refusals are not `contradicted` (see Spoken scope).
+- **Upload text fallback.** When `get_upload` returns no structured URL, `getUpload` takes
+  a single `agent.livepeer.org/a/` link from the reply text if the text says the upload
+  arrived and nothing says it is waiting or did not arrive. Text such as "upload failed",
+  "rejected" or "empty" beside such a link is not recognised as a failure. A structured URL
+  on the host `agent.livepeer.org.` (trailing dot) is not recognised as the capture page.
+  Either can only hash the wrong object: the transcript must still be a reading of the
+  script, or be confirmed by a person.
+- **`finishAttempt` for library callers.** `finishAttempt(key, { status: 'failed' })` with
+  `mayHaveStarted` left out records the attempt without saying whether it was sent, which
+  can drop a sent attempt from "may be billed". The CLI always passes a boolean.
+- **No lease below the CLI.** The lease is taken by `render --execute` and `record --pending`,
+  not by the store's own methods: a library caller that writes records for a key without
+  `acquireLease` gets none of that protection, and `save` does
+  not refuse to drop `derivationAttempt` or to move a `recorded` record to another status.
+- **Hand-built states.** A state with tier `vm` but no string `publisher` is ignored by the
+  gate and verifier rather than counted or treated as unattributed. `readKnowledge` never
+  produces one.
+- **Later vocabulary versions.** A trusted producer's record written only in a later vocabulary version's
+  namespace (no `ns/v1` terms at all) is not recognised as a Mandate object, so its spend is
+  not counted and its file is not judged. A record that keeps any v1 predicate is reported
+  as a trusted `malformed` forgery instead.

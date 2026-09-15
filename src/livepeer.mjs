@@ -133,7 +133,13 @@ export function saysExpired(text) {
   return /\bexpired\b/i.test(t) && !/(\bnot|\bnever|n't|\bhasnt|\bisnt)\s+(yet\s+|been\s+|already\s+)?expired\b/i.test(t)
 }
 
-const saysReceived = text => /\b(received|uploaded|complete|completed|done|ready)\b/i.test(plainPunctuation(text))
+const ARRIVED = /\b(received|uploaded|complete|completed|done|ready)\b/i
+// A negator a few words before the arrival word: "not received", "never
+// uploaded", "hasn't been received", "not yet complete", "no upload received".
+const NOT_ARRIVED = /(\bnot|\bnever|\bno|n't|\bhasnt|\bhavent|\bisnt|\bwasnt|\barent|\bnothing|\bnone|\bnor|\bwithout)\s+(?:[a-z]+\s+){0,3}?(received|uploaded|complete|completed|done|ready)\b|\b(incomplete|unreceived|not\s*yet)\b/i
+/** Text that says the upload never arrived; getUpload refuses a link in it. */
+const saysNotArrived = text => NOT_ARRIVED.test(plainPunctuation(text))
+const saysReceived = text => ARRIVED.test(plainPunctuation(text))
 
 /** Text that says the upload has not arrived yet, so a link in it is not the clip. */
 function saysWaiting(text) {
@@ -168,8 +174,9 @@ export async function getUpload(client, token, waitSeconds = 20) {
     const s = parsedHttps(structured?.url)
     if (s && !isAgentPage(s)) url = s.href
     // A link in prose is the clip only when nothing says the upload is still to
-    // come, and, with no structured status to lean on, the text says it arrived.
-    else if (structured?.url == null && !saysWaiting(text) && (status !== null || saysReceived(text))) url = uploadUrlFromText(text)
+    // come or that it never arrived, and, with no structured status to lean on,
+    // the text says it arrived.
+    else if (structured?.url == null && !saysWaiting(text) && !saysNotArrived(text) && (status !== null || saysReceived(text))) url = uploadUrlFromText(text)
   }
   return { url, status: url ? (status ?? 'done') : (status && !UPLOAD_DONE.has(status) ? status : 'pending'), pending: !url, mime: structured?.mime ?? null, text, structured }
 }

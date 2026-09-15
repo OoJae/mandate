@@ -162,11 +162,17 @@ test('a revocation only in the merged view, with no Verifiable Memory copy, refu
   assert.match(d.reason, /publisher cannot be established/)
 })
 
-test('a stranger\'s published revocation appears in the merged view too, but is judged by its publisher', async () => {
+test('a stranger\'s published revocation is judged by its publisher', async () => {
   const g = grant()
-  const k = await readKnowledge(new FakeNode({ world: world([grantKa(g), revocationKa(g.id, { publisher: STRANGER })]) }), cfg(), { subject: SUBJECT })
+  const kas = [grantKa(g), revocationKa(g.id, { publisher: STRANGER })]
+  // A live node that did not publish the stranger's state holds no merged-view copy of it.
+  const k = await readKnowledge(new FakeNode({ world: world(kas), mergedView: false }), cfg(), { subject: SUBJECT })
   assert.equal(decide(req(), k).permit, true)
   assert.equal(k.forgeries[0].kind, 'state-not-by-grantor')
+  // Trade-off: only a copy under the grant owner's prefix explains a merged-view row, so on a
+  // node that materialised the stranger's state (the stranger's own node) the view copy refuses.
+  const own = await readKnowledge(new FakeNode({ world: world(kas) }), cfg(), { subject: SUBJECT })
+  assert.equal(decide(req(), own).clause, 'not-revoked')
 })
 
 test('verify by file: edges from trusted producers, grants from the grantor they cite', async () => {
@@ -802,4 +808,99 @@ test('contract 3 end to end: the grantor\'s own revocation also typed LikenessGr
     assert.equal(k.states.length, 1)
     assert.equal(decide(req(), k).clause, 'not-revoked')
   }
+})
+
+test('D6 one view per graph: a second view graph left out of the first attempt only is caught', async () => {
+  // G1's own revocation gives this node a merged view (context/1), so a view is expected;
+  // G2 is revoked only in a second view graph, context/9, which the first answer leaves out.
+  const g1 = grant()
+  const g2 = grant()
+  const s = 'urn:mandate:state:00000000000009a9'
+  const view = { graph: `${cgIri(GRANTS_CG)}/context/9`, rows: [{ s, p: V.stateOf, o: g2.id }, { s, p: V.state, o: '"revoked"' }] }
+  const kas = [grantKa(g1), grantKa(g2), revocationKa(g1.id)]
+  const clean = await readKnowledge(new FakeNode({ world: world(kas, [], { grantGraphs: [view] }) }), cfg(), { subject: SUBJECT })
+  assert.equal(clean.consistency.ok, true, clean.consistency.reason)
+  const node = new FakeNode({
+    world: world(kas, [], { grantGraphs: [view] }),
+    drop: ({ graph }) => graph?.endsWith('/context/9') && node.calls.filter(c => c.kind === 'states').length <= 3,
+  })
+  const k = await readKnowledge(node, cfg(), { subject: SUBJECT })
+  assert.equal(k.consistency.ok, false)
+  assert.match(k.consistency.reason, /shows 2 merged view graphs on different attempts/)
+  const d = decide(req(), k)
+  assert.equal(d.permit, false)
+  // Seen on the same attempts, two view graphs are not a split.
+  assert.equal(clean.states.filter(x => x.tier === 'context').length, 1)
+  assert.equal(decide(req(), clean).clause, 'not-revoked')
+})
+
+test('D6: an expected view that shows on the first attempt still gets a second attempt', async () => {
+  const g = grant()
+  const node = new FakeNode({ world: world([grantKa(g), revocationKa(g.id)]) })
+  const k = await readKnowledge(node, cfg(), { subject: SUBJECT })
+  assert.equal(k.consistency.ok, true, k.consistency.reason)
+  const perAttempt = node.calls.filter(c => c.kind === 'states').length
+  const bare = new FakeNode({ world: world([grantKa(grant())]) })
+  await readKnowledge(bare, cfg(), { subject: SUBJECT })
+  // No state is expected in the bare world, so discovery stops after one attempt; with a view expected it takes two.
+  assert.equal(perAttempt, 2 * bare.calls.filter(c => c.kind === 'states').length)
+})
+
+test('R19: a subscriptions entry whose subscribed flag is not exactly true is not held', async () => {
+  const g = grant({ maxSpendUsd: 5 })
+  for (const subscribed of ['false', 'true', 1, null]) {
+    const node = new FakeNode({ world: world([grantKa(g)], [derivationKa(derivation({ authorizedUnder: g.id, billedUsd: 4.5 }))]) })
+    const entry = { contextGraphId: DERIVS_CG.toLowerCase(), subscribed }
+    node.subscriptions = async () => [{ contextGraphId: GRANTS_CG, subscribed: true }, entry]
+    const k = await readKnowledge(node, cfg({ derivationsCgs: [DERIVS_CG.toLowerCase()], trustedProducers: [PRODUCER] }), { subject: SUBJECT })
+    assert.equal(k.consistency.ok, false, String(subscribed))
+    assert.match(k.consistency.reason, /not subscribed to context graph/)
+  }
+  const missing = new FakeNode({ world: world([grantKa(g)], [derivationKa(derivation({ authorizedUnder: g.id, billedUsd: 4.5 }))]) })
+  missing.subscriptions = async () => [{ contextGraphId: DERIVS_CG.toLowerCase() }]
+  const km = await readKnowledge(missing, cfg({ derivationsCgs: [DERIVS_CG.toLowerCase()], trustedProducers: [PRODUCER] }), { subject: SUBJECT })
+  assert.equal(km.consistency.ok, false)
+  assert.match(km.consistency.reason, /not subscribed to context graph/)
+  const held = new FakeNode({ world: world([grantKa(g)], [derivationKa(derivation({ authorizedUnder: g.id, billedUsd: 4.5 }))]) })
+  held.subscriptions = async () => [{ contextGraphId: DERIVS_CG.toLowerCase(), subscribed: true }]
+  const kh = await readKnowledge(held, cfg({ derivationsCgs: [DERIVS_CG.toLowerCase()], trustedProducers: [PRODUCER] }), { subject: SUBJECT })
+  assert.equal(kh.consistency.ok, true, kh.consistency.reason)
+})
+
+test('a grant permitting only editorial, read from the node, refuses advertising at use-class-permitted', async () => {
+  const g = grant({ permitsUseClass: ['editorial'], forbidsUseClass: [] })
+  const k = await readKnowledge(new FakeNode({ world: world([grantKa(g)]) }), cfg(), { subject: SUBJECT })
+  assert.equal(k.consistency.ok, true)
+  assert.deepEqual(k.grants[0].permitsUseClass, ['editorial'])
+  const d = decide(req({ useClass: 'advertising' }), k)
+  assert.equal(d.permit, false)
+  assert.equal(d.clause, 'use-class-permitted')
+  assert.equal(decide(req({ useClass: 'editorial' }), k).permit, true)
+})
+
+test('with the freshness check off, every read says so in its warnings', async () => {
+  for (const over of [{}, { checkFreshness: false }]) {
+    const k = await readKnowledge(new FakeNode({ world: world([grantKa(grant())]) }), cfg(over), { subject: SUBJECT })
+    assert.equal(k.consistency.ok, true)
+    assert.ok(k.warnings.some(w => /^freshness not checked/.test(w)), JSON.stringify(over))
+    assert.ok(decide(req(), k).warnings.some(w => /^freshness not checked/.test(w)), 'the decision carries it')
+  }
+  const node = new FakeNode({ world: world([grantKa(grant())]) })
+  node.reconcile = async () => ({ status: 'current', headOrdinal: 1, watermarkAfter: 1 })
+  const checked = await readKnowledge(node, cfg({ checkFreshness: true }), { subject: SUBJECT })
+  assert.ok(!checked.warnings.some(w => /^freshness not checked/.test(w)), 'no such warning when the check ran')
+})
+
+test('a revocation a consistent read accepts is remembered by that read, and honoured when a later read misses it', async () => {
+  const g = grant()
+  const store = memoryStateStore()
+  const first = await readKnowledge(new FakeNode({ world: world([grantKa(g), revocationKa(g.id)]) }), cfg({ stateStore: store }), { subject: SUBJECT })
+  assert.equal(first.consistency.ok, true)
+  const saved = store.load(GRANTS_CG)
+  assert.equal(saved.revocations[g.id]?.stateOf, g.id, 'the read saved the revocation it accepted')
+  // Forget the anchors, so only the remembered revocation protects the next read.
+  store.save(GRANTS_CG, { ...saved, knownUals: {} })
+  const later = await readKnowledge(new FakeNode({ world: world([grantKa(g)]) }), cfg({ stateStore: store }), { subject: SUBJECT })
+  assert.ok(later.warnings.some(w => /seen before but is missing from this read/.test(w)))
+  assert.equal(decide(req(), later).clause, 'not-revoked')
 })

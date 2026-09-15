@@ -68,18 +68,20 @@ test('descriptor returns null for a missing asset', async () => {
   assert.equal(await n.descriptor('missing', CG), null)
 })
 
+const HAPPY_AUTHOR = '0x' + 'C3'.repeat(20)
+const HAPPY_UAL = `did:dkg:base:84532/${HAPPY_AUTHOR.toLowerCase()}/7`
 const happy = (over = {}) => [
   { method: 'GET', path: /^\/api\/knowledge-assets\/g1\?/, times: 1, status: 404, body: { error: 'No knowledge asset' } },
-  { method: 'POST', path: '/api/knowledge-assets', status: 201, body: { status: 'wm-sealed', merkleRoot: '0xroot', authorAddress: '0xAUTHOR', assertionUri: 'a' } },
+  { method: 'POST', path: '/api/knowledge-assets', status: 201, body: { status: 'wm-sealed', merkleRoot: '0xroot', authorAddress: HAPPY_AUTHOR, assertionUri: 'a' } },
   { method: 'POST', path: '/api/knowledge-assets/g1/swm/share', body: { swmShared: true, promotedCount: 1 } },
   { method: 'POST', path: '/api/knowledge-assets/g1/vm/publish', status: over.publishStatus ?? 200,
-    body: over.publishBody ?? { status: 'confirmed', ual: 'did:dkg:base:84532/0xauthor/7', txHash: '0xtx', blockNumber: 1 } },
+    body: over.publishBody ?? { status: 'confirmed', ual: HAPPY_UAL, txHash: '0xtx', blockNumber: 1 } },
 ]
 
 test('sealShareAnchor succeeds only after a confirmed, bound publish', async () => {
   const { n, calls } = node(happy())
-  const r = await n.sealShareAnchor({ name: 'g1', contextGraphId: CG, quads: QUADS, expectAuthor: '0xauthor', sleep: noSleep })
-  assert.equal(r.ual, 'did:dkg:base:84532/0xauthor/7')
+  const r = await n.sealShareAnchor({ name: 'g1', contextGraphId: CG, quads: QUADS, expectAuthor: HAPPY_AUTHOR.toLowerCase(), sleep: noSleep })
+  assert.equal(r.ual, HAPPY_UAL)
   assert.equal(r.txHash, '0xtx')
   assert.deepEqual(calls.map(c => c.method + ' ' + c.path.split('?')[0]), [
     'GET /api/knowledge-assets/g1', 'POST /api/knowledge-assets', 'POST /api/knowledge-assets/g1/swm/share', 'POST /api/knowledge-assets/g1/vm/publish'])
@@ -370,8 +372,15 @@ test('resume of a verified published asset returns it and never publishes again'
 test('resume refuses a tentative, unanchored, foreign or unknown asset and never publishes', async () => {
   const cases = [
     ['tentative', { status: 'vm-confirmed', publishedUal: `did:dkg:base:84532/${AUTHOR}/t1`, agentAddress: AUTHOR }, metaRows()],
-    ['no _meta anchor', { status: 'vm-confirmed', publishedUal: VUAL, agentAddress: AUTHOR }, []],
-    ['unconfirmed _meta anchor', { status: 'vm-confirmed', publishedUal: VUAL, agentAddress: AUTHOR }, metaRows({ status: 'tentative' })],
+    ['_meta anchor with two statuses', { status: 'vm-confirmed', publishedUal: VUAL, agentAddress: AUTHOR }, metaRows({ status: ['confirmed', 'tentative'] })],
+    ['_meta anchor with another status', { status: 'vm-confirmed', publishedUal: VUAL, agentAddress: AUTHOR }, metaRows({ status: 'failed' })],
+    ['_meta anchor with two assertion graphs', { status: 'vm-confirmed', publishedUal: VUAL, agentAddress: AUTHOR }, metaRows({ graph: [`did:dkg:context-graph:${VCG}/_verifiable_memory/${AUTHOR}/10`, `did:dkg:context-graph:${VCG}/_verifiable_memory/${AUTHOR}/11`] })],
+    ['_meta anchor for another graph', { status: 'vm-confirmed', publishedUal: VUAL, agentAddress: AUTHOR }, metaRows({ graph: `did:dkg:context-graph:${VCG}/_verifiable_memory/${AUTHOR}/11` })],
+    ['_meta anchor attributed to someone else', { status: 'vm-confirmed', publishedUal: VUAL, agentAddress: AUTHOR }, metaRows({ attributedTo: `did:dkg:agent:0x${'b2'.repeat(20)}` })],
+    ['_meta anchor with two triple counts', { status: 'vm-confirmed', publishedUal: VUAL, agentAddress: AUTHOR }, metaRows({ count: ['1', '2'] })],
+    ['_meta anchor with an unreadable triple count', { status: 'vm-confirmed', publishedUal: VUAL, agentAddress: AUTHOR }, metaRows({ count: 'many' })],
+    ['a tentative _meta anchor recording two merkle roots', { status: 'vm-confirmed', publishedUal: VUAL, vmCurrentAssertion: ROOT.slice(2), agentAddress: AUTHOR }, metaRows({ status: 'tentative', extra: [[`${DKGNS}merkleRoot`, `"${ROOT}"`], [`${DKGNS}merkleRoot`, `"0x${'cd'.repeat(32)}"`]] })],
+    ['a tentative _meta anchor recording another merkle root', { status: 'vm-confirmed', publishedUal: VUAL, vmCurrentAssertion: ROOT.slice(2), agentAddress: AUTHOR }, metaRows({ status: 'tentative', extra: [[`${DKGNS}merkleRoot`, `"0x${'cd'.repeat(32)}"`]] })],
     ['no published UAL', { status: 'vm-confirmed', agentAddress: AUTHOR }, metaRows()],
     ['working copy changed', { status: 'vm-confirmed', publishedUal: VUAL, vmCurrentAssertion: ROOT.slice(2), wmCurrentAssertion: 'cd'.repeat(32), agentAddress: AUTHOR }, metaRows()],
     ['draft', { status: 'draft-open', agentAddress: AUTHOR }, metaRows()],
@@ -427,6 +436,67 @@ test('a _meta read that fails while resuming a published asset is retryable (res
   // The same asset resumes once the read works.
   const { n } = node(existingAsset(published))
   assert.equal((await resume(n)).ual, VUAL)
+})
+
+test('an empty or incomplete _meta answer while resuming a published asset is retryable, not a permanent refusal', async () => {
+  const published = { status: 'vm-confirmed', state: 'published', publishedUal: VUAL, vmCurrentAssertion: ROOT.slice(2), agentAddress: AUTHOR }
+  const drop = p => metaRows().filter(r => r.p !== p)
+  for (const [label, meta] of [
+    ['no rows for the UAL (the _meta graph left out of the answer)', []],
+    ['a lone tentative status (not confirmed yet)', metaRows({ status: 'tentative' })],
+    ['no status', metaRows({ status: null })],
+    ['no assertion graph', drop(`${DKGNS}assertionGraph`)],
+    ['no triple count', metaRows({ count: null })],
+    ['no kaUal self-link', drop(`${DKGNS}kaUal`)],
+    ['a tentative status recording the sealed merkle root', metaRows({ status: 'tentative', extra: [[`${DKGNS}merkleRoot`, `"${ROOT.toUpperCase().replace('0X', '0x')}"`]] })],
+  ]) {
+    const routes = existingAsset(published)
+    routes[4].body = { result: { type: 'bindings', bindings: meta } }
+    const { n, calls } = node(routes)
+    await assert.rejects(resume(n), e => e instanceof DkgWriteError && e.stage === 'resume-unverified' && e.mayHaveSent === false && e.ual === VUAL, label)
+    assert.ok(!calls.some(c => c.method === 'POST' && c.path.startsWith('/api/knowledge-assets')), `${label}: nothing is written`)
+  }
+})
+
+test('a 200 confirmed publish whose UAL or merkle root does not match the seal is reconciled, never taken at its word', async () => {
+  const OTHER = '0x' + 'b2'.repeat(20)
+  for (const [label, body] of [
+    ['a tentative /t UAL', { status: 'confirmed', ual: `did:dkg:base:84532/${AUTHOR}/t99`, txHash: '0xtx' }],
+    ['another publisher\'s UAL', { status: 'confirmed', ual: `did:dkg:base:84532/${OTHER}/10`, txHash: '0xtx' }],
+    ['another merkle root', { status: 'confirmed', ual: VUAL, txHash: '0xtx', merkleRoot: `0x${'cd'.repeat(32)}` }],
+    ['an unreadable merkle root', { status: 'confirmed', ual: VUAL, txHash: '0xtx', merkleRoot: 7 }],
+    ['a UAL that is not a string', { status: 'confirmed', ual: ['x'], txHash: '0xtx' }],
+  ]) {
+    // The node's own records do not show the asset published, so reconciling cannot succeed.
+    const { n, calls } = node(lost({ publishError: { status: 200, body }, descriptor: { status: 'swm-shared', agentAddress: AUTHOR } }))
+    await assert.rejects(seal(n), e => transportFailure(e) && e.txHash === '0xtx' && /did not confirm/.test(e.message), label)
+    assert.equal(calls.filter(c => c.method === 'GET').length, 2, `${label}: the node's record is consulted`)
+    // When the node's records do prove the sealed asset, the reconciled UAL is the proven one.
+    const ok = node(lost({ publishError: { status: 200, body } }))
+    const r = await seal(ok.n)
+    assert.equal(r.ual, VUAL, label)
+    assert.equal(r.reconciled, true, label)
+  }
+  // A matching answer, root spelled in any case with or without 0x, is taken without a reconcile.
+  for (const merkleRoot of [ROOT, ROOT.slice(2).toUpperCase(), undefined, null]) {
+    const { n, calls } = node(lost({ publishError: { status: 200, body: { status: 'confirmed', ual: VUAL, txHash: '0xtx', merkleRoot } } }))
+    const r = await seal(n)
+    assert.equal(r.ual, VUAL)
+    assert.equal(r.reconciled, undefined, String(merkleRoot))
+    assert.equal(calls.filter(c => c.method === 'GET').length, 1)
+  }
+})
+
+test('a 4xx publish answer whose body is too large to read is reconciled like a lost answer', async () => {
+  for (const [label, meta, expect] of [['proven by the node', metaRows(), 'ok'], ['not proven', [], 'transport']]) {
+    const f = fakeFetch(lost({ meta }))
+    const fetch = async (url, init) => (new URL(url).pathname.endsWith('/vm/publish')
+      ? new Response('x'.repeat(8192), { status: 409 })
+      : f.fetch(url, init))
+    const n = new DkgNode({ port: 9999, name: 'fake', token: 'tok', fetch, maxResponseBytes: 4096 })
+    if (expect === 'ok') assert.equal((await seal(n)).reconciled, true, label)
+    else await assert.rejects(seal(n), e => transportFailure(e) && e.status === 409, label)
+  }
 })
 
 test('resume after a publish of unknown outcome never publishes a shared asset again', async () => {

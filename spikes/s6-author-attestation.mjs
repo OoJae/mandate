@@ -8,9 +8,12 @@
  * This spike creates a draft on Ana's node, finalizes it, and reports the
  * author address the seal actually carries.
  */
-import { GRANTOR, PRODUCER } from '../bin/config.mjs'
+import { GRANTOR, PRODUCER, loadScriptEnv } from '../bin/config.mjs'
 import { grantToTurtle } from '../src/rdf.mjs'
 import { writeFileSync } from 'node:fs'
+
+// The CLI's env file (--env-path, MANDATE_ENV_FILE or ~/.mandate/.env); a working-directory .env is never read.
+loadScriptEnv()
 
 const grantor = GRANTOR()
 const producer = PRODUCER()

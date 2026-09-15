@@ -23,11 +23,12 @@
  *
  *   node spikes/s6c-forgery.mjs            (spends ~6 Base Sepolia publishes)
  *   node spikes/s6c-forgery.mjs --reread   (step 3 only, from the saved evidence)
+ *   add --env-path <path> to read settings from that file (default ~/.mandate/.env)
  */
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { writeFileSync, readFileSync } from 'node:fs'
-import { GRANTOR, PRODUCER, VERIFIER, grantsCg, derivationsCg, readConfig } from '../bin/config.mjs'
+import { GRANTOR, PRODUCER, VERIFIER, grantsCg, derivationsCg, readConfig, loadScriptEnv } from '../bin/config.mjs'
 import { readKnowledge } from '../src/resolve.mjs'
 import { decide, revocationOf } from '../src/gate.mjs'
 import { memoryStateStore } from '../src/state-store.mjs'
@@ -35,6 +36,8 @@ import { DkgNode, DkgWriteError } from '../src/dkg.mjs'
 import { literalTerm, dateTimeTerm, nonce16, agentAddress } from '../src/rdf-term.mjs'
 import * as V from '../src/vocab.mjs'
 
+// The CLI's env file (--env-path, MANDATE_ENV_FILE or ~/.mandate/.env), handed on to every CLI call.
+const envFile = loadScriptEnv()
 const run = promisify(execFile)
 const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type'
 const log = []
@@ -44,7 +47,7 @@ const evidence = { startedAt: new Date().toISOString(), grantor: {}, forgeries: 
 async function cli(args) {
   const t = Date.now()
   try {
-    const { stdout } = await run(process.execPath, ['bin/mandate.mjs', ...args, '--yes', '--json'], { maxBuffer: 1 << 24 })
+    const { stdout } = await run(process.execPath, ['bin/mandate.mjs', ...args, ...(envFile.path ? ['--env-path', envFile.path] : []), '--yes', '--json'], { maxBuffer: 1 << 24 })
     return { code: 0, ms: Date.now() - t, out: JSON.parse(stdout) }
   } catch (e) {
     return { code: e.code, ms: Date.now() - t, out: e.stdout ? JSON.parse(e.stdout) : { error: e.message } }

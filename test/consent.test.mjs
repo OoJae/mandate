@@ -221,6 +221,16 @@ test('a guard phrase removes only its own words: "I don\'t mind no ads" refuses 
   assert.ok(scope('I consent to a talking head for ads. No problem, not in the UK.').contradicted.includes('GB'))
 })
 
+test('a word-for-word reading is not confirmed when the heuristics hear a term contradicted, even with consent affirmed', () => {
+  // A use class label carrying a negator makes the script itself refuse a later term.
+  const req = { capability: ['talking-head'], useClass: ['advertising', 'but-not-politics'], territory: ['GB'] }
+  const r = checkSpokenScope(consentScript(req), req)
+  assert.equal(r.scriptMatch.matched, true)
+  assert.equal(r.checks[0].matched, true)
+  assert.deepEqual(r.contradicted, ['GB'])
+  assert.equal(r.confirmed, false)
+})
+
 test('questions, conditionals and reported speech are not consent', () => {
   for (const t of [
     'Do I consent to a talking head for advertising in the UK?',
@@ -462,11 +472,12 @@ test('D1: a clean reading of the script is confirmed, and says which words it co
 
 test('D1: realistic ASR renderings of the script are still confirmed', () => {
   for (const t of [
-    'Um, so, hi. I consent to a talking-head of my likeness for advertising in the U.K. until the 13th of December 2026. Spending is capped at five US dollars. Okay.',
-    'i consent to talking head of my likeness for advertising in the uk until december 13th, twenty twenty-six. spending is capped at $5',
-    'I consent to talking head of my likeness for advertising in the United Kingdom until thirteenth December two thousand and twenty six. Spending is capped at 5 dollars.',
-    'Uh, I consent to talking head of likeness for advertising in UK until 13 December 2026. Spending capped at 5 USD. Yes.',
-    'I consent to talking head of my likeness for advertising in United Kingdom until December the 13th 2026. Spending is capped at $5.00.',
+    'Hi. I consent to a talking-head of my likeness for advertising in the U.K. until the 13th of December 2026. Spending is capped at five US dollars.',
+    'i consent to talking head of my likeness for advertising in the uk until december 13th, twenty twenty-six. spending is capped at us$5',
+    'I consent to talking head of my likeness for advertising in the United Kingdom until thirteenth December two thousand and twenty six. Spending is capped at 5 American dollars.',
+    'Hello, I consent to talking head my likeness for advertising UK until 13 December 2026. Spending is capped at 5 USD.',
+    'I consent to talking head of my likeness for advertising in United Kingdom until December the 13th 2026. Spending is capped at US$5.00.',
+    'I consent to talking head of my likeness for advertising in United Kingdom until 13 December 2026. Spending is capped at five United States dollars.',
   ]) {
     const r = checkSpokenScope(t, FULL)
     assert.equal(r.confirmed, true, `${t} -> ${JSON.stringify(r.scriptMatch)} ${JSON.stringify(r.contradicted)}`)
@@ -474,8 +485,8 @@ test('D1: realistic ASR renderings of the script are still confirmed', () => {
   const lip = { capability: ['lipsync'], useClass: ['advertising', 'education'], territory: ['GB', 'US'], maxSpendUsd: '2.50' }
   assert.equal(consentScript(lip), 'I consent to lip sync of my likeness for advertising and education in United Kingdom and United States. Spending is capped at 2.50 US dollars.')
   for (const t of [
-    'I consent to lipsync of my likeness for advertising and education in the U.K. and the U.S.A. Spending is capped at two point five dollars.',
-    'I consent to lip-sync of my likeness for advertising and education in the UK and the US. Spending is capped at $2.5.',
+    'I consent to lipsync of my likeness for advertising and education in the U.K. and the U.S.A. Spending is capped at two point five U.S. dollars.',
+    'I consent to lip-sync of my likeness for advertising and education in the UK and the US. Spending is capped at US $2.5.',
   ]) assert.equal(checkSpokenScope(t, lip).confirmed, true, `${t} -> ${JSON.stringify(matchScript(t, lip))}`)
 })
 
@@ -492,11 +503,12 @@ test('D1: a missing critical word, a third missing word, a changed number or any
   differs(SCRIPT.replace('until 13', 'until 12'), ['13'], ['12'])
   differs(SCRIPT.replace('at 5', 'at 50'), ['5'], ['50'])
   differs(SCRIPT.replace(' of my likeness', ''), ['of', 'my', 'likeness'], [])
-  // Two non-critical words may go missing (ASR drops short words); not three.
-  assert.equal(matchScript(SCRIPT.replace(' of my', ''), FULL).matched, true)
+  // Two non-critical joining words may go missing (ASR drops short words); not three.
+  assert.equal(matchScript(SCRIPT.replace(' is capped at', ' capped'), FULL).matched, true)
+  differs(SCRIPT.replace(' is capped at', ' capped').replace(' to ', ' '), ['to', 'is', 'at'], [])
   differs(SCRIPT.replace('for advertising', 'not for advertising'), [], ['not'])
   differs(SCRIPT.replace('in United Kingdom', 'in United Kingdom but'), [], ['but'])
-  differs(`${SCRIPT} Yeah right.`, [], ['right'])
+  differs(`${SCRIPT} Yeah right.`, [], ['yeah', 'right'])
   differs('', null, [])
 })
 
@@ -641,7 +653,109 @@ test('D1: filler is closed: no negator, conjunction or conditional is ever ignor
   for (const w of ['not', 'no', 'but', 'and', 'if', 'unless', 'when', 'right', 'never', 'except']) {
     assert.equal(matchScript(`${SCRIPT} ${w}`, FULL).matched, false, w)
   }
-  for (const w of ['um', 'uh', 'so', 'okay', 'yes', 'hello']) assert.equal(matchScript(`${w} ${SCRIPT} ${w}`, FULL).matched, true, w)
+  for (const w of ['hi', 'hello', 'a', 'an', 'the']) assert.equal(matchScript(`${w} ${SCRIPT} ${w}`, FULL).matched, true, w)
+})
+
+/* ------------- round four: filler that can say no, amounts that differ ------------- */
+
+// Every vocal sound and discourse word that used to be ignored. Each can carry a
+// refusal ("uh-uh", "mm-mm", "yeah, yeah"), so none is filler any more.
+const NOT_FILLER = ['uh', 'uhh', 'um', 'umm', 'er', 'erm', 'ah', 'hmm', 'mm', 'mhm', 'nuh', 'unh', 'yes', 'yeah', 'okay', 'ok', 'so', 'well', 'hey']
+const INTERJECTIONS = ['Uh-uh', 'Uh uh', 'Uh, uh', 'Mm-mm', 'Mm mm', 'Hmm-mm', 'Hmm mm', 'Ah-ah', 'Ah ah', 'Nuh-uh', 'Nuh uh', 'Mhm-mhm', 'Mhm mhm', 'Unh-unh', 'Uh-uh-uh', 'Uh-uh. Uh-uh', 'Mm-mm, mm-mm', 'Uh', 'Um', 'Er', 'Erm', 'Ah', 'Hmm', 'Mm', 'Mhm', 'Yeah, yeah', 'Okay, okay', 'Yes, yes', 'Well', 'So', 'Hey']
+
+test('B1: a negative interjection made of vocal sounds beside a word-for-word reading is never confirmed', () => {
+  const places = [
+    ['after', i => `${SCRIPT} ${i}.`],
+    ['before', i => `${i}. ${SCRIPT}`],
+    ['inside, after the consent clause', i => SCRIPT.replace('of my likeness', `of my likeness, ${i},`)],
+    ['inside, in the amount', i => SCRIPT.replace('capped at 5', `capped at, ${i}, 5`)],
+    ['between the sentences', i => SCRIPT.replace('2026. ', `2026. ${i}. `)],
+  ]
+  for (const i of INTERJECTIONS) {
+    for (const [where, place] of places) {
+      const t = place(i)
+      assert.notEqual(t, SCRIPT)
+      const m = matchScript(t, FULL)
+      assert.equal(m.matched, false, `${where}: ${t}`)
+      assert.ok(m.extra.length > 0, `${where}: ${t}`)
+      assert.deepEqual(m.missing, [], `${where}: ${t}`)
+      assert.equal(checkSpokenScope(t, FULL).confirmed, false, `${where}: ${t}`)
+    }
+  }
+  // The hyphenated and spaced forms say the same words, and all of them are extra.
+  assert.deepEqual(matchScript(`${SCRIPT} Uh-uh.`, FULL).extra, ['uh', 'uh'])
+  assert.deepEqual(matchScript(`Mm-mm. ${SCRIPT}`, FULL).extra, ['mm', 'mm'])
+  assert.deepEqual(matchScript(`${SCRIPT} Hmm mm.`, FULL).extra, ['hmm', 'mm'])
+  // Even one sound alone is extra: none of them is ignored.
+  for (const w of NOT_FILLER) {
+    assert.deepEqual(matchScript(`${SCRIPT} ${w}`, FULL).extra, [w], w)
+    assert.deepEqual(matchScript(`${w} ${SCRIPT}`, FULL).extra, [w], w)
+  }
+  // The remaining filler cannot be built into a refusal: only greetings and
+  // articles, in any order and number, are still a reading.
+  for (const t of [`Hi, hello. ${SCRIPT} The, a, an.`, `Hello hello. ${SCRIPT}`, `${SCRIPT} The the.`]) {
+    assert.equal(checkSpokenScope(t, FULL).confirmed, true, t)
+  }
+  // A clean reading, and a lightly filled one, are still confirmed.
+  assert.equal(checkSpokenScope(SCRIPT, FULL).confirmed, true)
+  assert.equal(checkSpokenScope(`Hi. ${SCRIPT.replace('in United', 'in the United')}`, FULL).confirmed, true)
+  assert.equal(checkSpokenScope(consentScript(REQ), REQ).confirmed, true)
+})
+
+test('B1: the reported leak through the full check: script plus "Uh-uh" is UNCONFIRMED, never contradicted-free confirmation', () => {
+  for (const t of [`${SCRIPT} Uh-uh.`, `Mm-mm. ${SCRIPT}`, `${SCRIPT} Hmm-mm.`, `${SCRIPT} Uh uh.`, `Uh-uh. ${SCRIPT}`, `${SCRIPT} Ah-ah.`, `${SCRIPT} Nuh-uh.`, `${SCRIPT} Mhm-mhm.`]) {
+    const r = checkSpokenScope(t, FULL)
+    assert.equal(r.confirmed, false, t)
+    assert.equal(r.scriptMatch.matched, false, t)
+    assert.match(r.note, /UNCONFIRMED|CONTRADICTS/, t)
+  }
+})
+
+test('B1: an ordinal is never an amount: "a fifth US dollars" is not 5', () => {
+  for (const t of [
+    SCRIPT.replace('capped at 5', 'capped at a fifth'),
+    SCRIPT.replace('capped at 5', 'capped at an eighth'),
+    SCRIPT.replace('capped at 5', 'capped at fifth'),
+    SCRIPT.replace('capped at 5 US dollars', 'capped at a fifth of a US dollar'),
+  ]) {
+    const m = matchScript(t, FULL)
+    assert.equal(m.matched, false, t)
+    assert.equal(checkSpokenScope(t, FULL).confirmed, false, t)
+  }
+  assert.deepEqual(matchScript(SCRIPT.replace('capped at 5', 'capped at a fifth'), FULL).missing, ['5'])
+  assert.deepEqual(scriptWords('a fifth US dollars'), ['a', 'fifth', 'usdollars'])
+  assert.deepEqual(scriptWords('fifth dollars'), ['fifth', 'dollars'])
+  // After "a" or "an" an ordinal is a fraction wherever it stands.
+  assert.deepEqual(scriptWords('a fifth of it'), ['a', 'fifth', 'of', 'it'])
+  assert.equal(matchScript(SCRIPT.replace('until 13 December', 'until a thirteenth December'), FULL).matched, false)
+  // A day of the month is still an ordinal, with or without "the".
+  assert.deepEqual(scriptWords('the thirteenth of December twenty twenty six'), ['the', '13', 'december', '2026'])
+  assert.equal(checkSpokenScope(SCRIPT.replace('13 December', 'the thirteenth of December'), FULL).confirmed, true)
+  // An amount said as a cardinal still reads.
+  assert.equal(checkSpokenScope(SCRIPT.replace('capped at 5', 'capped at five'), FULL).confirmed, true)
+})
+
+test('B1: dollars of no named country are not US dollars', () => {
+  for (const t of [
+    SCRIPT.replace('5 US dollars', 'five dollars'),
+    SCRIPT.replace('5 US dollars', '5 dollars'),
+    SCRIPT.replace('5 US dollars', '$5'),
+    SCRIPT.replace('5 US dollars', '5 dollar'),
+    SCRIPT.replace('5 US dollars', '5 Canadian dollars'),
+  ]) {
+    const m = matchScript(t, FULL)
+    assert.equal(m.matched, false, t)
+    assert.deepEqual(m.missing, ['usdollars'], t)
+    assert.equal(checkSpokenScope(t, FULL).confirmed, false, t)
+  }
+  for (const t of [
+    SCRIPT.replace('5 US dollars', '5 USD'),
+    SCRIPT.replace('5 US dollars', 'US$5'),
+    SCRIPT.replace('5 US dollars', '5 U.S. dollars'),
+    SCRIPT.replace('5 US dollars', '5 American dollars'),
+    SCRIPT.replace('5 US dollars', '5 United States dollars'),
+    SCRIPT.replace('5 US dollars', 'five US dollar'),
+  ]) assert.equal(checkSpokenScope(t, FULL).confirmed, true, `${t} -> ${JSON.stringify(matchScript(t, FULL))}`)
 })
 
 /* ------------------ heuristics: refusals the first round missed ------------------ */
@@ -745,8 +859,11 @@ test('a transcript body that fails mid-stream is a ConsentError at stage asr, an
   const erroring = async () => new Response(new ReadableStream({ start(c) { c.enqueue(new TextEncoder().encode('I ')); c.error(new Error('socket hang up')) } }), { headers: { 'content-type': 'text/plain' } })
   await assert.rejects(transcribe(stubClient({ run_capability: [asrOk(CLIP, { url: 'https://storage.example/t.txt' })] }), CLIP, { fetch: erroring }), e => asrError('asr')(e) && /socket hang up/.test(e.message))
   let cancelled = false
+  // Long but finite: without the cap the body ends and is read as speech, so
+  // removing the cap fails this test instead of hanging it.
+  let chunks = 0
   const endless = async () => new Response(new ReadableStream({
-    pull(c) { c.enqueue(new Uint8Array(4096).fill(0x61)) },
+    pull(c) { if (chunks++ < 256) c.enqueue(new Uint8Array(4096).fill(0x61)); else c.close() },
     cancel() { cancelled = true },
   }), { headers: { 'content-type': 'text/plain' } })
   await assert.rejects(transcribe(stubClient({ run_capability: [asrOk(CLIP, { url: 'https://storage.example/t.txt' })] }), CLIP, { fetch: endless, maxBytes: 10_000 }), /byte limit/)
@@ -832,9 +949,224 @@ test('a transcript link body with a NUL byte is binary, even when it decodes as 
 })
 
 test('D1: a transcript far longer than the script is not aligned, and not a match', () => {
-  const long = `${SCRIPT} ${'um '.repeat(5000)}`
+  // Padded only with filler ("the"), which the alignment alone would ignore: the length cap is what refuses it.
+  const long = `${SCRIPT} ${'the '.repeat(5000)}`
   const t0 = Date.now()
   const r = matchScript(long, FULL)
   assert.equal(r.matched, false)
   assert.ok(Date.now() - t0 < 2000)
+  // Words that are not filler are listed, at most 50 of them.
+  const noisy = matchScript(`${SCRIPT} ${'um '.repeat(5000)}`, FULL)
+  assert.equal(noisy.matched, false)
+  assert.equal(noisy.extra.length, 50)
+})
+
+/* ------------- round three: other scripts, questions, critical words ------------- */
+
+test('D1: a refusal or mark in another script, an emoji or a symbol is extra, never thrown away', () => {
+  const base = consentScript(REQ)
+  assert.equal(checkSpokenScope(base, REQ).confirmed, true)
+  for (const t of [
+    `${SCRIPT} \u041d\u0435\u0442, \u044f \u043d\u0435 \u0441\u043e\u0433\u043b\u0430\u0441\u0435\u043d.`, // Cyrillic
+    `${SCRIPT} \u6211\u4e0d\u540c\u610f`, // CJK
+    `${SCRIPT} \u3044\u3044\u3048\u3001\u540c\u610f\u3057\u307e\u305b\u3093`, // Japanese
+    `${SCRIPT} \u0644\u0627\u060c \u0644\u0627 \u0623\u0648\u0627\u0641\u0642`, // Arabic
+    `${SCRIPT} \u0928\u0939\u0940\u0902`, // Devanagari
+    `${SCRIPT} \u038c\u03c7\u03b9.`, // Greek
+    `${SCRIPT} \u05dc\u05d0`, // Hebrew
+    `${SCRIPT} \u274c`,
+    `${SCRIPT} \ud83d\udc4e`,
+    `${SCRIPT} \ud83d\udeab`,
+    `${SCRIPT} \u2717`,
+    `${SCRIPT} \u0274\u1d0f\u1d1b`, // small capitals, which NFKD does not fold
+    `${SCRIPT} \u0665`, // an Arabic-Indic digit
+    SCRIPT.replace('advertising', 'advertising \u2717'),
+    SCRIPT.replace('advertising', 'advertising \ud83d\udeab'),
+    SCRIPT.replace('I consent', '\u042f \u043d\u0435 I consent'),
+    SCRIPT.replace('in United', 'in (\u043d\u0435) United'),
+    SCRIPT.replace('capped at 5', 'capped at 5 \u4e0d'),
+  ]) {
+    const m = matchScript(t, FULL)
+    assert.equal(m.matched, false, t)
+    assert.ok(m.extra.length > 0, t)
+    assert.equal(checkSpokenScope(t, FULL).confirmed, false, t)
+  }
+  assert.deepEqual(matchScript(`${SCRIPT} \u2717`, FULL).extra, ['\u2717'])
+  assert.deepEqual(scriptWords('advertising \u6211\u4e0d\u540c\u610f in'), ['advertising', '\u6211\u4e0d\u540c\u610f', 'in'])
+  // A transcript wholly in another script is never confirmed, and was not empty.
+  for (const t of ['\u042f \u0441\u043e\u0433\u043b\u0430\u0441\u0435\u043d.', '\u6211\u540c\u610f', '\u2705']) {
+    const r = checkSpokenScope(t, REQ)
+    assert.equal(r.confirmed, false, t)
+    assert.equal(r.empty, false, t)
+  }
+  // Accents and fullwidth or Roman-numeral forms fold to the same word, so they still read.
+  assert.equal(checkSpokenScope(SCRIPT.replace('I consent', 'I c\u00f3nsent'), FULL).confirmed, true)
+})
+
+test('D1: a reading said as a question, or broken so no first-person consent is heard, is not confirmed', () => {
+  for (const [t, req] of [
+    [`${SCRIPT}?`, FULL],
+    [SCRIPT.replace('5 US dollars.', '5 US dollars?'), FULL],
+    [SCRIPT.replace('2026.', '2026?'), FULL],
+    [`${consentScript(REQ).replace(/\.$/, '')}?`, REQ],
+    [`\u00bf${consentScript(REQ)}`, REQ],
+    [`${consentScript(REQ)} \u061f`, REQ],
+    [`So ${consentScript(REQ).replace(/\.$/, '?')}`, REQ],
+  ]) {
+    const r = checkSpokenScope(t, req)
+    assert.equal(r.confirmed, false, t)
+  }
+  assert.deepEqual(matchScript(`${SCRIPT}?`, FULL), { matched: false, missing: [], extra: ['?'] })
+  // Every word of the script and nothing else, but the heuristics hear no
+  // affirmative first-person consent: only a person may confirm it.
+  const broken = SCRIPT.replace('I consent', 'I. Consent')
+  const r = checkSpokenScope(broken, FULL)
+  assert.equal(r.scriptMatch.matched, true)
+  assert.equal(r.affirmative, false)
+  assert.equal(r.confirmed, false)
+})
+
+test('D1: each critical word dropped alone is a miss, even within the allowance', () => {
+  for (const [from, to, word] of [
+    [' until 13', ' 13', 'until'],
+    ['capped at 5', 'at 5', 'capped'],
+    ['at 5 US', 'at US', '5'],
+    ['of my likeness', 'of likeness', 'my'],
+    ['of my likeness', 'of the likeness', 'my'],
+    ['of my likeness', 'of a likeness', 'my'],
+    ['my likeness for', 'my for', 'likeness'],
+    ['Spending is', 'Is', 'spending'],
+    ['5 US dollars', '5', 'usdollars'],
+  ]) {
+    const t = SCRIPT.replace(from, to)
+    assert.notEqual(t, SCRIPT)
+    const m = matchScript(t, FULL)
+    assert.equal(m.matched, false, t)
+    assert.deepEqual(m.missing, [word], t)
+    assert.equal(checkSpokenScope(t, FULL).confirmed, false, t)
+  }
+})
+
+test('a transcript link that redirects off https is refused; a redirect that stays on https is not', async () => {
+  const landed = url => async () => Object.defineProperty(new Response('I consent to a talking head.', { headers: { 'content-type': 'text/plain' } }), 'url', { value: url })
+  const via = f => transcribe(stubClient({ run_capability: [asrOk(CLIP, { url: 'https://storage.example/t.txt' })] }), CLIP, { fetch: f })
+  await assert.rejects(via(landed('http://evil.example/t.txt')), e => asrError('asr')(e) && /redirected off https/.test(e.message))
+  await assert.rejects(via(landed('ftp://evil.example/t.txt')), /redirected off https/)
+  assert.equal((await via(landed('https://cdn.example/t.txt'))).transcript, 'I consent to a talking head.')
+  assert.equal((await via(landed('http://127.0.0.1:9/t.txt'))).transcript, 'I consent to a talking head.')
+})
+
+test('a transcript link body shorter than its declared length is truncated and refused', async () => {
+  const serve = (body, headers) => async () => new Response(body, { headers: { 'content-type': 'text/plain', ...headers } })
+  const via = f => transcribe(stubClient({ run_capability: [asrOk(CLIP, { url: 'https://storage.example/t.txt' })] }), CLIP, { fetch: f })
+  const said = 'I consent to a talking head.'
+  await assert.rejects(via(serve(said, { 'content-length': String(Buffer.byteLength(said) + 20) })), e => asrError('asr')(e) && /truncated/.test(e.message))
+  assert.equal((await via(serve(said, { 'content-length': String(Buffer.byteLength(said)) }))).transcript, said)
+  // A compressed body's declared length is not its decoded length.
+  assert.equal((await via(serve(said, { 'content-length': '9', 'content-encoding': 'gzip' }))).transcript, said)
+  assert.equal((await via(serve(said, {}))).transcript, said)
+})
+
+test('a transcript link that answers an HTTP error, invalid UTF-8, or an endless body is refused', async () => {
+  const via = f => transcribe(stubClient({ run_capability: [asrOk(CLIP, { url: 'https://storage.example/t.txt' })] }), CLIP, { fetch: f })
+  await assert.rejects(via(async () => new Response('I consent to a talking head.', { status: 500, headers: { 'content-type': 'text/plain' } })), e => asrError('asr')(e) && /HTTP 500/.test(e.message))
+  await assert.rejects(via(async () => new Response('I consent to a talking head.', { status: 404, headers: { 'content-type': 'text/plain' } })), /HTTP 404/)
+  const invalid = Buffer.concat([Buffer.from('I consent to a talking head '), Buffer.from([0xc3, 0x28]), Buffer.from('.')])
+  await assert.rejects(via(async () => new Response(invalid, { headers: { 'content-type': 'text/plain' } })), /did not return UTF-8/)
+  // A long stream with no declared length: the cap stops it, not the end of the body.
+  let sent = 0
+  let cancelled = false
+  const long = async () => new Response(new ReadableStream({
+    pull(c) { if (sent++ < 64) c.enqueue(new Uint8Array(4096).fill(0x61)); else c.close() },
+    cancel() { cancelled = true },
+  }), { headers: { 'content-type': 'text/plain' } })
+  await assert.rejects(transcribe(stubClient({ run_capability: [asrOk(CLIP, { url: 'https://storage.example/t.txt' })] }), CLIP, { fetch: long, maxBytes: 10_000 }), /byte limit/)
+  assert.equal(cancelled, true)
+  assert.ok(sent < 64)
+})
+
+test('an ASR reply whose output_kind is not text is refused, even with result.text', async () => {
+  const said = { text: 'I consent to a talking head for advertising in the UK.' }
+  for (const kind of ['image', 'video', 'audio']) {
+    await assert.rejects(transcribe(stubClient({ run_capability: [asrOk(CLIP, { output_kind: kind, result: said })] }), CLIP), new RegExp(`${kind} output, not text`))
+  }
+  assert.equal((await transcribe(stubClient({ run_capability: [asrOk(CLIP, { output_kind: undefined, result: said })] }), CLIP)).transcript, said.text)
+})
+
+test('ASR failure flags outside the live shape are refused: success, failed, errors, error_message, partial, truncated, deeper nesting', async () => {
+  const said = { text: 'I consent to a talking head for advertising in the UK.' }
+  for (const [fields, why] of [
+    [{ result: { ...said, success: 0 } }, /success is 0/],
+    [{ result: { ...said, success: null } }, /success is null/],
+    [{ result: { ...said, success: 'false' } }, /success is/],
+    [{ result: { ...said, failed: true } }, /marked it failed/],
+    [{ failed: 1, result: said }, /marked it failed/],
+    [{ result: { ...said, errors: ['model crashed'] } }, /model crashed/],
+    [{ result: { ...said, errors: 'model crashed' } }, /model crashed/],
+    [{ result: { ...said, errors: { code: 5 } } }, /code/],
+    [{ result: { ...said, error_message: 'crashed' } }, /crashed/],
+    [{ result: { ...said, partial: true } }, /partial/],
+    [{ result: { ...said, truncated: true } }, /truncated/],
+    [{ output: { truncated: 'yes' }, result: said }, /truncated/],
+    [{ result: { ...said, result: { status: 'failed' } } }, /status failed/],
+    [{ result: { ...said, output: { ok: false } } }, /ok: false/],
+    [{ result: [{ status: 'failed' }], transcript: said.text }, /status failed/],
+    [{ output: [said, { error: 'second segment lost' }], transcript: said.text }, /second segment lost/],
+  ]) {
+    await assert.rejects(transcribe(stubClient({ run_capability: [asrOk(CLIP, fields)] }), CLIP), e => asrError('asr')(e) && why.test(e.message), JSON.stringify(fields))
+  }
+  // The same flags saying all is well are not failures.
+  const fine = await transcribe(stubClient({ run_capability: [asrOk(CLIP, { result: { ...said, success: true, failed: false, errors: [], error_message: '', partial: false, truncated: false } })] }), CLIP)
+  assert.equal(fine.transcript, said.text)
+  // A JSON transcript link is read the same way.
+  const serve = body => async () => new Response(JSON.stringify(body), { headers: { 'content-type': 'application/json' } })
+  await assert.rejects(transcribe(stubClient({ run_capability: [asrOk(CLIP, { url: 'https://storage.example/t.json' })] }), CLIP, { fetch: serve({ ...said, truncated: true }) }), /truncated/)
+})
+
+test('getUpload: a status that is not finished beats any link, structured or in prose', async () => {
+  const up = async (structured, text = '') => getUpload(stubClient({ get_upload: [ok(structured, text)] }), 'abc')
+  for (const [structured, text] of [
+    [{ status: 'pending', url: 'https://agent.livepeer.org/a/x.mp4' }, ''],
+    [{ status: 'uploading', url: 'https://agent.livepeer.org/a/x.mp4' }, 'Received https://agent.livepeer.org/a/x.mp4'],
+    [{ status: 'waiting' }, 'Received https://agent.livepeer.org/a/x.mp4'],
+    [{ status: 'failed' }, 'Uploaded: https://agent.livepeer.org/a/x.mp4'],
+  ]) {
+    const r = await up(structured, text)
+    assert.equal(r.url, null, JSON.stringify([structured, text]))
+    assert.equal(r.pending, true)
+  }
+  assert.equal((await up({ status: 'done', url: 'https://agent.livepeer.org/a/x.mp4' })).url, 'https://agent.livepeer.org/a/x.mp4')
+})
+
+test('the text URL fallback does not read a negated arrival as arrival', async () => {
+  const up = async (structured, text) => getUpload(stubClient({ get_upload: [ok(structured, text)] }), 'abc')
+  for (const text of [
+    'Upload not received. https://agent.livepeer.org/a/x.mp4',
+    'The upload hasn\u2019t been received: https://agent.livepeer.org/a/x.mp4',
+    'Never uploaded. https://agent.livepeer.org/a/x.mp4',
+    'No upload received for https://agent.livepeer.org/a/x.mp4',
+    'Upload is not complete https://agent.livepeer.org/a/x.mp4',
+    'Upload incomplete https://agent.livepeer.org/a/x.mp4',
+  ]) {
+    assert.equal((await up(null, text)).url, null, text)
+    assert.equal((await up({ status: 'done' }, text)).url, null, text)
+  }
+  assert.equal((await up(null, 'Received: https://agent.livepeer.org/a/abc.mp4')).url, 'https://agent.livepeer.org/a/abc.mp4')
+  assert.equal((await up(null, 'Upload complete. https://agent.livepeer.org/a/abc.mp4')).url, 'https://agent.livepeer.org/a/abc.mp4')
+})
+
+test('a reading followed by a question mark from any script is never confirmed, the Greek one (which NFKD folds to ";") included', () => {
+  const req = { capability: ['sync-lipsync-v3'], useClass: ['advertising'], territory: ['GB'], validUntil: '2026-12-13T00:00:00Z', maxSpendUsd: 5 }
+  const script = consentScript(req)
+  assert.equal(checkSpokenScope(script, req).confirmed, true)
+  // A plain semicolon is punctuation, not a question.
+  assert.equal(checkSpokenScope(`${script};`, req).confirmed, true)
+  const marks = [';', '՞', '፧', '᥅', '⳺', '⳻', '꘏', '꛷', '\u{11143}', '\u{1e95f}', '⁇', '︖', '﹖', '？']
+  for (const q of marks) {
+    const r = checkSpokenScope(`${script}${q}`, req)
+    assert.equal(r.confirmed, false, `U+${q.codePointAt(0).toString(16)}`)
+    assert.ok(r.scriptMatch.extra.includes('?'), `U+${q.codePointAt(0).toString(16)}: ${r.scriptMatch.extra}`)
+    // Straight after a year, where "2026՞" once read as the date.
+    assert.ok(scriptWords(`2026${q}`).includes('?'), `U+${q.codePointAt(0).toString(16)}`)
+  }
 })

@@ -5,14 +5,18 @@
  *
  *   node scripts/publish-ontology.mjs            (dry run: parse and count)
  *   node scripts/publish-ontology.mjs --publish  (one Base Sepolia publish)
+ *   add --env-path <path> to read settings from that file (default ~/.mandate/.env)
  *
  * Writes the UAL and transaction to docs/evidence/ontology-<version>.json.
  */
 import { readFileSync, writeFileSync } from 'node:fs'
 import { Parser } from 'n3'
-import { GRANTOR } from '../bin/config.mjs'
+import { GRANTOR, loadScriptEnv } from '../bin/config.mjs'
 import { literalTerm, agentAddress } from '../src/rdf-term.mjs'
 import { txLink } from '../bin/ui.mjs'
+
+// The CLI's env file; a .env in the working directory is never read.
+loadScriptEnv()
 
 const OWL_VERSION = 'http://www.w3.org/2002/07/owl#versionInfo'
 const ttl = readFileSync('vocab/mandate.ttl', 'utf8')

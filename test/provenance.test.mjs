@@ -322,6 +322,25 @@ test('a GrantState whose stateOf cannot be read is unreadable, never silently dr
   }
 })
 
+test('the grantor\'s own untyped statement whose stateOf about its own grant cannot be read is unreadable, not dropped', () => {
+  const g = grant()
+  const base = [[V.state, '"revoked"'], [V.stateAuthor, did(ANA)]]
+  for (const [name, pairs] of Object.entries({
+    'a literal stateOf': [[V.stateOf, `"${g.id}"`], ...base],
+    'two stateOf values': [[V.stateOf, g.id], [V.stateOf, grant().id], ...base],
+    'typed only LikenessGrant, literal stateOf': [[RDF_TYPE, V.LikenessGrant], [V.stateOf, `"${g.id}"`], ...base],
+  })) {
+    const out = reduceGrants(read(grantKa(g), ownState(g.id, pairs)))
+    assert.equal(out.states.length, 0, name)
+    assert.equal(out.unreadable.length, 1, name)
+    assert.match(out.unreadable[0].reason, /unreadable stateOf/, name)
+    assert.equal(out.forgeries.find(f => f.detail === 'unreadable stateOf')?.trusted, true, name)
+  }
+  // A literal stateOf naming someone else's grant is still not this publisher's statement.
+  const foreign = reduceGrants(read(grantKa(g), ownState(g.id, [[V.stateOf, `"${grant({ owner: STRANGER, local: 'sam' }).id}"`], ...base])))
+  assert.deepEqual([foreign.states.length, foreign.unreadable.length], [0, 0])
+})
+
 test('an object with an unreadable rdf:type is unreadable', () => {
   const g = grant()
   const k = grantKa(g)
@@ -436,4 +455,64 @@ test('the graph count guard: more graphs visible than anchored plus pending is i
   assert.equal(checkConsistency({ prefix, anchors, contentRows: g1.contentRows, visibleGraphCount: 1 }).ok, true)
   assert.match(checkConsistency({ prefix, anchors, contentRows: g1.contentRows, visibleGraphCount: 2 }).reason, /shows 2 graphs .* but 1 are anchored/)
   assert.equal(checkConsistency({ prefix, anchors, contentRows: g1.contentRows, visibleGraphCount: 2, pendingGraphs: new Set([`${prefix}999`]) }).ok, true)
+})
+
+test('a clause value outside its pattern makes the grant malformed, never a value that matches nothing', () => {
+  for (const [predicate, value, detail] of [
+    [V.forbidsUseClass, '"Political"', 'invalid forbidsUseClass'],
+    [V.permitsUseClass, '"Advertising"', 'invalid permitsUseClass'],
+    [V.territory, '"gb"', 'invalid territory'],
+    [V.permitsCapability, '"Talking Head"', 'invalid permitsCapability'],
+  ]) {
+    const k = grantKa(grant())
+    const i = k.contentRows.findIndex(r => r.p === predicate)
+    assert.ok(i >= 0, `fixture precondition: ${detail}`)
+    k.contentRows[i] = { ...k.contentRows[i], o: value }
+    const out = reduceGrants(read(k))
+    assert.equal(out.grants.length, 0, detail)
+    assert.equal(out.forgeries.length, 1, detail)
+    assert.equal(out.forgeries[0].kind, 'malformed', detail)
+    assert.equal(out.forgeries[0].detail, detail)
+    assert.equal(out.forgeries[0].trusted, true, detail)
+  }
+})
+
+test('a grant with no capability, or a window that ends before it starts, or a repeated clause value, is malformed', () => {
+  const cases = [
+    ['no permitsCapability', k => { k.contentRows = k.contentRows.filter(r => r.p !== V.permitsCapability) }],
+    ['validUntil is not after validFrom', k => {
+      const until = k.contentRows.find(r => r.p === V.validUntil)
+      const from = k.contentRows.find(r => r.p === V.validFrom)
+      assert.ok(until && from, 'fixture precondition: a window')
+      from.o = until.o
+    }],
+    ['duplicate territory', k => { k.contentRows.push({ ...k.contentRows.find(r => r.p === V.territory) }) }],
+  ]
+  for (const [detail, change] of cases) {
+    const k = grantKa(grant({ territory: ['GB'] }))
+    change(k)
+    const out = reduceGrants(read(k))
+    assert.equal(out.grants.length, 0, detail)
+    assert.equal(out.forgeries[0]?.kind, 'malformed', detail)
+    assert.equal(out.forgeries[0].detail, detail)
+  }
+})
+
+test('a trusted edge with an unreadable hash or grant IRI is a malformed forgery, not an edge; a state in a derivations graph is misplaced', () => {
+  for (const [predicate, object, detail] of [
+    [V.outputSha256, '"not-a-hash"', 'invalid outputSha256'],
+    [V.authorizedUnder, '<urn:mandate:grant:bad"iri>', 'invalid authorizedUnder'],
+  ]) {
+    const d = derivation({ authorizedUnder: grant().id })
+    const out = reduceDerivs(read(swap(derivationKa(d), predicate, object)))
+    assert.equal(out.derivations.length, 0, detail)
+    assert.equal(out.forgeries[0]?.kind, 'malformed', detail)
+    assert.equal(out.forgeries[0].detail, detail)
+  }
+  const g = grant()
+  const state = revocationKa(g.id)
+  const k = ka({ cg: DERIVS_CG, publisher: PRODUCER, quads: state.contentRows.map(r => ({ subject: r.s, predicate: r.p, object: r.o })) })
+  const out = reduceDerivs(read(k))
+  assert.equal(out.states.length, 0)
+  assert.equal(out.forgeries[0]?.kind, 'misplaced-state')
 })

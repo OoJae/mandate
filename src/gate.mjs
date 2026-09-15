@@ -10,6 +10,25 @@
  * not claims: the resolver attributes every grant and revocation to the address
  * that anchored it, and the gate re-checks that attribution here, so knowledge
  * assembled by hand gets the same scrutiny as knowledge read from a node.
+ *
+ * That scrutiny covers attribution, not completeness. The gate believes
+ * `knowledge.consistency.ok`, so a caller composing knowledge by hand from
+ * anchorsFromMeta and reduceSlice (src/provenance.mjs) instead of readKnowledge
+ * must also run the resolver's consistency rules (readPublisher in
+ * src/resolve.mjs) and set ok to false when any of them fails:
+ *   - checkConsistency over each publisher's prefix: the node's graph count
+ *     matches the anchors, every anchored graph returns its declared triple
+ *     count, no returned graph lacks a confirmed anchor, and no previously seen
+ *     UAL is missing;
+ *   - no anchorsFromMeta problem (an unconfirmed anchor may hide a revocation);
+ *   - no content row with an unreadable graph;
+ *   - an empty `unreadable` list from reduceSlice: a grantor's revocation whose
+ *     stateOf cannot be read lands there, not in `states`, so skipping this rule
+ *     loses the revocation and the gate permits;
+ *   - an empty read believed only when every attempt answered.
+ * readKnowledge also reads merged-view and shared-memory revocations, remembered
+ * anchors and revocations, and (with checkFreshness) the node's lag behind the
+ * chain; hand-built knowledge without them has none of those protections.
  */
 import { isProhibitedUseClass } from './policy.mjs'
 import { grantIriAddress } from './provenance.mjs'
@@ -67,6 +86,22 @@ export function grantIsAuthentic(g) {
 const STATE_TIERS = new Set(['vm', 'context', 'swm'])
 
 /**
+ * Is this state's malformed flag set? Anything but absent or exactly false counts:
+ * hand-built knowledge writing "true" or 1 must not un-revoke.
+ */
+export const isMalformedState = s => s?.malformed !== undefined && s.malformed !== null && s.malformed !== false
+
+/**
+ * The first state that cannot be attributed at all: no publisher and no tier the
+ * resolver produces. Nothing says whose it is or where it was read, so it cannot
+ * be judged as a revocation or set aside; the knowledge is incomplete.
+ */
+export function unattributedState(states) {
+  return (Array.isArray(states) ? states : []).find(s => s && typeof s === 'object'
+    && typeof s.publisher !== 'string' && !STATE_TIERS.has(s.tier)) ?? null
+}
+
+/**
  * Revocation state of one grant. Terminal: any accepted revocation, at any time,
  * ends the grant — renewing means publishing a new grant id. A revocation
  * counts when its anchor's address is the grant's publisher, or when it appears
@@ -83,11 +118,28 @@ export function revocationOf(grant, states = []) {
   const counted = about.filter(s => {
     const byGrantor = typeof s.publisher === 'string' && s.publisher.toLowerCase() === grant.publisher.toLowerCase()
     if (byGrantor && !STATE_TIERS.has(s.tier)) return true
-    const revokes = s.state !== 'active' || s.malformed === true
+    const revokes = s.state !== 'active' || isMalformedState(s)
     return revokes && ((s.tier === 'vm' && byGrantor) || s.tier === 'context')
   })
   counted.sort((a, b) => String(a.ual ?? a.id).localeCompare(String(b.ual ?? b.id)))
   return { revoked: counted.length > 0, by: counted[0] ?? null, all: counted }
+}
+
+/**
+ * Unreadable copies of grant ids, counted by id: records the reducer rejected
+ * whose id is a grant id and whose publisher is the address that id names. Only
+ * that address can publish a copy; anyone else's is a forgery, not a copy. The
+ * gate refuses a grant with one, and the verifier does not call it CLEAR.
+ */
+export function unreadableGrantCopies(forgeries = []) {
+  const unreadableCopies = new Map()
+  for (const f of Array.isArray(forgeries) ? forgeries : []) {
+    if (typeof f?.id !== 'string' || typeof f.publisher !== 'string') continue
+    // Only the address an id names can publish a copy of it: anyone else's is a forgery, not a copy.
+    if (grantIriAddress(f.id) !== f.publisher.toLowerCase()) continue
+    unreadableCopies.set(f.id, (unreadableCopies.get(f.id) ?? 0) + 1)
+  }
+  return unreadableCopies
 }
 
 /**
@@ -130,6 +182,8 @@ function knowledgeProblem(k) {
   // grant would be missed, and its spend would read as nothing.
   for (const f of ['grants', 'states', 'derivations', 'forgeries']) if (!Array.isArray(k[f])) return `knowledge.${f} is not a list`
   if (k.consistency?.ok !== true) return k.consistency?.reason ?? 'knowledge carries no consistency result'
+  const orphan = unattributedState(k.states)
+  if (orphan) return `state ${orphan.ual ?? orphan.id ?? '(no id)'} about ${orphan.stateOf ?? '(no grant)'} has neither a publisher nor a tier`
   return null
 }
 
@@ -173,6 +227,10 @@ export function decide(request, knowledge) {
   // win. Neither copy is used.
   const copies = new Map()
   for (const g of knowledge.grants.filter(grantIsAuthentic)) copies.set(g.id, (copies.get(g.id) ?? 0) + 1)
+  // A copy the reducer rejected counts too, when it sits in the prefix of the
+  // address its id names: it is the grantor's own second copy, perhaps the one
+  // that narrows the grant, and ignoring it would leave the looser copy in force.
+  const unreadableCopies = unreadableGrantCopies(forgeries)
 
   // Each grant is checked on its own, clause by clause; the refusal names the
   // furthest clause any grant reached, since that is the one a person can act on.
@@ -182,8 +240,10 @@ export function decide(request, knowledge) {
   }
 
   for (const g of candidates) {
-    if (copies.get(g.id) > 1) {
-      fail(0, 'grant-exists', g, `grant ${g.id} is published more than once (${copies.get(g.id)} copies), so which one applies cannot be established`)
+    const unreadableCopy = unreadableCopies.get(g.id) ?? 0
+    if (copies.get(g.id) + unreadableCopy > 1) {
+      const n = copies.get(g.id) + unreadableCopy
+      fail(0, 'grant-exists', g, `grant ${g.id} is published more than once (${n} copies${unreadableCopy ? `, ${unreadableCopy} of them unreadable` : ''}), so which one applies cannot be established`)
       continue
     }
     // Clause lists must be real lists: String.prototype.includes would let

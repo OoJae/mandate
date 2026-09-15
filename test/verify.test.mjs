@@ -328,6 +328,31 @@ test('the grantor\'s untiered or malformed state revokes in verify too', async (
   assert.equal(verifyKnowledge({ ...k, states: [st({ publisher: STRANGER })] }, SHA, { now: NOW }).verdict, CLEAR)
 })
 
+test('a trusted forgery claiming the file\'s hash in uppercase hex taints a clear edge', async () => {
+  const k = await knowledgeOf([grantKa(g), edge()])
+  assert.equal(verifyKnowledge(k, SHA, { now: NOW }).verdict, CLEAR, 'precondition')
+  const forgery = { kind: 'malformed', trusted: true, detail: 'invalid servedCapability', id: 'urn:mandate:derivation:x', publisher: PRODUCER,
+    ual: 'did:dkg:base:84532/p/77', claims: { outputSha256: [SHA.toUpperCase()], stateOf: [], authorizedUnder: [g.id], subject: [] } }
+  const r = verifyKnowledge({ ...k, forgeries: [forgery] }, SHA, { now: NOW })
+  assert.equal(r.forgeries.length, 1)
+  assert.equal(r.verdict, TAINTED)
+  assert.equal(r.subStatus, 'MALFORMED')
+})
+
+test('a truthy non-boolean malformed flag revokes, and a state with neither publisher nor tier is INCONCLUSIVE', async () => {
+  const k = await knowledgeOf([grantKa(g), edge()])
+  const st = over => ({ id: 'urn:mandate:state:1', stateOf: g.id, state: 'active', tier: 'vm', publisher: ANA, ...over })
+  const m = verifyKnowledge({ ...k, states: [st({ malformed: 'true' })] }, SHA, { now: NOW })
+  assert.equal(m.subStatus, 'REVOKED')
+  assert.match(m.reason, /malformed, and counts/)
+  assert.ok(m.warnings.some(w => /malformed state assertion/.test(w)))
+  for (const over of [{ publisher: undefined, tier: undefined, state: 'revoked' }, { publisher: null, tier: 'other' }]) {
+    const r = verifyKnowledge({ ...k, states: [st(over)] }, SHA, { now: NOW })
+    assert.equal(r.verdict, INCONCLUSIVE, JSON.stringify(over))
+    assert.match(r.reason, /neither a publisher nor a tier/)
+  }
+})
+
 test('an edge hash in uppercase hex is the same file', async () => {
   const g2 = grant({ permitsCapability: ['talking-head'] })
   const k = await knowledgeOf([grantKa(g), grantKa(g2), revocationKa(g2.id), edge(), edge({ authorizedUnder: g2.id })])
@@ -336,4 +361,21 @@ test('an edge hash in uppercase hex is the same file', async () => {
   assert.equal(r.judgements.length, 2)
   assert.equal(r.verdict, TAINTED)
   assert.equal(r.subStatus, 'REVOKED')
+})
+
+test('a grant whose grantor also published an unreadable second copy of it is TAINTED MALFORMED, never CLEAR; a stranger\'s copy changes nothing', async () => {
+  const twoUntils = [{ subject: g.id, predicate: V.validUntil, object: '"2026-11-01T00:00:00Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>' }]
+  const narrowed = { ...g, territory: ['GB'], permitsUseClass: ['advertising'], maxSpendUsd: 1 }
+  const k = await knowledgeOf([grantKa(g), grantKa(narrowed, { extraContent: twoUntils }), edge()])
+  assert.equal(k.grants.length, 1, 'precondition: one readable copy')
+  assert.ok(k.forgeries.some(f => f.id === g.id && f.publisher === ANA), 'precondition: the grantor\'s own copy did not parse')
+  const r = verifyKnowledge(k, SHA, { now: NOW })
+  assert.equal(r.verdict, TAINTED)
+  assert.equal(r.subStatus, 'MALFORMED')
+  assert.match(r.reason, /published more than once \(2 copies, 1 of them unreadable\)/)
+  assert.ok(r.forgeries.some(f => f.id === g.id), 'the unreadable copy is shown')
+  // The same copy published by anyone else is a forgery, not a copy of Ana's grant.
+  const stolen = await knowledgeOf([grantKa(g), grantKa(narrowed, { publisher: STRANGER }), edge()])
+  assert.ok(stolen.forgeries.some(f => f.id === g.id && f.publisher === STRANGER), 'precondition: the stranger\'s copy is a forgery')
+  assert.equal(verifyKnowledge(stolen, SHA, { now: NOW }).verdict, CLEAR)
 })

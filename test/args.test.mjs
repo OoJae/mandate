@@ -83,3 +83,60 @@ test('help text does not overclaim: verify reads the graph, the deny list is lab
   assert.match(grant, /--force .*Never overrides a failed transcription/)
   assert.match(grant, /--yes .*Never skips confirming a consent clip/)
 })
+
+test('B7: every command takes --env-path; Node\'s own --env-file is refused with a pointer to it', () => {
+  for (const command of Object.keys(COMMANDS)) {
+    assert.equal(parseArgs([command, '--env-path', '/etc/mandate.env', '--help']).flags.envPath, '/etc/mandate.env')
+    assert.match(helpText(command), /--env-path/)
+  }
+  assert.equal(parseArgs(['verify', '--env-path=/x/y.env', '--sha256', 'a'.repeat(64)]).flags.envPath, '/x/y.env')
+  for (const spelling of [['--env-file', '/x.env'], ['--env-file=/x.env'], ['--env-file-if-exists', '/x.env']]) {
+    assert.throws(() => parseArgs(['status', ...spelling]), e => e instanceof UsageError && /NODE_OPTIONS/.test(e.message) && /--env-path/.test(e.message))
+  }
+  assert.throws(() => parseArgs(['status', '--env-path']), /--env-path needs a value/)
+})
+
+test('B7: loadScriptEnv (publish-ontology, the spikes) refuses --env-file, needs a path after --env-path, and exits 1 for a named file it cannot read', async () => {
+  const { loadScriptEnv } = await import('../bin/config.mjs')
+  const { mkdtempSync, writeFileSync, rmSync } = await import('node:fs')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+  const run = argv => {
+    const out = { log: [], error: [], code: null }
+    try {
+      const r = loadScriptEnv(argv, { log: m => out.log.push(m), error: m => out.error.push(m), exit: c => { throw Object.assign(new Error('exit'), { exitCode: c }) } })
+      out.result = r
+    } catch (e) {
+      if (e.exitCode === undefined) throw e
+      out.code = e.exitCode
+    }
+    return out
+  }
+  for (const argv of [['--env-file', '/x.env'], ['--env-file=/x.env'], ['--env-file-if-exists', '/x.env']]) {
+    const r = run(argv)
+    assert.equal(r.code, 1, argv.join(' '))
+    assert.match(r.error.join('\n'), /NODE_OPTIONS[^]*--env-path/)
+  }
+  for (const argv of [['--env-path'], ['--env-path', '--publish']]) {
+    const r = run(argv)
+    assert.equal(r.code, 1, argv.join(' '))
+    assert.match(r.error.join('\n'), /--env-path needs a path/)
+  }
+  const dir = mkdtempSync(join(tmpdir(), 'mandate-script-env-'))
+  try {
+    const missing = run(['--env-path', join(dir, 'missing.env')])
+    assert.equal(missing.code, 1)
+    assert.match(missing.error.join('\n'), /cannot be read/)
+    const file = join(dir, 'ok.env')
+    writeFileSync(file, 'MANDATE_TEST_SCRIPT_ENV=1\nNODE_OPTIONS=--require=/nonexistent\n', { mode: 0o600 })
+    const ok = run(['--publish', '--env-path', file])
+    assert.equal(ok.code, null)
+    assert.equal(ok.result.path, file)
+    assert.deepEqual(ok.log, [`env file: ${file}`])
+    assert.equal(process.env.MANDATE_TEST_SCRIPT_ENV, '1')
+    assert.equal(process.env.NODE_OPTIONS === '--require=/nonexistent', false)
+  } finally {
+    delete process.env.MANDATE_TEST_SCRIPT_ENV
+    rmSync(dir, { recursive: true, force: true })
+  }
+})

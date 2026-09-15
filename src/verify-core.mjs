@@ -25,7 +25,7 @@
  * or spend, so CLEAR says nothing about use class, territory, prohibited uses or
  * the spend ceiling; those are enforced only by the gate at render time.
  */
-import { grantIsAuthentic, revocationOf, microUsd } from './gate.mjs'
+import { grantIsAuthentic, revocationOf, microUsd, isMalformedState, unattributedState, unreadableGrantCopies } from './gate.mjs'
 import { grantIriAddress } from './provenance.mjs'
 import { asDateTime, normSha256 } from './rdf-term.mjs'
 
@@ -71,12 +71,18 @@ function judgeEdge(k, d, nowMs, unresolved) {
   // Copies of one id could disagree, and picking one would make the verdict depend on row order.
   if (found.length > 1) return out(TAINTED, 'MALFORMED', `grant ${d.authorizedUnder} is published more than once, so which one applies cannot be established`, found[0])
   const grant = found[0]
+  // The grantor's own second copy that did not parse is still a copy, perhaps the
+  // one that narrows or ends the grant; the gate refuses it, and so does this.
+  const unreadableCopy = unreadableGrantCopies(k.forgeries).get(grant.id) ?? 0
+  if (unreadableCopy > 0) {
+    return out(TAINTED, 'MALFORMED', `grant ${grant.id} is published more than once (${1 + unreadableCopy} copies, ${unreadableCopy} of them unreadable), so which one applies cannot be established`, grant)
+  }
 
   const rev = revocationOf(grant, k.states)
   if (rev.revoked) {
     return out(TAINTED, 'REVOKED', rev.by.tier === 'context'
       ? `grant ${grant.id} has a revocation whose publisher cannot be established (${rev.by.graph})`
-      : `grant ${grant.id} was revoked by ${grant.publisher}${rev.by.stateAt ? ` at ${rev.by.stateAt}` : ''}${rev.by.malformed ? ' (the revocation is malformed, and counts)' : ''}`, grant)
+      : `grant ${grant.id} was revoked by ${grant.publisher}${rev.by.stateAt ? ` at ${rev.by.stateAt}` : ''}${isMalformedState(rev.by) ? ' (the revocation is malformed, and counts)' : ''}`, grant)
   }
   if (!Array.isArray(grant.permitsCapability)) {
     return out(TAINTED, 'MALFORMED', `grant ${grant.id} has an unreadable capability clause`, grant)
@@ -136,10 +142,10 @@ export function verifyKnowledge(k, sha256, { now = new Date().toISOString() } = 
   // Records for these bytes, and rejected state assertions about a grant these bytes cite:
   // a verifier needs to see a revocation that did not parse as much as a forged edge.
   const forgeries = list(k?.forgeries).filter(f => claims(f, 'outputSha256').map(lower).includes(sha)
-    || claims(f, 'stateOf').some(g => cited.has(g)))
+    || claims(f, 'stateOf').some(g => cited.has(g)) || (typeof f?.id === 'string' && cited.has(f.id)))
   const warnings = [...list(k?.warnings)]
   for (const s of list(k?.states)) {
-    if (s?.malformed === true && cited.has(s.stateOf)) {
+    if (isMalformedState(s) && cited.has(s.stateOf)) {
       warnings.push(`a malformed state assertion ${s.ual ?? s.id ?? ''} about grant ${s.stateOf} counts as a revocation: ${list(s.problems).join('; ') || 'unreadable fields'}`)
     }
   }
@@ -153,6 +159,10 @@ export function verifyKnowledge(k, sha256, { now = new Date().toISOString() } = 
   // producer's unreadable record, so the file would verify CLEAR.
   for (const f of ['grants', 'states', 'derivations', 'forgeries']) {
     if (!Array.isArray(k[f])) return { ...base, verdict: INCONCLUSIVE, reason: `the knowledge is incomplete: knowledge.${f} is not a list` }
+  }
+  const orphan = unattributedState(k.states)
+  if (orphan) {
+    return { ...base, verdict: INCONCLUSIVE, reason: `the knowledge is incomplete: state ${orphan.ual ?? orphan.id ?? '(no id)'} has neither a publisher nor a tier` }
   }
 
   const unresolved = new Set(list(k.unresolvedGrants))

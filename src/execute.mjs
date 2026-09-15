@@ -60,6 +60,8 @@ const IN_PROGRESS = new Set(['submitted', 'queued', 'pending', 'running', 'proce
 const PAYMENT_TEXT = /\bHTTP 402\b|\b402 payment\b|\bpayment required\b|\bpayments?\b|\bpay for\b|\binsufficient (?:funds|credits?|balance)\b|\b(?:out of|no remaining|not enough|exhausted(?: your)?) (?:funds|credits?|balance)\b|\bspend(?:ing)? cap\b|\bover the cap\b|\b(?:credit|spend(?:ing)?|billing|usage) allowance\b|\bapi keys?\b|\bunauthori[sz]ed\b|\bpymthouse\b/i
 /** Phrases that say money and nothing else. They outrank a structured code nobody taught this module. */
 const STRONG_PAYMENT_TEXT = /\bHTTP 402\b|\b402 payment\b|\bpayment required\b|\binsufficient (?:funds|credits?|balance)\b|\b(?:out of|no remaining|not enough|exhausted(?: your)?) (?:funds|credits?|balance)\b/i
+/** The account-only subset: an input host can answer "402 Payment Required", but not about this account's credits. */
+const ACCOUNT_TEXT = /\binsufficient (?:funds|credits?|balance)\b|\b(?:out of|no remaining|not enough|exhausted(?: your)?) (?:funds|credits?|balance)\b/i
 const PAYMENT_CODE = /^(?:payment[_-]required|insufficient[_-](?:funds|credits?|balance)|spend[_-]cap(?:[_-]exceeded)?|over[_-]cap|unauthori[sz]ed|invalid[_-]api[_-]key|api[_-]key[_-](?:invalid|retired|revoked|missing|expired)|no[_-]credits?|billing[_-]\w+)$/i
 /** "… fetching image_url": a credential status about the render's own inputs, not the account. */
 const INPUT_FETCH = /\b(?:fetch\w*|download\w*|retriev\w*)\b|\b[a-z]+_url\b/i
@@ -84,10 +86,16 @@ function errorCode(structured) {
 export function classifyFailure(structured, text = '') {
   // URLs are not words: an input stored under /payment/receipt.jpg says nothing about the account.
   const words = String(text ?? '').replace(/\b[a-z][a-z0-9+.-]*:\/\/\S+/gi, ' ')
+    // A scheme-less host and path ("cdn.x/payment/receipt.jpg") is not words either.
+    .replace(/(?<![\w./-])[a-z0-9-]+(?:\.[a-z0-9-]+)+\/\S*/gi, ' ')
   const inputFetch = INPUT_FETCH.test(words)
   const code = errorCode(structured)
   if (code && /^\d{3}$/.test(code)) {
     if (code === '402') return 'payment'
+    // Text that can only mean money outranks a generic status code. A 401 or 403
+    // about fetching an input is the input host's answer, so only account wording counts there.
+    const credentialFetch = inputFetch && (code === '401' || code === '403')
+    if ((credentialFetch ? ACCOUNT_TEXT : STRONG_PAYMENT_TEXT).test(words)) return 'payment'
     if (code === '401') return inputFetch ? 'tool' : 'payment'
     return 'tool'
   }
@@ -100,16 +108,29 @@ export function classifyFailure(structured, text = '') {
 
 const MEDIA_EXT = /\.(mp4|webm|mov|m4v|png|jpe?g|webp|gif|wav|mp3|m4a|ogg|flac)$/i
 
+/**
+ * Hosts that serve media under a path without a file extension. Anything else
+ * must name a media file: a job or status page is not the output.
+ */
+const MEDIA_HOST_PATHS = [['agent.livepeer.org', '/a/']]
+const bareHost = h => h.toLowerCase().replace(/\.$/, '')
+function looksLikeMedia(n) {
+  const x = new URL(n)
+  if (MEDIA_EXT.test(x.pathname)) return true
+  return MEDIA_HOST_PATHS.some(([host, prefix]) => bareHost(x.hostname) === host && x.pathname.startsWith(prefix) && x.pathname.length > prefix.length)
+}
+
 const normalise = u => { try { return new URL(u).toString() } catch { return null } }
 /**
  * What makes two URLs the same resource for echo detection: host without a
- * default port, and the percent-decoded path with repeated slashes collapsed.
+ * default port or a trailing dot, and the percent-decoded path with repeated slashes collapsed.
  * Scheme, query and fragment are ignored, so an input echoed back over http,
  * with a resize query or with %70 for "p" is still the input.
  */
 const pathKey = u => {
   try {
     const x = new URL(u)
+    if (x.hostname.endsWith('.')) x.hostname = bareHost(x.hostname)
     let path = x.pathname
     try { path = decodeURIComponent(path) } catch { /* a malformed escape is compared as written */ }
     const port = x.port && x.port !== '80' && x.port !== '443' ? `:${x.port}` : ''
@@ -131,10 +152,10 @@ export function collectInputUrls(value, out = [], seen = new Set()) {
 const STRUCTURED_URL_KEYS = ['url', 'output_url', 'media_url']
 
 /**
- * The output URL of a render: the platform's structured `url` if present and
- * http(s); otherwise the first http(s) URL in the text with a media file
+ * The output URL of a render: the platform's structured `url` if present,
+ * http(s) and media (a media file extension, or a known media host path); otherwise the first http(s) URL in the text with a media file
  * extension that is not one of the render's own inputs. When the platform names
- * a structured URL that is unusable (an input, another scheme), the text is not
+ * a structured URL that is unusable (an input, another scheme, a page), the text is not
  * scanned: a reply that names its output wrongly is not trusted to quote it.
  */
 export function extractMediaUrl(structured, text = '', inputUrls = []) {
@@ -150,7 +171,7 @@ export function extractMediaUrl(structured, text = '', inputUrls = []) {
     const v = structured?.[key]
     if (v === undefined || v === null || v === '') continue
     named = true
-    if (typeof v === 'string' && usable(v)) return usable(v)
+    if (typeof v === 'string' && usable(v) && looksLikeMedia(usable(v))) return usable(v)
   }
   if (named) return null
   for (const m of String(text ?? '').match(/https?:\/\/[^\s<>"'`)\]]+/g) ?? []) {
@@ -219,14 +240,17 @@ const STATUS_HEADER = /^\W*Media job (\S+): ([A-Za-z][A-Za-z_ -]{0,39}?)[ \t\r]*
  * not a readable word.
  */
 function statusOf(s, text, jobId = null) {
+  const m = String(text ?? '').match(STATUS_HEADER)
+  // Checked before the structured status: a header about another job is a mismatch whatever else the reply says.
+  if (m) {
+    if (jobId && m[1].toLowerCase() !== jobId.toLowerCase()) {
+      throw new RenderError(`the reply for job ${jobId} is about another job (${clip(m[1]).slice(0, 60)})`, { kind: 'tool', jobId, mayHaveStarted: true })
+    }
+  }
   if (s && s.status !== undefined && s.status !== null) {
     return typeof s.status === 'string' && /^[a-z_ -]{1,40}$/i.test(s.status.trim()) ? s.status.trim().toLowerCase().replace(/[ -]+/g, '_') : null
   }
-  const m = String(text ?? '').match(STATUS_HEADER)
   if (!m) return undefined
-  if (jobId && m[1].toLowerCase() !== jobId.toLowerCase()) {
-    throw new RenderError(`the reply for job ${jobId} is about another job (${clip(m[1]).slice(0, 60)})`, { kind: 'tool', jobId, mayHaveStarted: true })
-  }
   return m[2].trim().toLowerCase().replace(/[ -]+/g, '_')
 }
 
@@ -244,11 +268,14 @@ function positive(name, v, fallback, { allowZero = false } = {}) {
 }
 
 /** Poll options, checked before anything is dispatched so a bad one never strands a billed job. */
-function pollOptions({ pollIntervalMs, maxWaitMs, sleep, now } = {}) {
+function pollOptions(poll) {
+  if (poll !== undefined && poll !== null && (typeof poll !== 'object' || Array.isArray(poll))) throw new TypeError('poll must be an object')
+  const { pollIntervalMs, maxWaitMs, sleep, now, onStatus } = poll ?? {}
   const interval = positive('pollIntervalMs', pollIntervalMs, 10_000, { allowZero: true })
   const maxWait = positive('maxWaitMs', maxWaitMs, 15 * 60_000, { allowZero: true })
   if (sleep !== undefined && typeof sleep !== 'function') throw new TypeError('sleep must be a function')
   if (now !== undefined && typeof now !== 'function') throw new TypeError('now must be a function')
+  if (onStatus !== undefined && onStatus !== null && typeof onStatus !== 'function') throw new TypeError('onStatus must be a function')
   return { interval, maxWait }
 }
 
@@ -258,12 +285,36 @@ function pollOptions({ pollIntervalMs, maxWaitMs, sleep, now } = {}) {
  * `capability` is the requested one, used for servedCapability when the job
  * does not name what served it.
  */
-export async function pollJob(client, jobId, { inputUrls = [], pollIntervalMs, maxWaitMs, sleep, now = Date.now, onStatus, capability = null } = {}) {
+export async function pollJob(client, jobId, options = {}) {
   if (typeof jobId !== 'string' || !JOB_ID.test(jobId)) {
     throw new RenderError(`cannot poll job ${clip(jobId).slice(0, 60)}: not a job id`, { kind: 'tool', jobId: null, mayHaveStarted: true })
   }
-  const { interval, maxWait } = pollOptions({ pollIntervalMs, maxWaitMs, sleep, now })
+  const { interval, maxWait } = pollOptions(options)
+  try {
+    return await pollLoop(client, jobId, { ...options, interval, maxWait })
+  } catch (e) {
+    // The job exists and may be billed: whatever went wrong, the error keeps its id.
+    if (e instanceof RenderError) throw e
+    throw followError(jobId, e)
+  }
+}
+
+function followError(jobId, e) {
+  const wrapped = new RenderError(`job ${jobId} could not be followed: ${clip(e?.message ?? e).slice(0, 200)}`, { kind: 'tool', jobId, mayHaveStarted: true })
+  wrapped.cause = e
+  return wrapped
+}
+
+/** A reply's text parts, tolerating a content that is not a list or holds non-objects. */
+const replyText = r => (Array.isArray(r?.content) ? r.content : []).map(c => (c && typeof c.text === 'string' ? c.text : '')).join('\n')
+
+async function pollLoop(client, jobId, { inputUrls = [], interval, maxWait, sleep, now: clock = Date.now, onStatus, capability = null }) {
   const wait = sleep ?? (ms => new Promise(r => setTimeout(r, ms)))
+  const now = () => {
+    const t = clock()
+    if (typeof t !== 'number' || !Number.isFinite(t)) throw new RenderError(`cannot time job ${jobId}: now() returned ${clip(String(t)).slice(0, 40)}`, { kind: 'tool', jobId, mayHaveStarted: true })
+    return t
+  }
   const start = now()
   let lastStatus = 'running'
   let s = {}
@@ -278,7 +329,7 @@ export async function pollJob(client, jobId, { inputUrls = [], pollIntervalMs, m
     }
     if (r) {
       s = r.structuredContent && typeof r.structuredContent === 'object' ? r.structuredContent : {}
-      const text = (r.content ?? []).map(c => c.text ?? '').join('\n')
+      const text = replyText(r)
       if (s.job_id !== undefined && s.job_id !== null && (typeof s.job_id !== 'string' || s.job_id.toLowerCase() !== jobId.toLowerCase())) {
         throw new RenderError(`the reply for job ${jobId} is about another job (${clip(JSON.stringify(s.job_id)).slice(0, 60)})`, { kind: 'tool', jobId, structured: s, mayHaveStarted: true })
       }
@@ -315,7 +366,7 @@ export async function pollJob(client, jobId, { inputUrls = [], pollIntervalMs, m
   }
 }
 
-const TIMEOUT = /timed? ?out|-32001|ETIMEDOUT|UND_ERR_(?:HEADERS|BODY|CONNECT)_TIMEOUT/i
+const TIMEOUT = /timed? ?out|deadline[_ ]exceeded|-32001|ETIMEDOUT|UND_ERR_(?:HEADERS|BODY|CONNECT)_TIMEOUT/i
 /** Platform wording for a render that outlived the call but was not stopped. */
 const STILL_RUNNING = /\bmay still (?:complete|finish|succeed|be running|be rendering)\b|\b(?:continues?|keeps? running|still running|runs?) in the background\b|\bstill (?:running|rendering|processing)\b/i
 
@@ -327,6 +378,7 @@ export async function dispatchRender(client, {
   capability, inputs = {}, prompt, sourceUrl, idempotencyKey, mode = 'inline', onJob, poll = {},
 }) {
   pollOptions(poll ?? {})
+  const pollWith = poll ?? {}
   const base = { capability, idempotency_key: idempotencyKey }
   if (prompt) base.prompt = prompt
   if (sourceUrl) base.source_url = sourceUrl
@@ -363,8 +415,11 @@ export async function dispatchRender(client, {
   if (structured?.ok === false) {
     // Classified before the job id is judged, so a refused payment is still a
     // payment. A malformed id still means something may have been created.
+    // Wording that the render outlived the call keeps it recoverable, as for a tool error.
     const msg = typeof structured.error === 'string' ? structured.error : (structured.error?.message ?? text)
-    throw new RenderError(`run_capability reported failure: ${clip(msg)}`, { kind: classifyFailure(structured, `${msg} ${text}`), jobId, structured, mayHaveStarted: jobId != null || malformed })
+    const said = `${msg} ${text}`
+    const outlived = TIMEOUT.test(said) || STILL_RUNNING.test(said)
+    throw new RenderError(`run_capability reported failure: ${clip(msg)}`, { kind: outlived ? 'timeout' : classifyFailure(structured, said), jobId, structured, mayHaveStarted: outlived || jobId != null || malformed })
   }
   if (malformed) {
     throw new RenderError(`run_capability returned a job id that is not in the expected form: ${clip(JSON.stringify(structured.job_id)).slice(0, 80)}`, { kind: 'tool', structured, mayHaveStarted: true })
@@ -379,19 +434,28 @@ export async function dispatchRender(client, {
     }
     throw new RenderError(`run_capability reported a status Mandate does not recognise (${clip(structured.status).slice(0, 60)})`, { kind: 'unknown-status', jobId, structured, mayHaveStarted: true })
   }
-  if (!jobId && QUEUED_TEXT.test(String(text ?? ''))) {
-    throw new RenderError('run_capability describes a queued job but gives no job id in the expected form, so it cannot be polled', { kind: 'tool', structured, mayHaveStarted: true })
-  }
   // With a job id, only a done status with a usable structured media URL is
   // taken as the result. Anything else (no status, an echoed input, a poll
   // page, about:blank) is polled, and the text is never scanned: it can quote
   // the inputs or a preview, which would be anchored as the output.
   const inlineUrl = DONE.has(status) ? extractMediaUrl(structured, '', inputUrls) : null
+  // A finished reply with a structured media URL may still mention get_create_media in passing.
+  if (!inlineUrl) {
+    if (!jobId && QUEUED_TEXT.test(String(text ?? ''))) {
+      throw new RenderError('run_capability describes a queued job but gives no job id in the expected form, so it cannot be polled', { kind: 'tool', structured, mayHaveStarted: true })
+    }
+  }
   const queued = IN_PROGRESS.has(status) || (jobId != null && !inlineUrl)
   if (queued) {
     if (!jobId) throw new RenderError('run_capability queued a job but returned no job id', { kind: 'tool', structured, mayHaveStarted: true })
-    onJob?.(jobId)
-    const done = await pollJob(client, jobId, { ...poll, capability, inputUrls: [...inputUrls, ...collectInputUrls(poll.inputUrls ?? [])] })
+    let done
+    try {
+      onJob?.(jobId)
+      done = await pollJob(client, jobId, { ...pollWith, capability, inputUrls: [...inputUrls, ...collectInputUrls(pollWith.inputUrls ?? [])] })
+    } catch (e) {
+      if (e instanceof RenderError) throw e
+      throw followError(jobId, e)
+    }
     const first = costOf(structured)
     const warnings = [...done.warnings, ...(done.costUsdEstimated === null ? [first.warning] : [])].filter(Boolean)
     return { url: done.url, jobId, replay, mode: 'async', servedCapability: done.servedCapability, costUsdEstimated: done.costUsdEstimated ?? first.usd, warnings }

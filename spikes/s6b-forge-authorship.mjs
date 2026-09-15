@@ -5,9 +5,12 @@
  * only meaningful if the producer CANNOT make a seal that says the same thing.
  * This spike tries to, from the producer's node, using Ana's address.
  */
-import { PRODUCER, GRANTOR } from '../bin/config.mjs'
+import { PRODUCER, GRANTOR, loadScriptEnv } from '../bin/config.mjs'
 import { grantToTurtle } from '../src/rdf.mjs'
 import { writeFileSync } from 'node:fs'
+
+// The CLI's env file (--env-path, MANDATE_ENV_FILE or ~/.mandate/.env); a working-directory .env is never read.
+loadScriptEnv()
 
 const producer = PRODUCER()
 const grantor = GRANTOR()

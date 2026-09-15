@@ -13,7 +13,7 @@
  *  - every dispatch is an attempt in `attempts[]`, so the history of what was
  *    sent survives a rerun.
  */
-import { closeSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync, chmodSync } from 'node:fs'
+import { closeSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, rmSync, statSync, utimesSync, writeFileSync, chmodSync } from 'node:fs'
 import { createHash, randomBytes } from 'node:crypto'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
@@ -30,11 +30,20 @@ const KEY = /^mandate-[0-9a-f]{32}$/
  * `submitted` record that may have been sent is not overwritten either: a rerun
  * resumes it through beginAttempt.
  */
+/**
+ * A render whose job the platform reported as definitively failed, settled by
+ * `mandate record` (saved with allowResolve). It no longer counts toward local
+ * pending spend and a rerun may dispatch it again; its attempts stay as history.
+ * Trade-off: a job the platform called failed may still have been billed, and
+ * that amount is then not counted against the ceiling on this machine.
+ */
+export const FAILED_CONFIRMED = 'failed-confirmed'
+
 export const PROTECTED_STATUSES = Object.freeze(['recorded', 'submitted', 'rendered'])
 
 export class PendingConflictError extends Error {
-  constructor(existing, { inFlight = false } = {}) {
-    super(`pending render ${existing.key} is already ${existing.status}; ${inFlight
+  constructor(existing, { inFlight = false, message = null } = {}) {
+    super(message ?? `pending render ${existing.key} is already ${existing.status}; ${inFlight
       ? 'another mandate process is dispatching it now; wait for it to finish'
       : existing.status === 'recorded'
         ? 'it has been recorded, and rendering it again would bill and record it twice'
@@ -70,12 +79,30 @@ const NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/
 const DERIVATION_ID = /^urn:mandate:derivation:[0-9a-f]{16}:[0-9a-f]{16}$/
 const TX = /^0x[0-9a-fA-F]{64}$/
 const PRINTABLE = /^[\x21-\x7e]{1,512}$/
+/** A stage that records only that something failed, not where in the write. */
+const GENERIC_STAGES = new Set(['error'])
+/** Stages after which a derivation asset is never published again. */
+const PERMANENT_DERIVATION_STAGES = new Set(['unbound', 'resume-refused'])
+/** Stages a write reaches only when nothing was sent to vm/publish. */
+const UNSENT_STAGES = new Set(['create', 'share', 'author'])
 
 /**
  * Check and merge what is known about a derivation publish attempt. The asset
  * name and id are fixed once set, so a retry reuses them instead of minting a
  * new asset; ual and txHash are never erased by a later attempt that did not
  * learn them; mayHaveSent, once true, stays true.
+ *
+ * The stage decides whether a retry may publish again, so what a later attempt
+ * did not learn never replaces it:
+ *  - a generic stage (`error`: the retry failed before or outside the write,
+ *    e.g. the producer was unreachable or the media could not be fetched)
+ *    never replaces a stage already saved. It is kept as `lastErrorStage`, a
+ *    note that changes nothing about resuming;
+ *  - `unbound` and `resume-refused` are permanent: only another permanent
+ *    stage replaces them;
+ *  - an attempt that may have sent (mayHaveSent, or `publish-transport`) is
+ *    never relabelled with a stage that says nothing was sent (create, share,
+ *    author).
  */
 export function mergeDerivationAttempt(previous = null, next = {}) {
   const prev = previous ?? {}
@@ -90,8 +117,17 @@ export function mergeDerivationAttempt(previous = null, next = {}) {
   const id = pick('id', DERIVATION_ID, 'id')
   if (prev.id && id !== prev.id) throw new Error(`derivation id is already ${prev.id}; a retry must reuse it`)
   if (next.mayHaveSent !== undefined && typeof next.mayHaveSent !== 'boolean') throw new Error('mayHaveSent must be true or false')
-  const stage = next.stage === undefined ? (prev.stage ?? null) : next.stage
+  let stage = next.stage === undefined ? (prev.stage ?? null) : next.stage
   if (stage !== null && (typeof stage !== 'string' || !/^[a-z][a-z-]{0,39}$/.test(stage))) throw new Error(`invalid derivation stage: ${String(stage).slice(0, 40)}`)
+  const prevStage = typeof prev.stage === 'string' ? prev.stage : null
+  let lastErrorStage = typeof prev.lastErrorStage === 'string' ? prev.lastErrorStage : null
+  if (prevStage !== null && stage !== prevStage) {
+    const generic = GENERIC_STAGES.has(stage)
+    const permanent = PERMANENT_DERIVATION_STAGES.has(prevStage) && !PERMANENT_DERIVATION_STAGES.has(stage)
+    const unsent = (prev.mayHaveSent === true || prevStage === 'publish-transport') && UNSENT_STAGES.has(stage)
+    if (generic) lastErrorStage = stage
+    if (generic || permanent || unsent) stage = prevStage
+  }
   return {
     id,
     name,
@@ -99,6 +135,7 @@ export function mergeDerivationAttempt(previous = null, next = {}) {
     txHash: pick('txHash', TX, 'tx hash'),
     stage,
     mayHaveSent: prev.mayHaveSent === true || next.mayHaveSent === true,
+    ...(lastErrorStage === null ? {} : { lastErrorStage }),
   }
 }
 
@@ -112,6 +149,8 @@ export function mergeDerivationAttempt(previous = null, next = {}) {
 export function mayBeBilled(rec) {
   if (!rec || typeof rec !== 'object') return false
   if (rec.status === 'rendered' || rec.status === 'recorded') return false
+  // The platform said the job failed, and `mandate record` settled it (see FAILED_CONFIRMED).
+  if (rec.status === FAILED_CONFIRMED) return false
   if (rec.mayHaveStarted === true || rec.status === 'submitted') return true
   if (rec.status !== 'dispatching') return false
   if (!Array.isArray(rec.attempts)) return true
@@ -130,6 +169,13 @@ export function renderKey({ grantId, capability, inputs, prompt, sourceUrl, seco
   return `mandate-${digest.slice(0, 32)}`
 }
 
+/** What a settled earlier attempt learned; a new attempt starts without them, and they stay in that attempt's history. */
+const SETTLED_OUTCOME_FIELDS = Object.freeze([
+  'jobId', 'mediaUrl', 'lastOutcome', 'error', 'errorKind', 'jobStatus', 'failedConfirmedAt', 'stage',
+  'servedCapability', 'servedCapabilityUnknown', 'costUsdEstimated', 'replay', 'renderMs', 'resumedFrom', 'mayHaveStarted',
+  'derivation', 'derivationAttempt', 'derivationPublishStatus',
+])
+
 const processAlive = pid => {
   if (!Number.isInteger(pid) || pid <= 0) return false
   try {
@@ -144,6 +190,22 @@ const processAlive = pid => {
 const STALE_LOCK_MS = 30_000
 const LOCK_TRIES = 40
 const LOCK_WAIT_MS = 25
+/**
+ * The grant lock serialises the spend-ceiling decision of every render under
+ * one grant on this machine. Each holder keeps it for milliseconds, but several
+ * renders may queue for it, so a waiter tries for about 15 s.
+ */
+const GRANT_LOCK_TRIES = 600
+/**
+ * A key's lease is held for a whole render or record (dispatch, polling, the
+ * derivation write), which can take minutes. Its holder touches it every
+ * LEASE_HEARTBEAT_MS, so the STALE_LOCK_MS age rule only clears a lease whose
+ * holder has stopped (or died, which the liveness rule catches at once).
+ */
+const LEASE_HEARTBEAT_MS = 5_000
+
+/** The lock file that serialises ceiling decisions under one grant, in `dir`. */
+export const grantLockPath = (dir, grantId) => join(dir, `grant-${createHash('sha256').update(String(grantId)).digest('hex').slice(0, 32)}.lock`)
 /** A short synchronous wait: the store is synchronous, and a held lock is released within milliseconds. */
 const pause = ms => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
 
@@ -171,35 +233,76 @@ export function pendingStore(dir = defaultPendingDir(), { isAlive = processAlive
     }
   }
 
+  const readRaw = path => { try { return readFileSync(path, 'utf8') } catch { return null } }
+  const ageOf = path => { try { return Date.now() - statSync(path).mtimeMs } catch { return null } }
+
   /**
-   * Run `fn` holding an exclusive lock on one key. The lock is a file created
-   * with 'wx', which fails if another process holds it, so two reruns cannot
-   * both read an absent or resumable record and both dispatch.
+   * Take an exclusive lock file. The lock is created with 'wx', which fails if
+   * another process holds it, so two processes cannot both hold it.
+   *
+   * Each lock carries a random token. A stale lock (its holder is dead, or it is
+   * older than STALE_LOCK_MS) is cleared only while holding `<lock>.takeover`,
+   * itself created with 'wx', and only if the lock still holds exactly what was
+   * judged stale: a process that read a stale holder and then lost the race
+   * never removes the fresh lock another process has taken since. Release
+   * removes the lock only while it still holds this call's own token. A
+   * takeover file left by a process that crashed inside that millisecond window
+   * is cleared by age. After `tries` waits, `conflict()` is thrown.
    */
-  const withLock = (key, fn) => {
+  const acquire = (lock, { tries: maxTries = LOCK_TRIES, conflict }) => {
     ensureDir()
-    const lock = `${file(key)}.lock`
+    const takeover = `${lock}.takeover`
+    const mine = JSON.stringify({ pid: process.pid, at: new Date().toISOString(), token: randomBytes(12).toString('hex') })
+    const judge = raw => {
+      let holder = null
+      try { holder = JSON.parse(raw) } catch { /* half-written: judged by age */ }
+      const age = ageOf(lock)
+      if (age === null) return false
+      return age > STALE_LOCK_MS || Boolean(holder && Number.isInteger(holder.pid) && holder.pid !== process.pid && !isAlive(holder.pid))
+    }
     for (let tries = 0; ; tries++) {
       try {
         const fd = openSync(lock, 'wx', 0o600)
-        try { writeFileSync(fd, JSON.stringify({ pid: process.pid, at: new Date().toISOString() })) } finally { closeSync(fd) }
-        break
+        try { writeFileSync(fd, mine) } finally { closeSync(fd) }
+        return mine
       } catch (e) {
         if (e.code !== 'EEXIST') throw e
-        if (tries >= LOCK_TRIES) throw new PendingConflictError({ key, status: 'locked' }, { inFlight: true })
-        let holder = null
-        try { holder = JSON.parse(readFileSync(lock, 'utf8')) } catch { /* half-written or gone: judged by age */ }
-        let age = 0
-        try { age = Date.now() - statSync(lock).mtimeMs } catch { continue }
-        const stale = age > STALE_LOCK_MS || (holder && Number.isInteger(holder.pid) && holder.pid !== process.pid && !isAlive(holder.pid))
-        if (stale) rmSync(lock, { force: true })
-        else pause(LOCK_WAIT_MS)
+        if (tries >= maxTries) throw conflict()
+        const seen = readRaw(lock)
+        if (seen === null || !judge(seen)) {
+          if (seen !== null) pause(LOCK_WAIT_MS)
+          continue
+        }
+        let tfd
+        try {
+          tfd = openSync(takeover, 'wx', 0o600)
+        } catch (te) {
+          if (te.code !== 'EEXIST') throw te
+          const tAge = ageOf(takeover)
+          if (tAge !== null && tAge > STALE_LOCK_MS) rmSync(takeover, { force: true })
+          else pause(LOCK_WAIT_MS)
+          continue
+        }
+        try {
+          closeSync(tfd)
+          // Re-checked under the takeover: only the very lock judged stale is removed.
+          if (readRaw(lock) === seen) rmSync(lock, { force: true })
+        } finally {
+          rmSync(takeover, { force: true })
+        }
       }
     }
+  }
+  const release = (lock, mine) => { if (readRaw(lock) === mine) rmSync(lock, { force: true }) }
+
+  /** Run `fn` holding the short exclusive lock on one key, so two reruns cannot both read an absent or resumable record and both dispatch. */
+  const withLock = (key, fn) => {
+    const lock = `${file(key)}.lock`
+    const mine = acquire(lock, { conflict: () => new PendingConflictError({ key, status: 'locked' }, { inFlight: true }) })
     try {
       return fn()
     } finally {
-      rmSync(lock, { force: true })
+      release(lock, mine)
     }
   }
 
@@ -309,11 +412,23 @@ export function pendingStore(dir = defaultPendingDir(), { isAlive = processAlive
           return { record: this.save(resumed), resumed: true, attempt }
         }
         const attempt = attemptOf(attempts.length + 1, record.idempotencyKey ?? null)
+        // A clean earlier failure never reached Livepeer, and a failed-confirmed
+        // job is settled, so the old key carries no open bill; the new attempt
+        // may use its own. It starts clean: the earlier outcome (its job id,
+        // media, errors and any derivation) is moved into the attempt it belongs
+        // to, so nothing about this attempt, such as a job id to poll, can be
+        // taken from the old one.
         const { idempotencyKey: _old, ...kept } = existing
-        // A clean earlier failure never reached Livepeer, so its key carries no
-        // bill; the new attempt may use its own. The earlier attempts stay.
+        const outcome = {}
+        for (const field of SETTLED_OUTCOME_FIELDS) {
+          if (kept[field] !== undefined && kept[field] !== null) outcome[field] = kept[field]
+          delete kept[field]
+        }
+        const history = attempts.length && Object.keys(outcome).length
+          ? [...attempts.slice(0, -1), { ...attempts.at(-1), settled: { ...(attempts.at(-1).settled ?? {}), ...outcome } }]
+          : attempts
         const target = file(record.key)
-        const written = { ...kept, ...record, status: 'dispatching', attempts: [...attempts, attempt], updatedAt: started }
+        const written = { ...kept, ...record, status: 'dispatching', attempts: [...history, attempt], updatedAt: started }
         const tmp = `${target}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`
         writeFileSync(tmp, JSON.stringify(written, null, 2), { mode: 0o600 })
         renameSync(tmp, target)
@@ -375,6 +490,56 @@ export function pendingStore(dir = defaultPendingDir(), { isAlive = processAlive
     },
     load(key) {
       return read(file(key))
+    },
+    /**
+     * Run `fn` (synchronous) holding the lock on one grant's ceiling decision.
+     * A render reads local pending spend, decides and saves its `dispatching`
+     * record inside it, so parallel renders on this machine each see the
+     * others' records before deciding. The same liveness and stale-takeover
+     * rules as a key's lock apply; a waiter gives up after about 15 s with
+     * PendingConflictError (inFlight).
+     */
+    withGrantLock(grantId, fn) {
+      if (typeof grantId !== 'string' || !grantId) throw new Error('a grant lock needs a grant id')
+      const lock = grantLockPath(dir, grantId)
+      const mine = acquire(lock, {
+        tries: GRANT_LOCK_TRIES,
+        conflict: () => new PendingConflictError({ key: grantId, status: 'locked' }, { inFlight: true, message: `another mandate process has held the spend-ceiling lock for grant ${String(grantId).slice(0, 200)} too long; nothing was dispatched. Try again once it finishes` }),
+      })
+      try {
+        return fn()
+      } finally {
+        release(lock, mine)
+      }
+    },
+    /**
+     * Take the lease on one key for a whole render or record: dispatch, polling
+     * and the derivation write. A second process on the same key does not wait
+     * (a render can take minutes): it gets PendingConflictError (inFlight) at
+     * once, after only the short wait a stale lease's takeover needs. The lease
+     * is touched every few seconds while held, so the stale age rule never
+     * clears the lease of a live holder that is still running. Returns
+     * { release() }; call it in a finally.
+     */
+    acquireLease(key) {
+      const lock = `${file(key)}.lease`
+      const mine = acquire(lock, {
+        conflict: () => new PendingConflictError({ key, status: 'in use' }, { inFlight: true, message: `pending render ${key} is in use by another mandate process (a render or record of the same key is dispatching, polling or recording it); nothing was done here. Wait for that process to finish, then check it with \`mandate record --pending ${key}\`` }),
+      })
+      const beat = setInterval(() => {
+        if (readRaw(lock) !== mine) return
+        try { const t = new Date(); utimesSync(lock, t, t) } catch { /* judged by age and liveness */ }
+      }, LEASE_HEARTBEAT_MS)
+      beat.unref?.()
+      let done = false
+      return {
+        release() {
+          if (done) return
+          done = true
+          clearInterval(beat)
+          release(lock, mine)
+        },
+      }
     },
     list() {
       let names

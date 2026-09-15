@@ -18,7 +18,11 @@
  * script is accepted as it is; anything else needs a typed confirmation, which
  * this demo cannot give (it runs the CLI with --json), so the step exits 3.
  *
- *   node demo/full.mjs --image-url <url> --audio-url <url> --seconds 5 [--consent] [--subject ana]
+ *   node demo/full.mjs --image-url <url> --audio-url <url> --seconds 5 [--consent] [--subject ana] [--env-path <path>]
+ *
+ * Every command it runs is given the repository's own .env explicitly with
+ * --env-path (or the file named with --env-path here): the CLI never reads a
+ * .env from the working directory.
  *
  * Without --consent the grant is published without a consent clip, and the log
  * says so. Spends one render (~$0.70 at list price for 5s of sync-lipsync-v3)
@@ -27,9 +31,19 @@
 import { spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { mkdirSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
-import { pathToFileURL } from 'node:url'
+import { join, resolve } from 'node:path'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { parseArgs } from 'node:util'
+
+const REPO = fileURLToPath(new URL('..', import.meta.url))
+/** The env file the demo passes to every command unless told otherwise: the repository's own. */
+export const DEMO_ENV_FILE = join(REPO, '.env')
+
+/** The argv that runs one CLI command with an explicit env file, in --json mode. */
+export const cliArgv = (args, envFile = DEMO_ENV_FILE) => [join(REPO, 'bin', 'mandate.mjs'), ...args, '--env-path', resolve(envFile), '--json']
+
+/** The argv that runs scripts/nodes.mjs with the same explicit env file. */
+export const nodesArgv = (args, envFile = DEMO_ENV_FILE) => [join(REPO, 'scripts', 'nodes.mjs'), ...args, '--env-path', resolve(envFile)]
 
 /** The longest a step may be retried while nodes sync: one day. */
 const MAX_WAIT_SECONDS = 86_400
@@ -93,6 +107,7 @@ async function main() {
       consent: { type: 'boolean', default: false },
       'consent-kind': { type: 'string', default: 'video' },
       'wait-seconds': { type: 'string', default: '600' },
+      'env-path': { type: 'string', default: DEMO_ENV_FILE },
     },
   })
   if (!opt['image-url'] || !opt['audio-url']) {
@@ -132,7 +147,7 @@ async function main() {
   function mandate(args, label, { interactive = false } = {}) {
     return new Promise(resolve => {
       const began = Date.now()
-      const child = spawn(process.execPath, ['bin/mandate.mjs', ...args, '--json'], { stdio: [interactive ? 'inherit' : 'ignore', 'pipe', 'inherit'] })
+      const child = spawn(process.execPath, cliArgv(args, opt['env-path']), { stdio: [interactive ? 'inherit' : 'ignore', 'pipe', 'inherit'] })
       let stdout = ''
       child.stdout.on('data', d => { stdout += d })
       child.on('close', code => {
@@ -148,7 +163,7 @@ async function main() {
 
   const sleep = ms => new Promise(r => setTimeout(r, ms))
   const nodesSync = role => new Promise(resolve => {
-    const child = spawn(process.execPath, ['scripts/nodes.mjs', 'sync', role], { stdio: ['ignore', 'ignore', 'inherit'] })
+    const child = spawn(process.execPath, nodesArgv(['sync', role], opt['env-path']), { stdio: ['ignore', 'ignore', 'inherit'] })
     child.on('close', resolve)
   })
 

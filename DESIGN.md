@@ -54,7 +54,12 @@ A verifier trusts:
    completeness and, when the node's admin token allows it, compares the node's copy
    with the chain head.
 3. **A list of producers**, whose derivation records it is willing to believe, and
-   **a list of grants graphs** to read their grants from.
+   **a list of grants graphs** to read their grants from. Both are this machine's
+   configuration: the environment plus one env file (`--env-path`, else
+   `MANDATE_ENV_FILE`, else `~/.mandate/.env`). A `.env` in the working directory is never
+   read, because a folder someone sends a verifier must not choose whom it trusts, and
+   `status` and `verify` print the file, the trusted producers, the graphs and the
+   freshness setting in effect.
 
 It trusts nothing written inside the graph about authorship. `mandate:grantor` and
 `mandate:stateAuthor` are descriptive; a grant whose `mandate:grantor` disagrees with
@@ -103,13 +108,20 @@ design keeps two kinds of evidence apart:
 - **Checked by construction.** The CLI generates a script from the grant's own terms,
   and the person reads it on their phone. A transcript that is a reading of that script
   (word for word after normalising ASR spellings, with every term, the date and the
-  amount exact, and nothing extra but filler) is confirmed without anyone judging what
-  the words mean. Only such a grant carries `mandate:consentClipSha256`.
-- **Judged by a person.** Anything else, however consent-like, is unconfirmed. An
-  operator watching the clip must type that the transcript is accurate, that it is
-  consent to exactly these terms with no condition, exclusion, coercion or retraction,
-  and each term the words were not compared with. That grant is published without the
-  clip hash.
+  amount exact, at most two of the joining words `to`, `of`, `for`, `in`, `and`, `is`,
+  `at` missing, nothing extra but a greeting or an article (`hi`, `hello`, `a`, `an`,
+  `the`), and heard as affirmative first-person consent) is confirmed without anyone
+  judging what the words mean. The ignorable words are the ones that cannot say no in any
+  combination. Hesitation sounds (`um`, `uh`, `mm`, `hmm`) and `yes`, `yeah`, `okay`, `so`,
+  `well` and `hey` are not ignorable: `uh-uh` and `mm-mm` are a spoken "no", and a clip
+  with any of them goes to a person. Only such a grant carries `mandate:consentClipSha256`.
+- **Judged by a person.** Anything else, however consent-like, is unconfirmed. The CLI
+  shows the whole transcript, never a cut one, and refuses (re-record) a transcript over
+  4000 characters or with 50 or more words outside the script, because nobody can be asked
+  to confirm words they were not shown. An operator watching the clip must type that the
+  transcript is accurate, that it is consent to exactly these terms with no condition,
+  exclusion, coercion or retraction, and each term the words were not compared with. That
+  grant is published without the clip hash.
 
 Refusal heuristics sit beside both. They can stop a clip outright (a refusal, exclusion,
 retraction or sign of coercion anywhere), but never confirm one: no list of the ways
@@ -133,12 +145,16 @@ consent.
    answer. When the grantor has published a state about the grant, the resolver requires
    the view once the node has shown it, and believes "no view" only when the node's probe
    for it answered empty on every attempt. A node that leaves the view out of every
-   answer on every attempt cannot be told apart from one that holds none
-   (`docs/CONTRACTS.md`, "Read consistency").
+   answer on every attempt cannot be told apart from one that holds none. The check
+   assumes one merged view graph per context graph, as live nodes build: several view
+   graphs showing on different attempts make the read inconsistent, but one left out of
+   every attempt while another shows is not caught (`docs/CONTRACTS.md`, "Read
+   consistency"). Only a Verifiable Memory copy under the grant owner's prefix explains a
+   view row away.
 4. **Capabilities match exactly**, never by family, and **a forbid beats a permit**.
    Requests whose declared use-class label is on the deny list (adult, sexual,
-   deceptive impersonation and synonyms, matched through common inflections and joined
-   words) are refused whatever a grant says. This checks the label a producer declares;
+   deceptive impersonation and synonyms, matched through common inflections, joined
+   words and prohibited stems inside a word) are refused whatever a grant says. This checks the label a producer declares;
    it cannot see the prompt or the media.
 5. **Every trusted derivation for a file is judged.** A file is TAINTED if any trusted
    record is (including a trusted producer's record that cannot be read), otherwise
@@ -153,7 +169,13 @@ consent.
    is complete but comes from a node that has not yet received a revocation still
    permits. The freshness check narrows it to the time before the revocation is bound
    on-chain, but only when it can run; with a token that lacks admin rights it is a
-   warning.
+   warning, and with the check turned off every read says `freshness not checked`.
+   The spend ceiling is decided one render at a time per grant on one machine: a render
+   takes the grant's lock, decides again with this machine's pending renders counted, and
+   saves its record before releasing it. Renders on other machines count only once their
+   derivations are read from the graph, so the ceiling is not enforced across machines
+   running at the same time, and a per-second estimate relies on the `--seconds` the
+   operator typed.
 7. **CLEAR is narrower than a permit.** A derivation records the output hash, the
    serving capability, the grant and the render time. So CLEAR establishes the grant's
    publisher, that it is not revoked, the capability, and the validity window (now and
@@ -169,10 +191,29 @@ tested in isolation. The attacks from the adversarial study are replayed as test
 removes each security guard listed in `scripts/mutations.json` in turn and fails if no
 test notices. A mutant whose tests only hang or time out counts as a failure, not a
 kill, so every such test carries a deadline of its own. The list also covers the
-checker's own rules and the workflow promises (`test/release.test.mjs`): CI and the
-release test job install with `--ignore-scripts`, the release tarball is packed before
-anything is installed, publish waits for the test job, and the namespace documents
-check sees untracked files.
+checker's own rules (including how `runMutant` treats a hang, and that the CI shards
+together run every entry) and the workflow promises. The check takes `--budget-minutes`
+for the whole run: a mutant it could not reach or finish inside the budget is reported
+UNFINISHED, never killed or a timeout, and fails the run, so a slow CI shard cannot pass
+by being cut off. `test/release.test.mjs` parses both
+workflows with a strict parser for the YAML subset they use (anchors, flow mappings and
+duplicate keys are refused) and checks their structure, not lines of text: every action
+pinned to a commit and no checkout keeping credentials; allow-lists for the keys at every
+level (workflow, job, step, `with`, strategy), so no top-level `env`, `container`,
+`services` or `working-directory` gets in, every job runs on `ubuntu-latest`, and a step's
+`env` may only carry the pack job's tarball name and digest; no `if:`, `continue-on-error`,
+`shell` or `defaults` that could let a failing step pass; step lists compared by their
+`run` commands, never by a step's name; and a scan of every run that refuses `||`, a
+background `&`, `set +`/`set -`, `trap`, `nohup`, `disown`, `eval`, `exec`, a forced success
+(`true`, `:`, `exit 0`), writes to `GITHUB_ENV`, `GITHUB_PATH` or `.npmrc`, and any pipe
+that does not end in the digest check, `wc -l` or `cut`; pack runs only the listed pack commands after a lifecycle-script guard
+that the test executes against each hook; test repacks and checks the digest before
+installing with `--ignore-scripts`; publish needs pack and test, runs in the `npm`
+environment, holds the only `id-token`, installs nothing but the pinned npm, and
+publishes the checked tarball; and CI's namespace documents check, run in a scratch git
+repository, fails on a modified or untracked file. What the parser does not model (how
+GitHub evaluates expressions, or a repository setting such as the `npm` environment's
+reviewers) is not checked.
 
 ## Security
 
@@ -191,7 +232,12 @@ check sees untracked files.
   `LIVEPEER_AGENT_KEY`. The CLI's freshness check calls `reconcile` with the node's
   token on every decision, so that token needs node-admin rights for the check to run.
   Mandate never reads wallet keystores. Only `MANDATE_*` keys and `LIVEPEER_AGENT_KEY`
-  are read from `.env`, by the CLI and by `scripts/publish-skill.mjs`.
+  are read from the env file, by the CLI, `scripts/nodes.mjs`,
+  `scripts/publish-skill.mjs`, `scripts/publish-ontology.mjs` and the live spikes. That file is the one named with `--env-path`, else by
+  `MANDATE_ENV_FILE`, else `$MANDATE_HOME/.env` (`~/.mandate/.env`); a `.env` in the
+  working directory is never read. A group- or world-writable env file is loaded with a
+  warning. `--env-file` is refused: Node.js reads that flag itself from anywhere on the
+  command line and would apply a `NODE_OPTIONS` from the file before Mandate runs.
 - **Write authority:** the Knowledge Asset routes on the operator's own nodes, and
   Verifiable Memory publishing for grants, revocations and derivations. Setup uses
   `context-graph create`, `register` and `subscribe`; `scripts/nodes.mjs` also calls
@@ -199,9 +245,12 @@ check sees untracked files.
   vocabulary from the grantor's node into the DKG's shared system `ontology` graph,
   which the grantor does not own; it is run once per vocabulary version, by hand.
 - **Local state:** `~/.mandate/state` holds the anchors and revocations already seen,
-  and `~/.mandate/pending` the renders in flight. Those two directories are set to mode
-  0700 and their files to 0600. `~/.mandate` itself is never changed, so one that
-  already exists keeps its mode.
+  and `~/.mandate/pending` the renders in flight, with a lock file per grant (the
+  ceiling decision) and a lease file per render key (held for a render's or record's
+  whole life, so a second process on the same key exits 5 at once). Those two directories
+  are set to mode 0700 and their files to 0600. `~/.mandate` itself is never changed, so
+  one that already exists keeps its mode; `~/.mandate/.env` is the operator's, and should
+  be `chmod 600`.
 - **Package:** no install scripts and no runtime dependencies in the core. CI's
   `npm audit --omit=dev --omit=peer` therefore covers nothing beyond the package itself.
   The optional peer (`@modelcontextprotocol/sdk`) is audited by whoever installs it.
@@ -247,3 +296,12 @@ check sees untracked files.
   the node never records cannot be found from this client.
 - **DKG literal handling.** v10.0.16 cannot publish a double quote or a line break in a
   literal. Mandate refuses such values rather than rewriting them.
+- **The ceiling across machines.** Locks and pending records are per machine (per
+  `MANDATE_HOME`), so renders under one grant on several machines at once can exceed the
+  ceiling until their derivations sync.
+- **Operator-typed durations.** Under a ceiling a per-second estimate uses `--seconds` as
+  typed; it is never sent to Livepeer. The CLI warns, and the recorded spend is unknown
+  unless the platform reports a cost.
+- **Consent matching.** A spoken "no" made of sounds (`uh-uh`) is never confirmed
+  automatically, but the refusal heuristics do not flag it, so on the typed path the
+  operator is what catches it.

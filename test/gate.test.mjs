@@ -3,7 +3,8 @@ import assert from 'node:assert/strict'
 import { decide, revocationOf, priorSpendFor, grantIsAuthentic, microUsd } from '../src/gate.mjs'
 import { isProhibitedUseClass } from '../src/policy.mjs'
 import { CLAUSES } from '../src/vocab.mjs'
-import { ANA, PRODUCER, STRANGER, grant, grantKa, revocationKa, derivation, derivationKa, knowledgeOf } from './fixtures/build.mjs'
+import * as V from '../src/vocab.mjs'
+import { ANA, PRODUCER, STRANGER, GRANTS_CG, ka, grant, grantKa, revocationKa, derivation, derivationKa, knowledgeOf } from './fixtures/build.mjs'
 
 const SUBJECT = `${ANA}:ana`
 const req = (over = {}) => ({
@@ -343,6 +344,51 @@ test('the grantor\'s malformed or untiered state counts as a revocation, whateve
   assert.equal(decide(req(), { ...k, states: [{ id: 'urn:mandate:state:1', stateOf: id, state: 'active', tier: 'vm', publisher: ANA, malformed: true }] }).clause, 'not-revoked')
 })
 
+test('a truthy but non-boolean malformed flag still counts as malformed', async () => {
+  const g = { id: 'urn:g', publisher: ANA }
+  const s = over => ({ stateOf: 'urn:g', state: 'active', tier: 'vm', publisher: ANA, ...over })
+  for (const malformed of ['true', 1, 'yes', {}, []]) {
+    assert.equal(revocationOf(g, [s({ malformed })]).revoked, true, JSON.stringify(malformed))
+  }
+  for (const malformed of [false, undefined, null]) {
+    assert.equal(revocationOf(g, [s({ malformed })]).revoked, false, JSON.stringify(malformed))
+  }
+  const k = await K(grantKa(grant()))
+  const id = k.grants[0].id
+  assert.equal(decide(req(), k).permit, true, 'precondition')
+  assert.equal(decide(req(), { ...k, states: [{ id: 'urn:mandate:state:1', stateOf: id, state: 'active', tier: 'vm', publisher: ANA, malformed: 'true' }] }).clause, 'not-revoked')
+})
+
+test('a state with neither a publisher nor a tier is a knowledge problem', async () => {
+  const k = await K(grantKa(grant()))
+  const id = k.grants[0].id
+  for (const extra of [{}, { tier: null }, { tier: 'other' }, { publisher: null }, { publisher: 7, tier: 'VM' }]) {
+    for (const state of ['revoked', 'active']) {
+      const d = decide(req(), { ...k, states: [{ id: 'urn:mandate:state:1', stateOf: id, state, ...extra }] })
+      assert.equal(d.clause, 'read-inconsistent', JSON.stringify({ state, ...extra }))
+      assert.match(d.reason, /neither a publisher nor a tier/)
+    }
+  }
+  // A publisher, or a tier, is enough to judge it.
+  assert.equal(decide(req(), { ...k, states: [{ id: 'urn:mandate:state:1', stateOf: id, state: 'revoked', tier: 'context', publisher: null }] }).clause, 'not-revoked')
+  assert.equal(decide(req(), { ...k, states: [{ id: 'urn:mandate:state:1', stateOf: id, state: 'revoked', publisher: STRANGER }] }).permit, true)
+})
+
+test('prohibited stems written inside a single word are refused', async () => {
+  const k = await K(grantKa(grant({ permitsUseClass: [], forbidsUseClass: [] })))
+  for (const useClass of ['pornvideo', 'deepfakevideo', 'sexualcontent', 'adultvideo', 'pornstar', 'impersonator', 'impersonators',
+    'nudify', 'sexting', 'onlyfansvideo', 'deepfakery', 'fetishism', 'eroticism', 'pornographies', 'onlyfan', 'ad-pornvideo']) {
+    assert.equal(isProhibitedUseClass(useClass), true, useClass)
+    assert.equal(decide(req({ useClass }), k).clause, 'use-class-prohibited', useClass)
+  }
+  // A word match still splits at digits, for terms too short to be substring stems.
+  for (const useClass of ['sex18', '18sex', 'ad-sex2']) assert.equal(isProhibitedUseClass(useClass), true, useClass)
+  // Short stems are not matched inside words, and stems are never matched across a hyphen.
+  for (const label of ['sussex', 'unisex-fashion', 'sussex-tourism', 'advertising', 'classic', 'nudge-marketing']) {
+    assert.equal(isProhibitedUseClass(label), false, label)
+  }
+})
+
 test('prohibited labels are matched through inflections, joined words and digits', async () => {
   const k = await K(grantKa(grant({ permitsUseClass: [], forbidsUseClass: [] })))
   for (const useClass of ['deepfakes', 'impersonating', 'impersonations', 'impersonated', 'sexualised', 'sexualized', 'sexually-explicit',
@@ -353,5 +399,59 @@ test('prohibited labels are matched through inflections, joined words and digits
     'sussex-tourism', 'unisex-fashion', 'music-video', 'localisation']) {
     assert.equal(isProhibitedUseClass(label), false, label)
     assert.notEqual(decide(req({ useClass: label }), k).clause, 'use-class-prohibited', label)
+  }
+})
+
+/* Round four: use-class restrictions, unreadable copies and honest labels. */
+
+test('a grant permitting only editorial refuses advertising at use-class-permitted, and still permits editorial', async () => {
+  const k = await K(grantKa(grant({ permitsUseClass: ['editorial'], forbidsUseClass: [] })))
+  const d = decide(req({ useClass: 'advertising' }), k)
+  assert.equal(d.permit, false)
+  assert.equal(d.clause, 'use-class-permitted')
+  assert.match(d.reason, /does not permit use class "advertising" \(permits: editorial\)/)
+  assert.equal(decide(req({ useClass: 'editorial' }), k).permit, true)
+})
+
+test('a grant whose forbidsUseClass value fails the use-class pattern is malformed, so a political render is refused, not permitted', async () => {
+  const g = grant({ permitsUseClass: [], forbidsUseClass: ['political'] })
+  const good = grantKa(g)
+  const quads = good.contentRows.map(r => ({ subject: r.s, predicate: r.p, object: r.p === V.forbidsUseClass ? '"Political"' : r.o }))
+  const k = await K(ka({ cg: GRANTS_CG, publisher: ANA, quads }))
+  assert.equal(k.grants.length, 0)
+  assert.equal(k.forgeries.length, 1)
+  assert.equal(k.forgeries[0].detail, 'invalid forbidsUseClass')
+  const d = decide(req({ useClass: 'political' }), k)
+  assert.equal(d.permit, false)
+  assert.equal(d.clause, 'grant-exists')
+  assert.equal(decide(req({ useClass: 'political' }), await K(good)).clause, 'use-class-permitted', 'control: the well-formed grant forbids it')
+})
+
+test('the grantor\'s own unreadable second copy of a grant id refuses like a readable one', async () => {
+  const g = grant({ territory: [], permitsUseClass: [], forbidsUseClass: [], maxSpendUsd: null })
+  const narrowed = { ...g, territory: ['GB'], permitsUseClass: ['advertising'], maxSpendUsd: 1 }
+  const twoUntils = [{ subject: g.id, predicate: V.validUntil, object: '"2026-11-01T00:00:00Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>' }]
+  const loose = req({ useClass: 'political-attack-ad', territory: 'US', estimatedUsd: 50 })
+  assert.equal(decide(loose, await K(grantKa(g))).permit, true, 'precondition: the loose copy alone permits')
+  const k = await K(grantKa(g), grantKa(narrowed, { extraContent: twoUntils }))
+  assert.equal(k.grants.length, 1)
+  assert.equal(k.forgeries[0].kind, 'malformed')
+  const d = decide(loose, k)
+  assert.equal(d.permit, false)
+  assert.equal(d.clause, 'grant-exists')
+  assert.match(d.reason, /published more than once \(2 copies, 1 of them unreadable\)/)
+  // A copy of Ana's grant published by anyone else is a forgery, never a second copy: Ana's grant still applies.
+  const stolen = await K(grantKa(g), grantKa(narrowed, { publisher: STRANGER }))
+  assert.ok(stolen.forgeries.some(f => f.id === g.id && f.publisher === STRANGER), 'precondition: the stranger\'s copy is a forgery with the same id')
+  assert.equal(decide(loose, stolen).permit, true)
+})
+
+test('honest labels for sexualised or impersonation uses are refused; near-miss innocent labels are not', async () => {
+  const k = await K(grantKa(grant({ permitsUseClass: [], forbidsUseClass: [] })))
+  for (const useClass of ['undress', 'undressing', 'topless', 'stripper', 'strippers', 'striptease', 'bdsm', 'impostor', 'imposter', 'impostors', 'catfish', 'catfishing']) {
+    assert.equal(decide(req({ useClass }), k).clause, 'use-class-prohibited', useClass)
+  }
+  for (const label of ['comic-strip', 'strip-mall', 'address', 'imposition', 'topical']) {
+    assert.equal(isProhibitedUseClass(label), false, label)
   }
 })

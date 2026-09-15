@@ -79,7 +79,8 @@ async function hashOnce(u, { maxBytes, budget, deadline, fetch, now }) {
   if (!res.body) throw new FetchBytesError(`cannot fetch media: HTTP ${res.status} with no body`, { status: res.status, final: true })
   const declared = Number(res.headers.get('content-length'))
   if (res.headers.get('content-length') !== null && Number.isFinite(declared) && declared > Math.min(maxBytes, budget.left)) {
-    await res.body.cancel().catch(() => {})
+    // Fired, never awaited: a custom body whose cancel never settles, or has none, must not hold the call past its deadline.
+    Promise.resolve().then(() => res.body.cancel?.()).catch(() => {})
     throw new FetchBytesError(declared > maxBytes
       ? `media is ${declared} bytes, over the ${maxBytes}-byte limit`
       : `media is ${declared} bytes, more than is left of the ${maxBytes}-byte budget after earlier attempts`, { final: true })

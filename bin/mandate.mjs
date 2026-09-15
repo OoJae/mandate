@@ -14,7 +14,7 @@ import { readFileSync } from 'node:fs'
 import { parseArgs, helpText, UsageError, EXIT } from './args.mjs'
 import {
   GRANTOR, PRODUCER, VERIFIER, grantsCgs, derivationsCgs, grantsCgFor, derivationsCgFor,
-  readConfig, envLoad, ConfigError,
+  readConfig, envLoad, loadMandateEnv, trustedProducers, ConfigError,
 } from './config.mjs'
 import { c, clean, txLink, makeOutput } from './ui.mjs'
 import { readKnowledge } from '../src/resolve.mjs'
@@ -29,8 +29,26 @@ import { isProhibitedUseClass, PROHIBITED_USE_CLASSES } from '../src/policy.mjs'
 import { grantIriAddress } from '../src/provenance.mjs'
 import { TermError, makeSubject, subjectAddress, agentAddress, nonce16 } from '../src/rdf-term.mjs'
 import { checkInputs, dispatchMode, estimateFromPricing, STATIC_PRICES } from '../src/capabilities.mjs'
-import { renderKey, pendingStore, mayBeBilled, PendingConflictError, PendingInvariantError, PendingReadError } from '../src/pending.mjs'
+import { renderKey, pendingStore, mayBeBilled, FAILED_CONFIRMED, PendingConflictError, PendingInvariantError, PendingReadError } from '../src/pending.mjs'
 import { StateReadError } from '../src/state-store.mjs'
+
+/**
+ * The longest transcript a person is asked to review, in characters after
+ * control characters are stripped. A transcript is always shown in full when a
+ * person must confirm it; one longer than this is refused (re-record) rather
+ * than cut, because nobody can be asked to confirm words they were not shown,
+ * and a consent statement never needs this many.
+ */
+const TRANSCRIPT_REVIEW_MAX = 4000
+/**
+ * For a transcript far longer than the script, src/scope.mjs does not align it
+ * and lists only the first 50 words outside the script. A list that long may
+ * be cut, so it is refused like an over-long transcript rather than shown in part.
+ */
+const EXTRA_WORDS_REVIEW_MAX = 49
+
+/** Untrusted words for a person to review: every character kept except controls, with line breaks and tabs as spaces. */
+const reviewText = v => clean(v, Infinity).replace(/[\t\n]+/g, ' ')
 
 /** An exit code chosen where an error was caught, for errors whose class alone says too little. */
 const EXIT_CODE = Symbol('mandate.exitCode')
@@ -192,6 +210,33 @@ function writeFailed(out, e, { what, ids, assetName, contextGraphId, node, check
   return code
 }
 
+/**
+ * Print, and return for the result, the configuration a command runs under:
+ * which env file was loaded (or none), the trusted producers and graphs in
+ * effect, and a visible warning when the freshness check is off.
+ */
+function configInEffect(out, cfg = null) {
+  const settle = get => { try { return { value: get(), error: null } } catch (e) { return { value: null, error: String(e.message).split('\n')[0] } } }
+  const grants = cfg ? { value: cfg.grantsCgs, error: null } : settle(grantsCgs)
+  const derivs = cfg ? { value: cfg.derivationsCgs, error: null } : settle(derivationsCgs)
+  const trusted = cfg ? { value: cfg.trustedProducers, error: null } : settle(trustedProducers)
+  const checkFreshness = cfg ? cfg.checkFreshness === true : process.env.MANDATE_CHECK_FRESHNESS !== '0'
+  out.line(envLoad.path
+    ? c.dim(`  env file           ${clean(envLoad.path, 300)} (${envLoad.source}; ${envLoad.loaded.length} key(s) set from it${envLoad.loaded.length ? `: ${envLoad.loaded.join(', ')}` : ''})`)
+    : c.dim(`  env file           none (looked for ${clean(envLoad.searched ?? '', 300)}; a .env in the working directory is never read)`))
+  if (envLoad.ignored.length) out.line(c.dim(`  env file: ignored ${envLoad.ignored.join(', ')} (only MANDATE_* and LIVEPEER_AGENT_KEY are read)`))
+  for (const [label, got] of [['trusted producers', trusted], ['grants graphs', grants], ['derivations graphs', derivs]]) {
+    out.line(got.error ? c.yellow(`  ${label.padEnd(18)} ${clean(got.error, 300)}`) : c.dim(`  ${label.padEnd(18)} ${got.value.map(v => clean(v, 120)).join(', ') || 'none'}`))
+  }
+  if (!checkFreshness) {
+    out.notice(c.yellow('  ⚠ FRESHNESS CHECK OFF (MANDATE_CHECK_FRESHNESS=0): nodes are not compared with the chain, so a node that is behind can miss a revocation and nothing here would show it'))
+  }
+  return {
+    envFile: envLoad.path, envFileSource: envLoad.path ? envLoad.source : null, envFileSearched: envLoad.searched, envKeysLoaded: [...envLoad.loaded], envFileWarnings: [...envLoad.warnings],
+    trustedProducers: trusted.value, grantsCgs: grants.value, derivationsCgs: derivs.value, checkFreshness,
+  }
+}
+
 /* ------------------------------------------------------------------------- */
 
 async function cmdStatus(flags, out) {
@@ -211,11 +256,8 @@ async function cmdStatus(flags, out) {
   }
   const verifier = rows.find(r => r.role === 'verifier')
   if (!verifier.configured) out.line(c.dim('○ verifier  not configured (MANDATE_VERIFIER_PORT); verify reads from the grantor node'))
-  for (const [label, get] of [['grants graphs', grantsCgs], ['derivations graphs', derivationsCgs]]) {
-    try { out.line(c.dim(`  ${label.padEnd(18)} ${get().join(', ')}`)) } catch (e) { out.line(c.yellow(`  ${label.padEnd(18)} ${e.message.split('\n')[0]}`)) }
-  }
-  if (envLoad.ignored.length) out.line(c.dim(`  .env: ignored ${envLoad.ignored.join(', ')} (only MANDATE_* and LIVEPEER_AGENT_KEY are read)`))
-  out.result({ nodes: rows })
+  const config = configInEffect(out)
+  out.result({ nodes: rows, config })
   return rows.some(r => r.configured && !r.reachable) ? EXIT.INCONCLUSIVE : EXIT.OK
 }
 
@@ -276,6 +318,16 @@ async function cmdGrant(flags, out, prompter) {
     return EXIT.CONSENT_UNCONFIRMED
   }
   if (!flags.yes && (!prompter.possible() || out.json)) throw new UsageError('not on a terminal: pass --yes to publish without confirmation')
+  // What the consent script never says (an unrestricted territory, no ceiling)
+  // needs a typed answer even after a perfect reading of it, and --json cannot
+  // give one: known now, so no clip is requested or paid to transcribe.
+  const alwaysAsked = flags.withConsent ? consentQuestions({ scope: { unchecked: ['validity', 'ceiling'] } }, grant, true) : []
+  if (alwaysAsked.length && out.json) {
+    const reason = `the consent script never covers ${alwaysAsked.map(q => q.item).join(', ')}, so a person must confirm ${alwaysAsked.length > 1 ? 'those' : 'that'} by typing at a terminal without --json; --yes does not skip it`
+    out.line(c.red(`\n  NOT STARTED — ${reason}. No clip was requested and nothing was published.\n`))
+    out.result({ granted: false, reason: 'consent confirmation impossible', detail: reason })
+    return EXIT.CONSENT_UNCONFIRMED
+  }
 
   let consent = null
   let consentSummary = null
@@ -337,8 +389,9 @@ async function cmdGrant(flags, out, prompter) {
     if (!(e instanceof DkgWriteError)) throw e
     return writeFailed(out, e, {
       what: 'grant', ids: { grantId: grant.id }, assetName, contextGraphId: cg, node: grantor.name,
-      check: `mandate revoke --id ${grant.id}`,
-      checkHow: 'reads the grants graph: "not anchored" means it has not landed (yet; check again after the node syncs), and once it has landed the same command revokes it. A dry-run `mandate render` for this subject also shows whether it permits under this id.',
+      // The check only reads: a command that revokes once the grant has landed is never offered as a check.
+      check: `mandate blast-radius --grant ${grant.id}`,
+      checkHow: `only reads the grants graph (from the producer node, which may lag the grantor): "not found in the grants graph" means it has not landed or not synced yet, so check again later; a UAL means it landed. To end a grant that landed, run \`mandate revoke --id ${grant.id}\`.`,
       extra: { granted: false, grant, consent: consentSummary },
     })
   }
@@ -440,9 +493,16 @@ async function cmdRevoke(flags, out, prompter) {
     return EXIT.REFUSED
   }
   const existing = revocationOf(grant, k.states)
-  if (existing.revoked) {
-    out.line(c.dim(`\n  ${grantId} is already revoked${existing.by.ual ? ` (${clean(existing.by.ual, 200)})` : ''}. Nothing was published.\n`))
-    out.result({ revoked: true, alreadyRevoked: true, by: existing.by })
+  // Only a revocation other nodes can see ends the grant for them: one anchored
+  // in Verifiable Memory (or remembered from this machine's own anchor). A row
+  // only in this node's merged view (tier context) is not, so it is published.
+  const visible = existing.all.filter(s => s?.tier === 'vm')
+  if (existing.revoked && !visible.length) {
+    out.line(c.yellow(`\n  ⚠ ${grantId} shows as revoked only in ${grantor.name}'s own merged view, with no anchored revocation other nodes can see; publishing one.`))
+  }
+  if (visible.length) {
+    out.line(c.dim(`\n  ${grantId} is already revoked${visible[0].ual ? ` (${clean(visible[0].ual, 200)})` : ''}. Nothing was published.\n`))
+    out.result({ revoked: true, alreadyRevoked: true, by: visible[0] })
     return EXIT.OK
   }
 
@@ -466,8 +526,8 @@ async function cmdRevoke(flags, out, prompter) {
     if (!(e instanceof DkgWriteError)) throw e
     return writeFailed(out, e, {
       what: 'revocation', ids: { grantId, stateId }, assetName, contextGraphId: cg, node: grantor.name,
-      check: `mandate revoke --id ${grantId}`,
-      checkHow: 'reads the grants graph: "already revoked" means it landed. If it has not landed yet, the same command publishes another revocation, which is harmless: any one revocation ends the grant for good.',
+      check: `mandate blast-radius --grant ${grantId}`,
+      checkHow: `only reads the grants graph (from the producer node, which may lag the grantor): "revoked" means it landed. If it still shows live after the nodes sync, \`mandate revoke --id ${grantId}\` publishes another revocation, which is harmless: any one revocation ends the grant for good.`,
       extra: { revoked: false, at },
     })
   }
@@ -481,6 +541,19 @@ async function cmdRevoke(flags, out, prompter) {
 }
 
 const finiteNonNegative = v => typeof v === 'number' && Number.isFinite(v) && v >= 0
+
+/**
+ * The producer node's address, once it is one of the trusted producers.
+ * Anything it anchors otherwise would not count toward spend under this
+ * configuration, so neither a render nor a record goes ahead from it.
+ */
+async function trustedProducerAddress(producer, cfg, consequence) {
+  const address = agentAddress((await producer.identity()).agentDid)
+  if (!address || !cfg.trustedProducers.includes(address)) {
+    throw new ConfigError(`the producer node ${address ?? '(no address)'} is not a trusted producer (MANDATE_TRUSTED_PRODUCERS: ${cfg.trustedProducers.join(', ') || 'none'}), so its derivations would not count toward spend; ${consequence}`)
+  }
+  return address
+}
 
 /** Local render records that may already be billed but have no derivation on the graph yet. */
 const OPEN_STATUSES = ['dispatching', 'submitted', 'rendered']
@@ -498,11 +571,17 @@ const OPEN_STATUSES = ['dispatching', 'submitted', 'rendered']
  * the same rule billedFor applies, so an estimate the operator shrank with
  * --seconds counts as unknown (which refuses under a ceiling) rather than as
  * the small number.
+ *
+ * A render this machine recorded counts too while its derivation is not in
+ * the knowledge the gate decides from (`knownDerivationIds`): knowledge read
+ * before another render on this machine finished would otherwise not see its
+ * spend at all.
  */
-function localPendingSpend(records, request) {
+function localPendingSpend(records, request, knownDerivationIds = new Set()) {
   const entries = []
   for (const rec of records) {
-    if (!(OPEN_STATUSES.includes(rec?.status) || mayBeBilled(rec)) || typeof rec.grantId !== 'string') continue
+    const recordedUnseen = rec?.status === 'recorded' && typeof rec.derivation?.id === 'string' && !knownDerivationIds.has(rec.derivation.id)
+    if (!(OPEN_STATUSES.includes(rec?.status) || mayBeBilled(rec) || recordedUnseen) || typeof rec.grantId !== 'string') continue
     if (rec.key === renderKey({ ...request, grantId: rec.grantId })) continue
     const known = billedFor(rec).usd
     const billedUsd = finiteNonNegative(rec.costUsdEstimated) && finiteNonNegative(rec.estimateUsd) ? Math.max(rec.costUsdEstimated, rec.estimateUsd) : known
@@ -541,6 +620,7 @@ async function cmdRender(flags, out) {
       if (flags.execute) throw e
     }
   }
+  let lease = null
   try {
     const price = await priceEstimate(capability, seconds, client, LP)
     const estimatedUsd = price.usd
@@ -560,15 +640,14 @@ async function cmdRender(flags, out) {
 
     const pending = pendingStore()
     const request = { capability, inputs, prompt: flags.prompt, sourceUrl: flags.sourceUrl, seconds }
-    const local = localPendingSpend(pending.list(), request)
-    const d = decide({ subject, capability, useClass, territory, at, estimatedUsd }, local.length ? { ...k, derivations: [...k.derivations, ...local] } : k)
-    const counted = local.filter(e => k.grants.some(g => g?.subject === subject && g.id === e.authorizedUnder))
-    if (counted.length) out.line(c.dim(`  counting ${counted.length} local render(s) not yet recorded on the graph (${counted.map(e => e.status).join(', ')}) against this subject's grants`))
-    printForgeries(out, d.forgeries)
-    printWarnings(out, d.warnings)
-    const localPending = counted.map(e => ({ key: e.id.slice('local-pending:'.length), status: e.status, grantId: e.authorizedUnder, billedUsd: e.billedUsd }))
-
-    if (!d.permit) {
+    /** Local pending spend and a decision from it, over the same knowledge. */
+    const decideWith = records => {
+      const local = localPendingSpend(records, request, new Set(k.derivations.map(x => x?.id).filter(id => typeof id === 'string')))
+      const decision = decide({ subject, capability, useClass, territory, at, estimatedUsd }, local.length ? { ...k, derivations: [...k.derivations, ...local] } : k)
+      const counted = local.filter(e => k.grants.some(g => g?.subject === subject && g.id === e.authorizedUnder))
+      return { d: decision, counted, localPending: counted.map(e => ({ key: e.id.slice('local-pending:'.length), status: e.status, grantId: e.authorizedUnder, billedUsd: e.billedUsd })) }
+    }
+    const refused = (d, localPending) => {
       out.line(c.red(`\n  REFUSED — clause: ${d.clause}`))
       out.line(`  ${clean(d.reason, 400)}`)
       out.line(c.green(`\n  $0 spent${d.spend.estimateUsd == null ? '' : `; ~$${d.spend.estimateUsd.toFixed(4)} not spent (${price.source})`}`) + c.dim(' — the capability was never invoked'))
@@ -576,6 +655,17 @@ async function cmdRender(flags, out) {
       out.result({ decision: d, price, localPending })
       return d.clause === 'read-inconsistent' ? EXIT.INCONCLUSIVE : d.clause === 'malformed-request' ? EXIT.USAGE : EXIT.REFUSED
     }
+    let { d, counted, localPending } = decideWith(pending.list())
+    if (counted.length) out.line(c.dim(`  counting ${counted.length} local render(s) not yet recorded on the graph (${counted.map(e => e.status).join(', ')}) against this subject's grants`))
+    // The gate trusts --seconds for a per-second price; nothing sends it to Livepeer or checks it against the inputs.
+    if (d.spend?.ceilingUsd != null && seconds !== undefined && ['second', 'character'].includes(price.unit)) {
+      price.note = `under this grant's $${d.spend.ceilingUsd} ceiling, the ~$${estimatedUsd == null ? '?' : estimatedUsd.toFixed(4)} estimate is per ${price.unit} × --seconds ${seconds}, which is taken as given: it is not sent to Livepeer or checked against the inputs, and the render is billed for its real length`
+      out.line(c.yellow(`  ⚠ ${price.note}`))
+    }
+    printForgeries(out, d.forgeries)
+    printWarnings(out, d.warnings)
+
+    if (!d.permit) return refused(d, localPending)
 
     out.line(c.green(`\n  PERMITTED under ${clean(d.grantId, 200)}`))
     out.line(c.dim(`  published by ${clean(d.publisher, 60)}${d.grantUal ? ` as ${clean(d.grantUal, 200)}` : ''}`))
@@ -587,31 +677,56 @@ async function cmdRender(flags, out) {
 
     // A render whose derivation would not count, or could not be written, must
     // not be paid for: the ceiling would never see it.
-    const producerAddress = agentAddress((await resolver.identity()).agentDid)
-    if (!producerAddress || !cfg.trustedProducers.includes(producerAddress)) {
-      throw new ConfigError(`the producer node ${producerAddress ?? '(no address)'} is not a trusted producer (MANDATE_TRUSTED_PRODUCERS), so its derivations would not count toward spend; nothing was dispatched`)
-    }
+    const producerAddress = await trustedProducerAddress(resolver, cfg, 'nothing was dispatched')
     derivationsCgFor(producerAddress)
 
     const key = renderKey({ grantId: d.grantId, ...request })
-    // A render that may already be billed is replayed under the key it was sent
-    // with, so leaving out --idempotency-key reuses the stored one instead of
-    // sending the derived key and billing a second time. A different explicit
-    // key is refused by the store (PendingInvariantError) before anything is sent.
-    const idempotencyKey = flags.idempotencyKey ?? (mayBeBilled(pending.load(key)) ? undefined : key)
-    const record = {
-      key, ...(idempotencyKey === undefined ? {} : { idempotencyKey }), status: 'dispatching', createdAt: new Date().toISOString(),
-      subject, capability, useClass, territory, seconds: seconds ?? null, inputs, prompt: flags.prompt ?? null, sourceUrl: flags.sourceUrl ?? null,
-      grantId: d.grantId, grantUal: d.grantUal, estimateUsd: estimatedUsd, estimateSource: price.source, priceUnit: price.unit ?? null,
+    const notDispatched = (e, ex) => {
+      out.line(c.yellow(`\n  NOT DISPATCHED — pending render ${key} is ${e.inFlight ? 'in use by another mandate process now' : `already ${clean(ex.status, 20)}`}${ex.jobId ? ` (job ${clean(ex.jobId, 60)})` : ''}.`))
+      out.line(c.dim(e.inFlight ? '  Wait for that process to finish, then check it with: mandate record --pending ' + key + '\n' : `  Finish it with: mandate record --pending ${key}\n`))
+      out.result({ decision: d, price, executed: false, pending: key, status: ex.status, inFlight: e.inFlight === true, jobId: ex.jobId ?? null })
+      return EXIT.RENDER_FAILED
+    }
+    // Held for this render's whole life (dispatch, polling, the derivation
+    // write), so a `record` or another render of the same key never works on it
+    // at the same time: that one exits 5 at once rather than wait.
+    try {
+      lease = pending.acquireLease(key)
+    } catch (e) {
+      if (!(e instanceof PendingConflictError)) throw e
+      return notDispatched(e, { status: 'in use' })
     }
     // The same request under the same grant has the same key. A record that
     // holds a running job, billed media or an anchored derivation is never
     // overwritten by a rerun; one that may be billed is resumed as a new
     // attempt under its stored key, keeping its history and its place in
     // local pending spend.
+    //
+    // Under the grant's lock, local pending spend is read again and the gate
+    // decides again, and the `dispatching` record (which counts in local
+    // pending spend) is saved before the lock is released: parallel renders
+    // under one grant on this machine each see the others before deciding.
     let begun
+    let changed = null
     try {
-      begun = pending.beginAttempt(record)
+      begun = pending.withGrantLock(d.grantId, () => {
+        const again = decideWith(pending.list())
+        if (!again.d.permit || again.d.grantId !== d.grantId) {
+          changed = again
+          return null
+        }
+        localPending = again.localPending
+        // A render that may already be billed is replayed under the key it was sent
+        // with, so leaving out --idempotency-key reuses the stored one instead of
+        // sending the derived key and billing a second time. A different explicit
+        // key is refused by the store (PendingInvariantError) before anything is sent.
+        const idempotencyKey = flags.idempotencyKey ?? (mayBeBilled(pending.load(key)) ? undefined : key)
+        return pending.beginAttempt({
+          key, ...(idempotencyKey === undefined ? {} : { idempotencyKey }), status: 'dispatching', createdAt: new Date().toISOString(),
+          subject, capability, useClass, territory, seconds: seconds ?? null, inputs, prompt: flags.prompt ?? null, sourceUrl: flags.sourceUrl ?? null,
+          grantId: d.grantId, grantUal: d.grantUal, estimateUsd: estimatedUsd, estimateSource: price.source, priceUnit: price.unit ?? null,
+        })
+      })
     } catch (e) {
       if (e instanceof PendingInvariantError) throw withExit(e, EXIT.USAGE)
       if (!(e instanceof PendingConflictError)) throw e
@@ -622,9 +737,15 @@ async function cmdRender(flags, out) {
         out.result({ decision: d, price, executed: false, alreadyRecorded: true, pending: key, mediaUrl: ex.mediaUrl ?? null, derivation: ex.derivation ?? null })
         return EXIT.OK
       }
-      out.line(c.yellow(`\n  NOT DISPATCHED — pending render ${key} is ${e.inFlight ? 'being dispatched by another mandate process now' : `already ${clean(ex.status, 20)}`}${ex.jobId ? ` (job ${clean(ex.jobId, 60)})` : ''}.`))
-      out.line(c.dim(e.inFlight ? '  Wait for that process to finish, then check it with: mandate record --pending ' + key + '\n' : `  Finish it with: mandate record --pending ${key}\n`))
-      out.result({ decision: d, price, executed: false, pending: key, status: ex.status, inFlight: e.inFlight === true, jobId: ex.jobId ?? null })
+      return notDispatched(e, ex)
+    }
+    if (changed) {
+      if (!changed.d.permit) {
+        out.line(c.yellow('\n  Another render under this grant on this machine was dispatched first; deciding again with it counted:'))
+        return refused(changed.d, changed.localPending)
+      }
+      out.line(c.yellow(`\n  NOT DISPATCHED — while waiting for another render on this machine, the decision moved to ${clean(changed.d.grantId, 200)}. Run the command again.\n`))
+      out.result({ decision: changed.d, price, executed: false, localPending: changed.localPending, decisionChanged: true })
       return EXIT.RENDER_FAILED
     }
     let sendKey = begun.record.idempotencyKey
@@ -650,10 +771,11 @@ async function cmdRender(flags, out) {
         const after = pending.finishAttempt(key, { status: 'failed', mayHaveStarted: false, errorKind: 'spend-cap', error: 'over the account 24h budget; not dispatched' })
         const stillOpen = after.status !== 'failed'
         out.line(c.red(`\n  NOT DISPATCHED — ~$${estimatedUsd.toFixed(4)} exceeds the account's remaining 24h budget of $${remaining.toFixed(2)}.`))
-        if (stillOpen) out.line(c.yellow(`  An earlier attempt of pending render ${key} may still have rendered and been billed; it keeps counting against the ceiling. Re-run this command later to recover it.`))
+        if (stillOpen) out.line(c.yellow(`  OUTCOME UNKNOWN — an earlier attempt of pending render ${key} may still have rendered and been billed; it keeps counting against the ceiling. Re-run this command later to recover it.`))
         out.line('')
-        out.result({ decision: d, price, executed: false, pending: key, status: after.status, spendCap: { checked: true, remainingUsd: remaining, note: null } })
-        return EXIT.PAYMENT
+        out.result({ decision: d, price, executed: false, pending: key, status: after.status, outcome: stillOpen ? 'unknown' : 'failed', spendCap: { checked: true, remainingUsd: remaining, note: null } })
+        // An earlier attempt's unknown outcome wins over the cap: 9, as for any render whose outcome is unknown.
+        return stillOpen ? EXIT.INCONCLUSIVE : EXIT.PAYMENT
       } else {
         Object.assign(spendCap, { checked: true, remainingUsd: remaining })
       }
@@ -703,9 +825,10 @@ async function cmdRender(flags, out) {
     }
     const renderMs = Date.now() - t0
     // servedCapability is null when the platform named something that is not a
-    // capability; the requested one is recorded then, with the warning shown.
-    const servedCapability = rendered.servedCapability ?? capability
-    pending.finishAttempt(key, { status: 'rendered', mayHaveStarted: true, jobId: rendered.jobId ?? null, mediaUrl: rendered.url, servedCapability, costUsdEstimated: finiteNonNegative(rendered.costUsdEstimated) ? rendered.costUsdEstimated : null, replay: rendered.replay === true, renderMs })
+    // capability. It is recorded as unknown, never as the requested one, and
+    // commitDerivation refuses to anchor it (see servedUnknown).
+    const servedCapability = rendered.servedCapability ?? null
+    pending.finishAttempt(key, { status: 'rendered', mayHaveStarted: true, jobId: rendered.jobId ?? null, mediaUrl: rendered.url, servedCapability, servedCapabilityUnknown: servedCapability === null, costUsdEstimated: finiteNonNegative(rendered.costUsdEstimated) ? rendered.costUsdEstimated : null, replay: rendered.replay === true, renderMs })
     out.line(c.dim(`  rendered in ${Math.round(renderMs / 1000)}s${rendered.replay ? ' (idempotent replay: not billed again)' : ''}; recording the derivation before releasing the media…`))
     for (const w of Array.isArray(rendered.warnings) ? rendered.warnings : []) out.line(c.yellow(`  ⚠ ${clean(w, 240)}`))
     if (rendered.servedCapability != null && rendered.servedCapability !== capability) {
@@ -713,6 +836,7 @@ async function cmdRender(flags, out) {
     }
     return await commitDerivation(out, pending, pending.load(key), { decision: d, price, spendCap, localPending })
   } finally {
+    lease?.release()
     await client?.close().catch(() => {})
   }
 }
@@ -804,11 +928,12 @@ async function commitDerivation(out, pending, rec, extra = {}) {
     }
     // The HTTP status of a publish refusal is what tells a 4xx (sent nothing)
     // from an older record whose `publish` stage may have followed a broadcast.
+    // A generic error learned nothing about the publish, so the saved status stays.
     const publishStatus = !blocked && stage === 'publish' && Number.isInteger(e?.status) ? e.status : null
-    const saved = { ...(pending.load(rec.key) ?? rec), status: 'rendered', error: clean(message, 600), stage, ...(blocked ? {} : { derivationPublishStatus: publishStatus }) }
+    const saved = { ...(pending.load(rec.key) ?? rec), status: 'rendered', error: clean(message, 600), stage, ...(blocked || stage === 'error' ? {} : { derivationPublishStatus: publishStatus }) }
     pending.save(saved)
     const known = saved.derivationAttempt ?? {}
-    const permanent = blocked ? blocked.permanent : PERMANENT_STAGES.has(stage)
+    const permanent = blocked ? blocked.permanent : PERMANENT_STAGES.has(stage) || PERMANENT_STAGES.has(known.stage)
     const waiting = !permanent && (stage === 'resume-unverified' || known.mayHaveSent === true)
     out.line(c.red(`\n  DERIVATION ${blocked ? 'NOT RETRIED' : 'FAILED TO COMMIT'} — treating this render as failed.`))
     out.line(c.red(`  ${clean(message, 400)}`))
@@ -827,8 +952,38 @@ async function commitDerivation(out, pending, rec, extra = {}) {
     return EXIT.DERIVATION_FAILED
   }
 
+  // Fail closed on a serving capability the platform named but that is not a
+  // capability name. Recording the requested one would claim no substitution
+  // happened, and verify would read CLEAR under a capability the grant may not
+  // permit; there is no marker a grant could never permit, so nothing is
+  // anchored. Trade-off: the render stays billed and unrecorded, its URL
+  // withheld, and it keeps counting against the ceiling on this machine.
+  if (rec.servedCapabilityUnknown === true) {
+    const message = `the platform named a serving capability that is not a capability name, so what served this render is unknown; a derivation under ${clean(rec.capability, 64)} could verify CLEAR under the wrong capability, so none is anchored`
+    pending.save({ ...(pending.load(rec.key) ?? rec), status: 'rendered', error: message, stage: 'served-unknown' })
+    out.line(c.red('\n  DERIVATION NOT RECORDED — the serving capability is unknown.'))
+    out.line(c.red(`  ${message}`))
+    out.line(c.dim('  The render exists and may be billed, so its URL is withheld and it keeps counting against the ceiling on this machine.\n'))
+    out.result({ ...extra, executed: true, rendered: true, derivation: null, pending: rec.key, error: message, stage: 'served-unknown', servedCapability: null })
+    return EXIT.DERIVATION_FAILED
+  }
+
+  // Before anything is hashed, looked up or published: a derivation from a
+  // producer this configuration does not trust would not count toward spend,
+  // yet recording it would release the media and drop the render from local
+  // pending spend. Refused as render refuses (exit 1), leaving the record as it is.
+  let address
   try {
-    const address = agentAddress((await producer.identity()).agentDid)
+    address = agentAddress((await producer.identity()).agentDid)
+  } catch (e) {
+    return fail(e)
+  }
+  const trusted = readConfig().trustedProducers
+  if (!address || !trusted.includes(address)) {
+    throw new ConfigError(`the producer node ${address ?? '(no address)'} is not a trusted producer (MANDATE_TRUSTED_PRODUCERS: ${trusted.join(', ') || 'none'}), so its derivations would not count toward spend; nothing was recorded, and pending render ${rec.key} is left ${rec.status}`)
+  }
+
+  try {
     const cg = derivationsCgFor(address)
     const sha = await hashUrl(rec.mediaUrl)
 
@@ -838,7 +993,8 @@ async function commitDerivation(out, pending, rec, extra = {}) {
     if (rec.replay === true) {
       const k = await readKnowledge(producer, readConfig(), { grantId: rec.grantId })
       if (!k.consistency.ok) throw withExit(new Error(`cannot tell whether this replayed render is already recorded: ${k.consistency.reason}`), EXIT.DERIVATION_FAILED)
-      const existing = k.derivations.find(x => x?.trusted === true && x.authorizedUnder === rec.grantId && ((rec.jobId && x.jobId === rec.jobId) || x.outputSha256 === sha))
+      // The bytes must be the ones recorded, and a job id on both sides must agree: a job id alone never vouches for other bytes.
+      const existing = k.derivations.find(x => x?.trusted === true && x.authorizedUnder === rec.grantId && x.outputSha256 === sha && !(rec.jobId && x.jobId && x.jobId !== rec.jobId))
       if (existing) {
         const derivation = { id: existing.id, ual: existing.ual ?? null, txHash: null, outputSha256: existing.outputSha256, existing: true }
         pending.save({ ...rec, status: 'recorded', derivation })
@@ -857,6 +1013,14 @@ async function commitDerivation(out, pending, rec, extra = {}) {
       if (blocked) return fail(null, { blocked })
       resume = true
       unknownPublish = lastPublishUnknown(rec, attempt)
+      // Marked in flight before the resume may call vm/publish, exactly like a
+      // first attempt: `started` is not resumable, so a crash mid-publish leaves
+      // a stage the next retry checks against the node. The saved publish status
+      // belongs to the earlier attempt and goes. Trade-off: a resume that dies
+      // before publishing (a lost share reply) then waits for the node to show
+      // the asset sealed or published instead of continuing at once.
+      rec = pending.noteDerivationAttempt(rec.key, { stage: 'started' })
+      rec = pending.save({ ...rec, derivationPublishStatus: null })
     } else {
       const nonce = nonce16()
       attempt = { id: `urn:mandate:derivation:${sha.slice(0, 16)}:${nonce}`, name: `derivation-${sha.slice(0, 16)}-${nonce}` }
@@ -891,6 +1055,26 @@ async function commitDerivation(out, pending, rec, extra = {}) {
   }
 }
 
+/** Job statuses that end a job without media: the same set src/execute.mjs polls for. */
+const JOB_FAILED_STATUSES = new Set(['failed', 'failure', 'error', 'errored', 'cancelled', 'canceled', 'aborted', 'abandoned', 'rejected', 'expired', 'timed_out', 'timeout'])
+
+/**
+ * Whether a poll error is the platform saying this very job failed: a
+ * RenderError for the same job id whose reply carries one of those statuses.
+ * A timeout, an unrecognised status, a job with no media or a reply about
+ * another job say nothing certain, and stay unresolved.
+ */
+function jobFailedForCertain(e, jobId) {
+  if (e?.constructor?.name !== 'RenderError' || !['tool', 'payment'].includes(e.kind)) return false
+  if (typeof jobId !== 'string' || e.jobId !== jobId) return false
+  const status = e.structured?.status
+  if (typeof status !== 'string') return false
+  const s = status.trim().toLowerCase().replace(/[ -]+/g, '_')
+  if (!JOB_FAILED_STATUSES.has(s)) return false
+  const other = e.structured.job_id
+  return other === undefined || other === null || (typeof other === 'string' && other.toLowerCase() === jobId.toLowerCase())
+}
+
 /** Finish a render whose derivation did not commit, or list the ones waiting. */
 async function cmdRecord(flags, out) {
   const pending = pendingStore()
@@ -903,12 +1087,39 @@ async function cmdRecord(flags, out) {
     out.result({ pending: open })
     return EXIT.OK
   }
+  // The key's lease is held for the whole record (polling and the derivation
+  // write), and a render holds it for its whole life, so two processes never
+  // work on one render at once: this one exits 5 at once instead of waiting.
+  let lease
+  try {
+    lease = pending.acquireLease(flags.pending)
+  } catch (e) {
+    if (!(e instanceof PendingConflictError)) throw e
+    out.line(c.yellow(`\n  NOT RECORDED HERE — ${clean(e.message, 400)}\n`))
+    out.result({ pending: flags.pending, inFlight: true, outcome: 'in-use', error: clean(e.message, 600) })
+    return EXIT.RENDER_FAILED
+  }
+  try {
+    return await recordPending(flags, out, pending)
+  } finally {
+    lease.release()
+  }
+}
+
+/** `record --pending`, holding the key's lease: the record is loaded only now, so nothing read before the lease is acted on. */
+async function recordPending(flags, out, pending) {
   let rec = pending.load(flags.pending)
   if (!rec) throw new UsageError(`no pending render ${flags.pending} in ${pending.dir}`)
   if (rec.status === 'recorded') {
     out.line(c.dim(`\n  already recorded: ${clean(rec.derivation?.ual, 200)}\n`))
     out.result({ ...rec })
     return EXIT.OK
+  }
+  if (rec.status === FAILED_CONFIRMED) {
+    out.line(c.dim(`\n  ${rec.key}: job ${clean(rec.jobId ?? 'none', 60)} was reported failed and is settled (${clean(rec.error ?? '', 200)}); nothing to record.\n`))
+    const { mediaUrl, ...shown } = rec
+    out.result({ ...shown, outcome: 'failed' })
+    return EXIT.RENDER_FAILED
   }
   if (!rec.mediaUrl) {
     if (!rec.jobId) {
@@ -930,13 +1141,23 @@ async function cmdRecord(flags, out) {
     try {
       const done = await LP.pollJob(client, rec.jobId, { inputUrls: [rec.sourceUrl, rec.inputs], maxWaitMs: 10 * 60_000, capability: rec.capability })
       // Both are validated by pollJob: null when the platform's value could not be recorded.
-      const servedCapability = done.servedCapability ?? rec.capability
-      pending.save({ ...rec, status: 'rendered', mediaUrl: done.url, servedCapability, costUsdEstimated: finiteNonNegative(done.costUsdEstimated) ? done.costUsdEstimated : null })
+      const servedCapability = done.servedCapability ?? null
+      pending.save({ ...rec, status: 'rendered', mediaUrl: done.url, servedCapability, servedCapabilityUnknown: servedCapability === null, costUsdEstimated: finiteNonNegative(done.costUsdEstimated) ? done.costUsdEstimated : null })
       for (const w of Array.isArray(done.warnings) ? done.warnings : []) out.line(c.yellow(`  ⚠ ${clean(w, 240)}`))
       if (done.servedCapability != null && done.servedCapability !== rec.capability) {
         out.line(c.yellow(`  ⚠ the platform reports ${clean(done.servedCapability, 60)} served this render, not ${clean(rec.capability, 60)}; it is recorded as served`))
       }
     } catch (e) {
+      if (jobFailedForCertain(e, rec.jobId)) {
+        // Settled with allowResolve: the history stays, and it stops counting
+        // toward local pending spend (see FAILED_CONFIRMED for the trade-off).
+        const settled = pending.save({ ...rec, status: FAILED_CONFIRMED, error: clean(e.message, 600), errorKind: e.kind ?? null, failedConfirmedAt: new Date().toISOString(), jobStatus: clean(e.structured.status, 40) }, { allowResolve: true })
+        out.line(c.red(`\n  JOB FAILED — ${clean(e.message, 300)}`))
+        out.line(c.dim(`  The platform reports job ${clean(rec.jobId, 60)} as ${clean(e.structured.status, 40)}. Marked ${FAILED_CONFIRMED}: it no longer counts against the ceiling on this machine, and its attempts are kept.\n`))
+        const { mediaUrl, ...shown } = settled
+        out.result({ ...shown, error: clean(e.message, 600), kind: e.kind ?? null, outcome: 'failed' })
+        return e.kind === 'payment' ? EXIT.PAYMENT : EXIT.RENDER_FAILED
+      }
       pending.save({ ...rec, error: clean(e.message, 600), errorKind: e.kind ?? null })
       out.line(c.red(`\n  job ${clean(rec.jobId, 60)}: ${clean(e.message, 300)}\n`))
       const { mediaUrl, ...shown } = rec
@@ -994,7 +1215,11 @@ async function captureAndCheck(flags, out, requested, { allowForce = false } = {
     out.line(c.dim(`  The spoken scope could not be checked, and --force does not override that.${kind === 'video' ? ' Re-record; audio only (--consent-kind audio) may transcribe more reliably.' : ' Re-record.'}\n`))
     return { code: EXIT.CONSENT_UNCONFIRMED, summary }
   }
-  out.notice(`\n  transcript  "${clean(r.transcript, 1200)}"\n`)
+  const transcript = reviewText(r.transcript)
+  const transcriptTooLong = transcript.length > TRANSCRIPT_REVIEW_MAX
+  out.notice(transcriptTooLong
+    ? `\n  transcript  (${transcript.length} characters: over the ${TRANSCRIPT_REVIEW_MAX}-character review limit, so it is not shown)\n`
+    : `\n  transcript  "${transcript}"\n`)
   for (const chk of r.scope.checks) {
     const mark = chk.contradicted ? c.red('✗ contradicted') : chk.matched ? c.green('✓ said') : c.yellow('? not said')
     // Shown on stderr too in --json mode: a person confirming the clip needs them.
@@ -1014,10 +1239,21 @@ async function captureAndCheck(flags, out, requested, { allowForce = false } = {
   }
   // Shown on stderr too in --json mode: a person deciding about the clip needs them.
   out.notice(c.yellow('\n  NOT A READING OF THE CONSENT SCRIPT — the words cannot be confirmed automatically.'))
-  out.notice(`    script      "${clean(script, 600)}"`)
+  const missingWords = Array.isArray(sm?.missing) ? reviewText(sm.missing.join(' ')) : ''
+  const extraWords = Array.isArray(sm?.extra) ? reviewText(sm.extra.join(' ')) : ''
+  // Never cut: words a person confirms are shown whole, or the clip is refused.
+  const extraCount = Array.isArray(sm?.extra) ? sm.extra.length : 0
+  if (transcriptTooLong || extraCount > EXTRA_WORDS_REVIEW_MAX || extraWords.length > TRANSCRIPT_REVIEW_MAX || missingWords.length > TRANSCRIPT_REVIEW_MAX) {
+    const reason = transcriptTooLong || extraWords.length > TRANSCRIPT_REVIEW_MAX || missingWords.length > TRANSCRIPT_REVIEW_MAX
+      ? `the transcript is ${transcript.length} characters, over the ${TRANSCRIPT_REVIEW_MAX}-character limit a person can be asked to review in full`
+      : `${extraCount} or more words are outside the consent script, more than the ${EXTRA_WORDS_REVIEW_MAX} that can be listed in full for review`
+    out.line(c.red(`\n  TOO LONG TO REVIEW — ${reason}. Nothing is confirmed from words that were not all shown. Re-record: the person reads the consent script, and nothing else.\n`))
+    return { code: EXIT.CONSENT_UNCONFIRMED, summary: { ...summary, reason: 'transcript too long to review' } }
+  }
+  out.notice(`    script      "${reviewText(script)}"`)
   out.notice(`    transcript  (above)`)
-  out.notice(`    missing    ${Array.isArray(sm?.missing) && sm.missing.length ? clean(sm.missing.join(' '), 400) : '(nothing)'}`)
-  out.notice(`    extra       ${Array.isArray(sm?.extra) && sm.extra.length ? clean(sm.extra.join(' '), 400) : '(nothing)'}`)
+  out.notice(`    missing    ${missingWords || '(nothing)'}`)
+  out.notice(`    extra       ${extraWords || '(nothing)'}`)
   // Without an affirmative first-person "I consent", nothing else said is consent.
   if (r.scope.affirmative !== true) {
     out.line(c.red('\n  NO CONSENT SAID — the clip has no affirmative first-person consent ("I consent", "I agree", "I give permission"). --force does not override this.\n'))
@@ -1076,6 +1312,7 @@ async function cmdVerify(flags, out) {
   out.line(c.bold('\nThird-party verification\n'))
   if (flags.url) out.line(`  file      ${clean(flags.url, 120)}`)
   out.line(c.dim(`  reading   ${node.name} — ${label}`))
+  const config = configInEffect(out, cfg)
   const sha256 = flags.sha256 ?? await hashUrl(flags.url)
   out.line(`  sha256    ${sha256}`)
 
@@ -1087,7 +1324,7 @@ async function cmdVerify(flags, out) {
   const paint = r.verdict === CLEAR ? c.green : r.verdict === TAINTED ? c.red : c.yellow
   out.line(paint(`\n  ${r.verdict}${r.subStatus ? ` / ${r.subStatus}` : ''}`))
   out.line(`  ${clean(r.reason, 400)}\n`)
-  out.result({ ...r, node: node.name, nodeRole: role })
+  out.result({ ...r, node: node.name, nodeRole: role, config })
   return r.verdict === CLEAR ? EXIT.OK : r.verdict === INCONCLUSIVE ? EXIT.INCONCLUSIVE : EXIT.REFUSED
 }
 
@@ -1168,6 +1405,8 @@ async function main(argv) {
   const out = makeOutput({ json: flags.json })
   const prompter = makePrompter(out)
   try {
+    loadMandateEnv({ flag: flags.envPath })
+    for (const w of envLoad.warnings) console.error(c.yellow(`  ⚠ ${clean(w, 600)}`))
     return await COMMAND_FNS[command](flags, out, prompter)
   } catch (e) {
     const code = exitFor(e)

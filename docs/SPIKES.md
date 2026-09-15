@@ -20,6 +20,7 @@ Sections are in the order they were run. Scratch output from the early spikes we
 | S7 Live render | GREEN inline (`sync-lipsync-v3`, 103 s); async worker abandons at ~128 s | "S7" |
 | Graph omission in `/api/query` | reproduced on both nodes; handled by merged, checked reads | "DKG v10.0.16 leaves whole named graphs out" |
 | Read-only verifier node | GREEN, no funded wallet | "A third, read-only verifier node" |
+| Node.js `--env-file` after the script name | reproduced on Node v26.0.0: Node applies it; Mandate's flag is `--env-path` | "Node.js reads `--env-file` anywhere on the command line" |
 
 The table below is the day-zero snapshot, kept as it was.
 
@@ -569,7 +570,9 @@ Use a pymthouse composite key instead — Authorization: Bearer app_<appId>_pmth
 
 What that means in practice:
 
-- **A present-but-retired key is worse than no key.** With it in `.env`, every
+- **A present-but-retired key is worse than no key.** With it in `.env` (the env file
+  was then read from the working directory; it is now `~/.mandate/.env` or the file
+  named with `--env-path`), every
   Livepeer call Mandate makes fails at connection time, including calls that work
   keyless. Removing it restored `describe_capability` and `request_upload`
   immediately.
@@ -723,3 +726,33 @@ On 13 Sep the verifier then resolved the S6c subject in 16 s with the same verdi
 the other two nodes; that first read was observed, not saved. The 14 Sep `--reread`
 recorded a verifier read with the same verdict, which is the one in the S6c table above
 and in [`s6c-forgery.txt`](evidence/s6c-forgery.txt).
+
+## Node.js reads `--env-file` anywhere on the command line (2026-09-14)
+
+Found while moving the CLI's env file out of the working directory (a folder someone
+sends a verifier must not be able to choose whom it trusts). The obvious flag name,
+`--env-file`, is not safe for a Node script. On Node v26.0.0, with a file `y.env` holding
+`NODE_OPTIONS=--require=<path>/evil.cjs` and a script that only prints its arguments:
+
+```
+$ node script.mjs status --env-file y.env
+EVIL LOADED
+script ran [ 'status', '--env-file', 'y.env' ]
+
+$ node script.mjs status --env-file missing.env
+node: missing.env: not found            # exit 9, before the script runs
+
+$ node script.mjs status --env-path y.env
+script ran [ 'status', '--env-path', 'y.env' ]
+```
+
+Node scans the whole argv for `--env-file`, even after the script name, loads that file
+into the environment and honours a `NODE_OPTIONS` in it before any of the script's code
+runs. So a Mandate flag of that name would let the file it names run code in the CLI,
+and a missing file would exit 9, which Mandate uses for INCONCLUSIVE.
+
+Consequences in Mandate: the flag is `--env-path`. `mandate`, `scripts/nodes.mjs` and
+`scripts/publish-skill.mjs` refuse `--env-file` and `--env-file-if-exists` with exit 1 and
+point to `--env-path`. The refusal runs inside the script, so it cannot stop Node from
+having already applied the file; it only stops anyone from believing Mandate read it.
+Only `MANDATE_*` keys and `LIVEPEER_AGENT_KEY` are taken from the file `--env-path` names.

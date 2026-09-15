@@ -147,13 +147,33 @@ const LOOPBACK = new Set(['127.0.0.1', 'localhost', '[::1]'])
 /**
  * Why this reply, or a part of it, says the transcription did not succeed, or
  * null. Looked for at the top level and inside result, output and run_output,
+ * two levels deep (result.result), and in every element of an array there,
  * because a failure can be reported at any of them.
  */
 function failureOf(reply) {
-  const layers = [reply, reply?.result, reply?.output, reply?.run_output].filter(x => x && typeof x === 'object' && !Array.isArray(x))
+  const layers = []
+  const walk = (x, depth) => {
+    if (Array.isArray(x)) { for (const y of x) walk(y, depth); return }
+    if (!x || typeof x !== 'object') return
+    layers.push(x)
+    if (depth < 2) for (const k of ['result', 'output', 'run_output']) walk(x[k], depth + 1)
+  }
+  walk(reply, 0)
+  const said = v => String(v?.message ?? v).slice(0, 300)
   for (const o of layers) {
-    if (o.ok === false || o.success === false) return `transcription failed: ${String(o.error?.message ?? o.error ?? o.message ?? 'the platform answered ok: false').slice(0, 300)}`
-    if (o.error) return `transcription failed: ${String(o.error.message ?? o.error).slice(0, 300)}`
+    if (o.ok === false || o.success === false) return `transcription failed: ${said(o.error ?? o.message ?? 'the platform answered ok: false')}`
+    if (o.error) return `transcription failed: ${said(o.error)}`
+    // Flags outside the live shape, read the strict way: a success that is
+    // present but not true, any failed, errors or error_message that says
+    // something, and a result the platform marks partial or truncated (the
+    // lost tail could be a retraction).
+    if ('success' in o && o.success !== true) return `transcription failed: success is ${said(JSON.stringify(o.success))}`
+    if (o.failed != null && o.failed !== false) return 'transcription failed: the platform marked it failed'
+    if (Array.isArray(o.errors) ? o.errors.length > 0 : o.errors != null && o.errors !== '' && !(typeof o.errors === 'object' && !Object.keys(o.errors).length)) return `transcription failed: ${said(JSON.stringify(o.errors))}`
+    if (o.error_message != null && o.error_message !== '') return `transcription failed: ${said(o.error_message)}`
+    for (const flag of ['partial', 'truncated', 'incomplete']) {
+      if (o[flag] != null && o[flag] !== false) return `transcription is ${flag}; what was cut off may change what was said`
+    }
     for (const field of ['status', 'state', 'job_status', 'phase']) {
       if (o[field] == null) continue
       const status = typeof o[field] === 'string' ? o[field].trim().toLowerCase() : ''
@@ -193,6 +213,14 @@ async function fetchTranscriptLink(link, sourceUrl, { fetch, timeoutMs, maxBytes
   }
   const cancel = () => r.body?.cancel?.().catch(() => {})
   if (!r.ok) { cancel(); throw new ConsentError(`transcript link returned HTTP ${r.status}`, { stage: 'asr' }) }
+  // fetch follows redirects, so the https rule is checked again on where it
+  // ended: an https link that redirects to plain http lets anyone on the path
+  // write the words.
+  if (r.url) {
+    let final
+    try { final = new URL(r.url) } catch { cancel(); throw new ConsentError('transcript link redirected to something that is not a URL', { stage: 'asr' }) }
+    if (final.protocol !== 'https:' && !(final.protocol === 'http:' && LOOPBACK.has(final.hostname))) { cancel(); throw new ConsentError(`transcript link redirected off https, to ${final.protocol}//${final.hostname}`, { stage: 'asr' }) }
+  }
   if (r.url && sameResource(r.url, sourceUrl)) { cancel(); throw new ConsentError('transcript link redirects to the consent clip itself', { stage: 'asr' }) }
   const type = r.headers.get('content-type') ?? ''
   if (!TEXT_TYPES.test(type)) { cancel(); throw new ConsentError(`transcript link is ${type || 'of no declared type'}, not text or JSON`, { stage: 'asr' }) }
@@ -211,6 +239,13 @@ async function fetchTranscriptLink(link, sourceUrl, { fetch, timeoutMs, maxBytes
     // A dropped socket or a timeout mid-body is still a transcription failure.
     if (e instanceof ConsentError) throw e
     throw new ConsentError(`transcript link failed while reading: ${e?.message ?? e}`, { stage: 'asr' })
+  }
+  // A body shorter than the length it declared was cut off, and the cut-off
+  // tail could be a retraction. Only checked when the body is not re-encoded,
+  // since a compressed body's declared length is not its decoded length.
+  const encoding = (r.headers.get('content-encoding') ?? '').trim().toLowerCase()
+  if (Number.isFinite(declared) && r.headers.get('content-length') != null && (encoding === '' || encoding === 'identity') && bytes !== declared) {
+    throw new ConsentError(`transcript is truncated: ${bytes} of ${declared} declared bytes`, { stage: 'asr' })
   }
   let body
   try {

@@ -389,7 +389,9 @@ export function checkSpokenScope(transcript, requested = {}) {
   // Closed world: only a reading of the script is confirmed. The heuristics can
   // still contradict it (a hard stop), but they can never confirm anything else.
   const scriptMatch = matchScript(transcript, requested)
-  const confirmed = scriptMatch.matched && contradicted.length === 0
+  // The heuristics only ever refuse more: a reading they do not hear as
+  // affirmative first-person consent (a question, a hedge) is not confirmed.
+  const confirmed = scriptMatch.matched && contradicted.length === 0 && checks[0].matched === true
   const differences = [scriptMatch.missing.length ? `missing: ${scriptMatch.missing.join(' ')}` : '', scriptMatch.extra.length ? `extra: ${scriptMatch.extra.join(' ')}` : ''].filter(Boolean).join('; ')
   return {
     checks,
@@ -397,7 +399,8 @@ export function checkSpokenScope(transcript, requested = {}) {
     contradicted,
     covered: checks.filter(c => c.matched).length,
     total: checks.length,
-    empty: norm.trim().length === 0,
+    // Speech in another script leaves nothing in norm, but it was still said.
+    empty: norm.trim().length === 0 && scriptWords(transcript).length === 0,
     affirmative: checks[0].matched,
     unchecked,
     script: consentScript(requested),
@@ -418,21 +421,40 @@ export function checkSpokenScope(transcript, requested = {}) {
 // generated script and nothing else: every script word in order, every term
 // word exactly, and nothing extra but a few sounds that carry no meaning.
 
-// ASR drops short words; it may drop at most this many non-critical script
-// words ("to", "of", "my", "for", "in", "and", "spending", "is", "at",
-// "dollars") and still match. A critical word is never allowed to go missing.
-// Deliberately stricter than the minimum: besides I, consent and every term
-// word, "until", the date, "capped" and the amount are critical too.
+// ASR drops short words. A reading may miss at most SCRIPT_MAX_MISSES (two)
+// script words, and only from the seven non-critical joining words: "to",
+// "of", "for", "in", "and" (between listed terms), "is" and "at". Every other
+// script word is critical and never allowed to go missing: I, consent, every
+// term word, "my", "likeness", "until", each word of the date, "spending",
+// "capped", the amount and "US dollars" (a bare "dollars" or "$" is not). "of the likeness" (no "my") and
+// "capped at 5" (no "dollars") change what was agreed, so they are not readings.
+// A "?" and any letter, digit or symbol outside a-z0-9 are words of their own
+// (see scriptWords), so they are extra, never filler.
 export const SCRIPT_MAX_MISSES = 2
 // Unaligned transcript words that may be ignored. Deliberately short and closed:
-// no negators, no conjunctions ("but", "and"), no conditionals, and not "right"
-// ("yeah right") or "like".
-const SCRIPT_FILLER = new Set(['um', 'umm', 'uh', 'uhh', 'er', 'erm', 'ah', 'hmm', 'mm', 'hi', 'hello', 'hey', 'so', 'okay', 'ok', 'yes', 'yeah', 'well', 'a', 'an', 'the'])
+// only words that cannot carry a refusal on their own or in any combination of
+// themselves. A person reads any transcript with anything else in it.
+//   "a", "an", "the": ASR inserts articles ("in the UK", "the 13th of December").
+//     No sequence of articles says no, and the places an article could change
+//     what was agreed are closed elsewhere: "of the likeness" misses the
+//     critical "my", and "a fifth" is not read as the number 5 (numbersToDigits).
+//   "hi", "hello": a greeting before the reading. Said as a question ("hello?")
+//     the "?" is a word of its own and blocks the match.
+// Deliberately NOT filler, because each can carry a refusal:
+//   vocal sounds (uh, um, er, erm, ah, hmm, mm, mhm and their spellings): "uh-uh",
+//     "mm-mm", "hmm-mm", "ah-ah", "nuh-uh" and "mhm-mhm" are spoken "no", and the
+//     hyphen is dropped before words are compared, so no pairing rule is safe;
+//   "yes", "yeah", "okay", "ok": "yeah, yeah" and "okay, okay" are dismissive;
+//   "so", "well", "hey": "well..." is reluctance and "hey!" is a protest;
+//   negators, conjunctions ("but", "and"), conditionals, "right" ("yeah right"), "like".
+const SCRIPT_FILLER = new Set(['hi', 'hello', 'a', 'an', 'the'])
 
 const MONTHS = new Set(['january', 'february', 'march', 'april', 'may', 'june', 'july', 'august', 'september', 'october', 'november', 'december'])
 const ONES = ['zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten', 'eleven', 'twelve', 'thirteen', 'fourteen', 'fifteen', 'sixteen', 'seventeen', 'eighteen', 'nineteen']
 const ONES_ORD = ['zeroth', 'first', 'second', 'third', 'fourth', 'fifth', 'sixth', 'seventh', 'eighth', 'ninth', 'tenth', 'eleventh', 'twelfth', 'thirteenth', 'fourteenth', 'fifteenth', 'sixteenth', 'seventeenth', 'eighteenth', 'nineteenth']
 const TENS = { twenty: 20, thirty: 30, forty: 40, fifty: 50, sixty: 60, seventy: 70, eighty: 80, ninety: 90, twentieth: 20, thirtieth: 30 }
+const ORDINALS = new Set([...ONES_ORD, 'twentieth', 'thirtieth'])
+const CURRENCY_NEXT = new Set(['dollars', 'dollar', 'usd', 'us', 'u', 'usa', 'american', 'united', 'point'])
 const UNIT = new Map([...ONES.map((w, i) => [w, i]), ...ONES_ORD.map((w, i) => [w, i])])
 
 /** A number said in words below 100 at tokens[i]: { v, next } or null. */
@@ -459,6 +481,13 @@ function numbersToDigits(t) {
   for (let i = 0; i < t.length;) {
     let n = belowThousand(t, i)
     if (!n) { out.push(t[i]); i++; continue }
+    // An ordinal is a day of the month, never an amount: "a fifth" and "fifth
+    // dollars" are a fraction or nonsense, not 5, so their words stay as said.
+    if (t.slice(i, n.next).some(w => ORDINALS.has(w)) && (['a', 'an'].includes(t[i - 1]) || CURRENCY_NEXT.has(t[n.next]))) {
+      out.push(...t.slice(i, n.next))
+      i = n.next
+      continue
+    }
     if (t[n.next] === 'thousand') {
       let j = n.next + 1
       if (t[j] === 'and' && belowThousand(t, j + 1)) j++
@@ -478,8 +507,11 @@ function numbersToDigits(t) {
 
 /** Words of one piece of speech, in the one canonical form both sides are compared in. */
 export function scriptWords(text) {
-  const s = ` ${String(text ?? '').toLowerCase().normalize('NFKD').replace(/[\u0300-\u036f]/g, '')} `
+  // The Greek question mark folds to ";" under NFKD, so it is read as a question mark first.
+  const s = ` ${String(text ?? '').replace(/\u037e/g, ' ? ').toLowerCase().normalize('NFKD').replace(/[\u0300-\u036f]/g, '')} `
     .replace(/&/g, ' and ')
+    // "US$5" is US dollars; a bare "$5" is dollars of no named country.
+    .replace(/\b(?:us|usa|u\.s\.a?\.?)\s*\$\s*(\d[\d,]*(?:\.\d+)?)/g, ' $1 usd ')
     .replace(/\$\s*(\d[\d,]*(?:\.\d+)?)/g, ' $1 dollars ')
     .replace(/(\d),(?=\d{3}\b)/g, '$1')
     // 5.00 is 5 and 2.50 is 2 point 5, so a spoken "two point five" can match either.
@@ -487,7 +519,17 @@ export function scriptWords(text) {
     .replace(/\b(\d+)(?:st|nd|rd|th)\b/g, '$1')
     // U.K., U.S.A.: letters joined, so they are one word like UK and USA.
     .replace(/\b[a-z](?:\.[a-z])+\.?/g, m => m.replace(/\./g, ''))
-    .replace(/[^a-z0-9]+/g, ' ')
+    // A question mark, in any script, is a word of its own: the script never
+    // asks anything, so a reading said as a question is not a reading of it.
+    // Armenian, Ethiopic, Limbu, Old Nubian, Vai, Bamum, Chakma and Adlam marks
+    // are punctuation, not letters, so without this they would be dropped.
+    .replace(/[?\u00bf\u055e\u061f\u1367\u1945\u203d\u2cfa\u2cfb\u2e2e\ua60f\ua6f7\u{11143}\u{1e95f}]/gu, ' ? ')
+    // Closed world: a letter, digit, symbol or mark that did not fold to a-z0-9
+    // (Cyrillic, CJK, Arabic, Devanagari, small capitals, emoji, a cross mark)
+    // is never thrown away. Each run of them is one word, so it is extra and
+    // blocks the match: a refusal in another script cannot sit beside a reading.
+    .replace(/(?:(?![a-z0-9])[\p{L}\p{N}\p{S}\p{M}])+/gu, run => ` ${run} `)
+    .replace(/[^a-z0-9?\p{L}\p{N}\p{S}\p{M}]+/gu, ' ')
   let t = s.trim().split(' ').filter(Boolean)
   t = t.flatMap(w => ({ lipsync: ['lip', 'sync'], lipsyncing: ['lip', 'syncing'], faceswap: ['face', 'swap'], st: ['saint'] })[w] ?? [w])
   t = numbersToDigits(t)
@@ -506,11 +548,13 @@ export function scriptWords(text) {
       while (digits.at(-1) === '0') digits.pop()
       if (j > i + 1) { if (digits.length) out.push('point', ...digits); i = j - 1; continue }
     }
-    // Every spoken form of the currency is one word: US dollars, USD, dollar.
+    // Every spoken form of US dollars is one word, usdollars: US dollars, USD,
+    // American dollars, United States dollars. A dollar of no named country
+    // stays "dollars", so "five dollars" is not a reading of "5 US dollars".
     if (w === 'dollars' || w === 'dollar' || w === 'usd') {
-      if (['us', 'usa', 'american'].includes(last)) out.pop()
-      else if (last === 'states' && out.at(-2) === 'united') out.splice(-2)
-      out.push('dollars')
+      let us = w === 'usd'
+      if (!us && ['us', 'usa', 'american'].includes(last)) { out.pop(); us = true } else if (!us && last === 'states' && out.at(-2) === 'united') { out.splice(-2); us = true }
+      out.push(us ? 'usdollars' : 'dollars')
       continue
     }
     // Dates in the script's own order: day, month, year.
@@ -535,12 +579,13 @@ function scriptPieces({ capability = [], useClass = [], territory = [], validUnt
   add('I consent', true)
   add(' to ')
   list(caps.length ? caps : ['generated media'])
-  add(' of my likeness')
+  add(' of ')
+  add('my likeness', true)
   if (useClass.length) { add(' for '); list(useClass) }
   if (places.length) { add(' in '); list(places) }
   if (validUntil) { add(' '); add('until', true); add(' '); add(new Date(validUntil).toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric', timeZone: 'UTC' }), true) }
   add('.')
-  if (maxSpendUsd != null) { add(' Spending is '); add('capped', true); add(' at '); add(String(maxSpendUsd), true); add(' US dollars.') }
+  if (maxSpendUsd != null) { add(' '); add('Spending', true); add(' is '); add('capped', true); add(' at '); add(String(maxSpendUsd), true); add(' '); add('US dollars', true); add('.') }
   return pieces
 }
 

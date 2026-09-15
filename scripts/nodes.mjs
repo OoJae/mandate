@@ -22,13 +22,17 @@
  * MANDATE_DERIVATIONS_CG hold real ids, `up` stops after starting the nodes and
  * says what to do next; `subscribe`, `connect` and `sync` need the ids and
  * refuse without them. Either variable may list several graphs, comma-separated.
+ *
+ * Settings come from the environment and the same env file as the CLI:
+ * `--env-path <path>`, else MANDATE_ENV_FILE, else $MANDATE_HOME/.env (default
+ * ~/.mandate/.env). A .env in the working directory is never read.
  */
 import { spawn } from 'node:child_process'
 import { createRequire } from 'node:module'
 import { existsSync, mkdirSync, writeFileSync, chmodSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { DkgNode, DkgHttpError } from '../src/dkg.mjs'
-import { grantsCgs, derivationsCgs, setupCgs, trustedProducers } from '../bin/config.mjs'
+import { grantsCgs, derivationsCgs, setupCgs, trustedProducers, loadMandateEnv } from '../bin/config.mjs'
 import { anchorsFromMeta } from '../src/provenance.mjs'
 import { metaQuery } from '../src/queries.mjs'
 import { contextGraphAddress } from '../src/resolve.mjs'
@@ -253,28 +257,49 @@ async function doctor(rc) {
     process.exitCode = 9
     return
   }
+  // A token that may not list subscriptions (403) leaves them unknown, but the
+  // freshness check still runs: a node that is behind is exit 9 either way.
+  let subs = null
   try {
-    const subs = await n.subscriptions()
-    for (const cg of [...grantsCgs(), ...derivationsCgs()]) {
-      const s = subs.subscriptions?.find(x => x.contextGraphId === cg)
-      const r = await n.reconcile(cg).catch(e => ({ error: e.message }))
-      const f = r.error ? { unknown: true, detail: r.error } : freshness(r)
-      const fresh = f.unknown ? `freshness unknown (${f.detail})` : f.current ? `current ${r.watermarkAfter}/${r.headOrdinal}` : `BEHIND ${r.watermarkAfter}/${r.headOrdinal} — run sync`
-      say('', `  ${cg}  ${s?.subscribed ? 'subscribed' : 'NOT SUBSCRIBED'}  ${fresh}`)
-      if (!s?.subscribed || !f.current) process.exitCode = 9
-    }
+    subs = await n.subscriptions()
   } catch (e) {
-    if (e instanceof DkgHttpError && e.status === 403) say('', '  subscriptions need a node-admin token')
-    else throw e
+    if (!(e instanceof DkgHttpError && e.status === 403)) throw e
+    say('', '  subscriptions need a node-admin token; subscription unknown, freshness still checked')
+  }
+  for (const cg of [...grantsCgs(), ...derivationsCgs()]) {
+    const s = subs?.subscriptions?.find(x => x.contextGraphId === cg)
+    const r = await n.reconcile(cg).catch(e => ({ error: e.message }))
+    const f = r.error ? { unknown: true, detail: r.error } : freshness(r)
+    const fresh = f.unknown ? `freshness unknown (${f.detail})` : f.current ? `current ${r.watermarkAfter}/${r.headOrdinal}` : `BEHIND ${r.watermarkAfter}/${r.headOrdinal} — run sync`
+    say('', `  ${cg}  ${subs === null ? 'subscription unknown' : s?.subscribed ? 'subscribed' : 'NOT SUBSCRIBED'}  ${fresh}`)
+    if ((subs !== null && !s?.subscribed) || !f.current) process.exitCode = 9
   }
 }
 
-const [command, ...args] = process.argv.slice(2)
+const [command, ...rest] = process.argv.slice(2)
+if (process.argv.slice(2).some(a => /^--env-file(?:-if-exists)?(?:=|$)/.test(a))) {
+  console.error('--env-file is read by Node.js itself, which applies a NODE_OPTIONS from that file; name the env file with --env-path <path> instead')
+  process.exit(1)
+}
+const envAt = rest.indexOf('--env-path')
+const envFlag = envAt === -1 ? undefined : rest[envAt + 1]
+const args = envAt === -1 ? rest : [...rest.slice(0, envAt), ...rest.slice(envAt + 2)]
+if (envAt !== -1 && (!envFlag || envFlag.startsWith('--'))) {
+  console.error('--env-path needs a path')
+  process.exit(1)
+}
+try {
+  const loaded = loadMandateEnv({ flag: envFlag })
+  for (const w of loaded.warnings) console.error(`warning: ${w}`)
+} catch (e) {
+  console.error(e.message)
+  process.exit(1)
+}
 const explicit = args.filter(a => ROLES.includes(a))
 const unknown = args.filter(a => !ROLES.includes(a))
 const COMMANDS = ['up', 'init', 'start', 'stop', 'subscribe', 'connect', 'sync', 'doctor']
 if (!COMMANDS.includes(command) || unknown.length) {
-  console.error(`usage: node scripts/nodes.mjs <${COMMANDS.join('|')}> [${ROLES.join('|')}…]${unknown.length ? `\nunknown: ${unknown.join(' ')}` : ''}`)
+  console.error(`usage: node scripts/nodes.mjs <${COMMANDS.join('|')}> [${ROLES.join('|')}…] [--env-path <path>]${unknown.length ? `\nunknown: ${unknown.join(' ')}` : ''}`)
   process.exit(1)
 }
 const roles = explicit.length ? explicit : ['grantor', 'producer', ...(process.env.MANDATE_VERIFIER_PORT ? ['verifier'] : [])]
@@ -293,7 +318,7 @@ try {
       '',
       'The nodes are running, but MANDATE_GRANTS_CG and MANDATE_DERIVATIONS_CG do not hold graph ids yet.',
       'Next: create and register the grants graph on the grantor node and the derivations graph on the',
-      'producer node, set both ids in .env, then run:',
+      'producer node, set both ids in your env file (~/.mandate/.env, or the file given with --env-path), then run:',
       '  node scripts/nodes.mjs subscribe && node scripts/nodes.mjs connect && node scripts/nodes.mjs sync',
     ].join('\n'))
     process.exit(0)

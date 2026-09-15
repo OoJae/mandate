@@ -23,6 +23,16 @@
  * prefix of the address owning the grant or subject it claims in a grants
  * graph. A trusted party's unreadable record is its own record, so the gate
  * and the verifier must not treat it as if it were not there.
+ *
+ * reduceSlice judges objects, not whether a read is complete. Knowledge composed
+ * by hand from anchorsFromMeta and reduceSlice must also run the resolver's
+ * consistency rules (readPublisher in src/resolve.mjs) before its
+ * consistency.ok may be true: checkConsistency over each publisher's prefix
+ * (graph count, per-anchor triple counts, no unanchored graph, no missing known
+ * UAL), no anchorsFromMeta problem, no row with an unreadable graph, an empty
+ * `unreadable` list from reduceSlice (a grantor's revocation with an unreadable
+ * stateOf is only there), and an empty read believed only when every attempt
+ * answered. The gate and the verifier trust that flag and cannot recheck it.
  */
 import * as V from './vocab.mjs'
 import { DKG, PROV_ATTRIBUTED, vmPrefix } from './queries.mjs'
@@ -416,7 +426,12 @@ export function reduceSlice({ role, anchors, contentRows, trustedProducers = [] 
     if (!anchor) { report('unanchored', 'no confirmed anchor for this graph'); continue }
     // A grantor's own statement about its own grant is a state whatever else it is typed as (contract 3).
     const stateOfIri = role === 'grants' ? readStateOf(obj) : null
-    const ownState = stateOfIri !== null && grantIriAddress(stateOfIri) === anchor.publisher
+    // Also when the stateOf naming its own grant cannot be read (a literal, or one of
+    // several values): the statement is the grantor's, so it fails closed below as an
+    // unreadable state rather than vanishing because it carries no GrantState type.
+    const ownState = role === 'grants' && (stateOfIri === null
+      ? claims.stateOf.some(v => grantIriAddress(v) === anchor.publisher)
+      : grantIriAddress(stateOfIri) === anchor.publisher)
 
     try {
       if (role === 'grants' && (types.includes(V.GrantState) || ownState)) {

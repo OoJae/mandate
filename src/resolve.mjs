@@ -202,11 +202,11 @@ const chunks = (list, size = 50) => Array.from({ length: Math.ceil(list.length /
  *
  * - Verifiable Memory under another address: a forgery, reported.
  * - Shared memory: unanchored, so a warning only.
- * - A merged view graph (`<cg>/context/<id>`) holding a state with no copy in
- *   any Verifiable Memory graph: its publisher cannot be established, so it is
- *   treated as a revocation. This only happens when a node holds confirmed data
- *   outside its Verifiable Memory graphs; a stranger's published state always
- *   has its Verifiable Memory copy, and is judged by its publisher instead.
+ * - A merged view graph (`<cg>/context/<id>`) holding a state with no copy
+ *   under the grant owner's own Verifiable Memory prefix (see ownerTwin): its
+ *   publisher cannot be established, so it is treated as a revocation. This
+ *   only happens when a node holds confirmed data outside the owner's
+ *   Verifiable Memory graphs.
  *
  * Every query must answer on some attempt, or discovery fails. When the grantor
  * read holds states for these grants and this node materialises merged views
@@ -228,14 +228,28 @@ const chunks = (list, size = 50) => Array.from({ length: Math.ceil(list.length /
  * has published states for the grants in question; and a node that leaves the
  * view out of the probe on every single attempt is still not caught, because
  * nothing else distinguishes it from a node that holds no view.
+ *
+ * One view per graph: the check above is per context graph, not per view
+ * graph, and it assumes a node materialises a single merged view graph
+ * (`<cg>/context/<id>`) for each context graph, as live v10.0.16 nodes do. A
+ * second view graph could hold the only copy of a revocation, and leaving that
+ * graph out while the other still shows would satisfy "the view shows a row".
+ * So the assumption is checked rather than trusted: when more than one distinct
+ * view graph of a context graph shows in state discovery, every one must show
+ * on exactly the same attempts, or the read is inconsistent (an unexpected
+ * shape). And when a view is expected, discovery does not stop after its first
+ * attempt, so a view graph left out of that one answer has a second answer to
+ * show in. Trade-off: one extra attempt (one backoff, 250 ms with the defaults)
+ * on a node that materialises the grantor's view. A node that leaves one of
+ * several view graphs out of every attempt it makes is still not caught.
  */
 async function discoverStates(node, { grantsCgs, derivationsCgs, grantIds, grantorReads, attempts, backoffMs, max, sleep }) {
   const rows = new Map()
   const failures = []
-  const vmStateIds = () => new Set([
-    ...grantorReads.flatMap(r => [...r.states, ...r.forgeries].map(x => x.id)),
-    ...[...rows.values()].filter(r => r.graph.includes('/_verifiable_memory/')).map(r => r.s),
-  ])
+  // A view row is explained only by a Verifiable Memory copy under its grant owner's own prefix (see ownerTwin).
+  const explained = row => ownerTwin(row, {
+    states: grantorReads.flatMap(r => r.states), forgeries: grantorReads.flatMap(r => r.forgeries), rows: [...rows.values()],
+  })
   const ids = new Set(grantIds)
   const queries = [
     ...grantsCgs.flatMap(cg => [{ cg, opts: { view: 'verifiable-memory' } }, { cg, opts: { includeSharedMemory: true } }]),
@@ -249,6 +263,12 @@ async function discoverStates(node, { grantsCgs, derivationsCgs, grantIds, grant
   const materialised = new Set()
   // How many attempts each probe answered on; "no merged view" needs all of them.
   const probeAnswers = new Map()
+  // Per context graph: each view graph that showed in state discovery, and the attempts it showed on.
+  const viewAttempts = new Map()
+  const splitViews = () => [...viewAttempts].filter(([, graphs]) => {
+    const sets = [...graphs.values()].map(a => [...a].join())
+    return sets.length > 1 && new Set(sets).size > 1
+  }).map(([cg, graphs]) => `state discovery: ${cg} shows ${graphs.size} merged view graphs on different attempts (${[...graphs].map(([g, a]) => `${g} on attempt${a.size === 1 ? '' : 's'} ${[...a].map(n => n + 1).join(', ')}`).join('; ')}); a node is expected to hold one view per graph`)
   for (let i = 0; i < attempts; i++) {
     if (i > 0) await sleep(backoffMs * 2 ** (i - 1))
     for (const cg of expectView) {
@@ -267,17 +287,29 @@ async function discoverStates(node, { grantsCgs, derivationsCgs, grantIds, grant
         const s = asIri(r.s)
         const o = asIri(r.o)
         if (!graph || !s || !o) continue
+        if (graph.startsWith(`${Q.cgIri(q.cg)}/context/`)) {
+          if (!viewAttempts.has(q.cg)) viewAttempts.set(q.cg, new Map())
+          const seen = viewAttempts.get(q.cg)
+          if (!seen.has(graph)) seen.set(graph, new Set())
+          seen.get(graph).add(i)
+        }
         rows.set(JSON.stringify([graph, s, o, r.v ?? null]), { cg: q.cg, graph, s, o, value: r.v === undefined ? null : asString(r.v) })
       }
     }
-    const known = vmStateIds()
-    const unexplained = [...rows.values()].filter(r => r.graph.includes('/context/') && !known.has(r.s))
+    const unexplained = [...rows.values()].filter(r => r.graph.includes('/context/') && !explained(r))
     // A view that shows a row proves the node materialises it, whatever the probe said.
     for (const cg of expectView) if (viewShown(cg)) materialised.add(cg)
     const viewMissing = [...materialised].filter(cg => !viewShown(cg))
     // Not yet shown to hold a view: only every remaining attempt answering empty settles it.
     const viewUnsettled = [...expectView].filter(cg => !materialised.has(cg))
-    if (answeredOnce.size === queries.length && unexplained.length === 0 && viewMissing.length === 0 && viewUnsettled.length === 0) break
+    const split = splitViews()
+    if (split.length) {
+      failures.push(...split)
+      break
+    }
+    // An expected view is never settled on one answer alone (see "One view per graph" above).
+    const secondLook = expectView.size === 0 || i > 0
+    if (secondLook && answeredOnce.size === queries.length && unexplained.length === 0 && viewMissing.length === 0 && viewUnsettled.length === 0) break
     if (i === attempts - 1) {
       if (answeredOnce.size !== queries.length) failures.push(`state discovery: ${queries.length - answeredOnce.size} of ${queries.length} queries never answered`)
       for (const cg of viewUnsettled.filter(c => probeAnswers.get(c) !== attempts)) {
@@ -287,6 +319,28 @@ async function discoverStates(node, { grantsCgs, derivationsCgs, grantIds, grant
     }
   }
   return { rows: [...rows.values()], failures }
+}
+
+/**
+ * Does a merged-view state row have a Verifiable Memory twin that explains it?
+ * Only a copy under the prefix of the grant's owner counts: a state the grantor
+ * read holds, a forgery found in the owner's own prefix, or a discovery row in a
+ * `_verifiable_memory/<owner>/` graph. A stranger's Verifiable Memory object
+ * that reuses the view row's subject IRI explains nothing, or anyone who knows
+ * or guesses that IRI could cancel a merged-view-only revocation. Trade-off: a
+ * non-active state a stranger published, if a node materialises it in its
+ * merged view, is honoured there as a revocation, because its only twin is the
+ * stranger's. Live v10.0.16 nodes build merged views only from data they
+ * published themselves, so only the stranger's own node shows it that way, and
+ * no stranger can block a grant on anyone else's node.
+ */
+function ownerTwin(row, { states, forgeries, rows }) {
+  const owner = grantIriAddress(row.o)
+  if (!owner) return false
+  const mine = x => typeof x.publisher === 'string' && x.publisher.toLowerCase() === owner
+  return states.some(x => x.id === row.s && mine(x))
+    || forgeries.some(x => x.id === row.s && mine(x))
+    || rows.some(r => r.s === row.s && vmPath(r.cg, r.graph)?.publisher === owner)
 }
 
 async function discoverGrants(node, { contextGraphs, subject, max }) {
@@ -407,7 +461,8 @@ async function checkHeld(node, contextGraphIds, { current = [] } = {}) {
     return { failures, warnings }
   }
   for (const cg of ids) {
-    const held = list.filter(x => x && x.subscribed !== false).map(x => x.contextGraphId)
+    // Held only when the node says so exactly: a missing flag, or "false" as a string, is not a subscription.
+    const held = list.filter(x => x && x.subscribed === true).map(x => x.contextGraphId)
     if (held.includes(cg)) continue
     const other = held.find(id => typeof id === 'string' && id.toLowerCase() === cg.toLowerCase())
     failures.push(other
@@ -487,6 +542,9 @@ export async function readKnowledge(node, cfg, scope = {}) {
   if (cfg.checkFreshness) {
     freshness = await checkFreshness(node, uniq([...grantsCgs, ...derivationsCgs]))
     warnings.push(...freshness.warnings)
+  } else {
+    // Said on every read, so a permit or CLEAR made without the check never looks like one made with it.
+    warnings.push('freshness not checked: a node behind the chain can miss a revocation or a render (checkFreshness is off)')
   }
 
   const read = async (cg, publisher, role) => {
@@ -551,8 +609,6 @@ export async function readKnowledge(node, cfg, scope = {}) {
         grantsCgs, derivationsCgs, grantIds, grantorReads, ...opts,
       })
       failures.push(...f)
-      const vmIds = new Set([...states, ...forgeries].map(x => x.id))
-      for (const row of rows) if (row.graph.includes('/_verifiable_memory/')) vmIds.add(row.s)
       // One row per state value, so a subject can come back as several rows. It is
       // judged on all of them: any value other than exactly "active", or none, is a
       // revocation, whichever row the node happens to return first.
@@ -590,7 +646,7 @@ export async function readKnowledge(node, cfg, scope = {}) {
           if (nonActive.has(key)) {
             warnings.push(`an unanchored revocation of ${row.o} is in shared memory (${row.graph}); it takes effect only once anchored`)
           }
-        } else if (inGrants && nonActive.has(key) && !vmIds.has(row.s)) {
+        } else if (inGrants && nonActive.has(key) && !ownerTwin(row, { states, forgeries, rows })) {
           states.push({
             id: row.s, ual: null, txHash: null, graph: row.graph, publisher: null, stateOf: row.o,
             state: 'revoked', stateAuthor: null, stateAt: null, materializedVersion: null, tier: 'context',

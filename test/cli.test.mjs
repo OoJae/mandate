@@ -1,19 +1,22 @@
 import { test, before, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
-import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync, statSync, readdirSync, mkdirSync } from 'node:fs'
+import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync, statSync, readdirSync, mkdirSync, chmodSync } from 'node:fs'
 import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
+import { request as httpRequest } from 'node:http'
 import { startFakeDkg } from './fixtures/fake-dkg-server.mjs'
 import { loadEnvFile } from '../bin/config.mjs'
 import { createHash } from 'node:crypto'
-import { renderKey, pendingStore } from '../src/pending.mjs'
+import { renderKey, pendingStore, grantLockPath } from '../src/pending.mjs'
 import { consentScript } from '../src/scope.mjs'
 import { EXIT_HELP } from '../bin/args.mjs'
 import { GRANTS_CG, DERIVS_CG, ANA, PRODUCER, STRANGER, derivation, derivationKa } from './fixtures/build.mjs'
-import { redact, waitMs, clearFor, taintedFor, blastLine } from '../demo/full.mjs'
+import { redact, waitMs, clearFor, taintedFor, blastLine, cliArgv, nodesArgv, DEMO_ENV_FILE } from '../demo/full.mjs'
+import { cgIri } from '../src/queries.mjs'
+import * as V from '../src/vocab.mjs'
 
 const BIN = new URL('../bin/mandate.mjs', import.meta.url).pathname
 const NODES = new URL('../scripts/nodes.mjs', import.meta.url).pathname
@@ -44,6 +47,8 @@ export async function fakeClient() {
       const replies = Array.isArray(list) ? list : [list]
       counts[key] = (counts[key] ?? -1) + 1
       const r = replies[Math.min(counts[key], replies.length - 1)]
+      // Answers only after a while, like a slow poll or a render still running.
+      if (r.delayMs) await new Promise(res => setTimeout(res, r.delayMs))
       if (r.throw) throw new Error(r.throw)
       // Never answers: with nothing else pending, the CLI process ends mid-call, like a crash.
       if (r.hang) await new Promise(() => {})
@@ -401,6 +406,9 @@ test('D2: a reading of the script still needs a typed answer for what the script
   const jsonMode = await mandate(consentGrant({ subject: 'cara', 'valid-until': until }), { lp, tty: true, input: 'anywhere\n' })
   assert.equal(jsonMode.code, 3, jsonMode.stderr)
   assert.equal(json(jsonMode).reason, 'consent confirmation impossible')
+  // Known before capture: no upload link, no clip, no paid transcription.
+  assert.deepEqual(jsonMode.calls, [])
+  assert.match(json(jsonMode).detail, /territory-unrestricted/)
   assert.equal(publishes(grantor), before)
   const wrong = await mandate(consentGrant({ subject: 'cara', 'valid-until': until, json: null }), { lp, tty: true, input: 'yes\n' })
   assert.equal(wrong.code, 3, wrong.stdout)
@@ -409,12 +417,18 @@ test('D2: a reading of the script still needs a typed answer for what the script
   const noCeiling = await mandate(consentGrant({ subject: 'cara', territory: 'GB', 'valid-until': until, 'max-spend': null }), { lp: consentLp(scriptFor({ territory: ['GB'], maxSpendUsd: null })), tty: true, input: 'none\n' })
   assert.equal(noCeiling.code, 3, noCeiling.stderr)
   assert.match(json(noCeiling).detail, /ceiling/)
+  assert.deepEqual(noCeiling.calls, [])
+  // With a territory and a ceiling, --json still captures: a reading of the script then needs no typed answer.
+  const both = await mandate(consentGrant({ subject: 'cara', territory: 'GB', 'valid-until': until }), { lp: consentLp(scriptFor({ territory: ['GB'] })), tty: true })
+  assert.equal(both.code, 0, both.stderr)
+  assert.ok(both.calls.some(x => x.name === 'run_capability:nemotron-asr'))
+  assert.equal(publishes(grantor), before + 1)
   const ok = await mandate(consentGrant({ subject: 'cara', 'valid-until': until, json: null }), { lp, tty: true, input: 'anywhere\n' })
   assert.equal(ok.code, 0, ok.stdout)
   assert.match(ok.stdout, /territory ANYWHERE/)
   assert.doesNotMatch(ok.stdout, /Type .*matches/)
   assert.match(ok.stdout, /consent clip [0-9a-f]{64}/)
-  assert.equal(publishes(grantor), before + 1)
+  assert.equal(publishes(grantor), before + 2)
 })
 
 test('D2: a transcript that is not the script needs every typed answer, which --yes never skips, and is published without the clip hash', async () => {
@@ -423,7 +437,8 @@ test('D2: a transcript that is not the script needs every typed answer, which --
   const before = publishes(grantor)
   const args = over => consentGrant({ subject: 'cara', 'valid-until': until, json: null, ...over })
   // --json on a terminal: the confirmation cannot be asked; exit 3, nothing published, the differences reported.
-  const jsonMode = await mandate(args({ json: true }), { lp, tty: true, input: 'matches\nconsents\n2026-12-01\n5\nanywhere\n' })
+  // (With a territory: without one, --json stops before capture. The words never name GB, hence --force.)
+  const jsonMode = await mandate(args({ json: true, territory: 'GB', force: true }), { lp, tty: true, input: 'matches\nconsents\n2026-12-01\n5\n' })
   assert.equal(jsonMode.code, 3, jsonMode.stderr)
   assert.equal(json(jsonMode).reason, 'consent confirmation impossible')
   assert.equal(json(jsonMode).consent.scope.scriptMatch.matched, false)
@@ -456,7 +471,8 @@ test('D2: a transcript that is not the script needs every typed answer, which --
 test('R18: --force never publishes past a failed transcription or a clip with no first-person consent', async () => {
   const before = publishes(grantor)
   const answers = `matches\n${new Date(Date.now() + 90 * 864e5).toISOString().slice(0, 10)}\n5\nanywhere\n`
-  const asrFailed = await mandate(consentGrant({ subject: 'dan', force: true }), {
+  // A territory, so --json does not stop before capture on the unrestricted-territory question.
+  const asrFailed = await mandate(consentGrant({ subject: 'dan', force: true, territory: 'GB' }), {
     lp: consentLp('', { asr: { structured: { ok: false, error: 'model unavailable' } } }), tty: true, input: answers,
   })
   assert.equal(asrFailed.code, 3, asrFailed.stderr)
@@ -774,10 +790,21 @@ test('D3: a possibly-billed render rerun that then fails cleanly stays unknown, 
   assert.equal((await mandate(['record', '--pending', key, '--json'])).code, 9)
   // A spend-cap refusal on a further rerun does not erase it either.
   const capped = await mandate(execArgs('vaa'), { lp: renderLp('vaa', { spend_cap: { structured: { remaining_usd: 0.0001 } } }) })
-  assert.equal(capped.code, 10, capped.stdout)
+  // The earlier attempt's outcome is still unknown, so this is 9 (unknown), not 10 (payment, nothing billed).
+  assert.equal(capped.code, 9, capped.stdout)
+  assert.equal(json(capped).outcome, 'unknown')
   assert.ok(!capped.calls.some(x => x.name.startsWith('run_capability')))
+  const cappedText = await mandate(execArgs('vaa', { json: null }), { lp: renderLp('vaa', { spend_cap: { structured: { remaining_usd: 0.0001 } } }) })
+  assert.equal(cappedText.code, 9, cappedText.stdout)
+  assert.match(cappedText.stdout, /OUTCOME UNKNOWN/)
   assert.equal(store().load(key).status, 'submitted')
-  assert.equal(store().load(key).attempts.length, 3)
+  assert.equal(store().load(key).attempts.length, 4)
+  // With no earlier attempt open, the same cap is a plain payment refusal: 10.
+  await newGrant('vak')
+  const fresh = await mandate(execArgs('vak'), { lp: renderLp('vak', { spend_cap: { structured: { remaining_usd: 0.0001 } } }) })
+  assert.equal(fresh.code, 10, fresh.stdout)
+  assert.equal(json(fresh).outcome, 'failed')
+  assert.ok(!fresh.calls.some(x => x.name.startsWith('run_capability')))
 })
 
 test('D3: a rerun without --idempotency-key reuses the key a possibly-billed render was sent with; a different key is refused before sending', async () => {
@@ -865,17 +892,38 @@ test('verify reports the node role it actually read from, and a named verifier m
   assert.match(json(named).error, /no verifier node is configured/)
 })
 
-test('APP-2: a UAL or tx hash from the node is stripped of control characters before printing', async () => {
+test('APP-2: node text is stripped of control characters before printing, and a forged confirmed UAL is never printed', async () => {
   grantor.scenario.ualSuffix = `${ESC}[2J${ESC}[32mFORGED`
   grantor.scenario.txHash = `0x${'ab'.repeat(32)}${ESC}[2J`
   try {
+    // A confirmed answer whose UAL is not chain-confirmed in shape is never
+    // taken at its word: it is reconciled from the node's records, so the
+    // forged suffix never reaches output at all.
     const r = await mandate(grantArgs({ subject: 'rex', json: null }))
     assert.equal(r.code, 0, r.stderr)
     assert.ok(!r.stdout.includes(ESC))
-    assert.match(r.stdout, /FORGED/)
+    assert.doesNotMatch(r.stdout, /FORGED/)
+    assert.match(r.stdout, /UAL\s+did:dkg:base:84532\/0x[0-9a-f]{40}\/\d+\n/)
+    // An unbound answer is reported from the node's own words: its error text
+    // reaches output stripped of control characters, and a UAL or tx hash that
+    // is not printable is dropped rather than printed.
+    grantor.scenario.publish = 'unbound'
+    grantor.scenario.unboundError = `${ESC}[2J${ESC}[31mFORGED binding`
+    const u = await mandate(grantArgs({ subject: 'rex-unbound', json: null }))
+    assert.equal(u.code, 7, u.stdout)
+    assert.ok(!u.stdout.includes(ESC))
+    assert.match(u.stdout, /FORGED binding/)
+    const uj = await mandate(grantArgs({ subject: 'rex-unbound-json' }))
+    assert.equal(uj.code, 7, uj.stdout)
+    assert.ok(!uj.stdout.includes('\\u001b'), uj.stdout)
+    assert.match(json(uj).error, /FORGED binding/)
+    assert.equal(json(uj).ual, null)
+    assert.equal(json(uj).txHash, null)
   } finally {
     delete grantor.scenario.ualSuffix
     delete grantor.scenario.txHash
+    delete grantor.scenario.publish
+    delete grantor.scenario.unboundError
   }
 })
 
@@ -980,6 +1028,35 @@ test('R3: a derivation publish that reported a transaction, or left no HTTP stat
   assert.equal(publishes(producer), before)
 })
 
+test('a published derivation whose _meta record the node does not show yet is retryable, and verified without publishing once it shows', async () => {
+  const g = await newGrant('vam')
+  const before = publishes(producer)
+  const published = { status: 'vm-confirmed', state: 'published', publishedUal: `did:dkg:base:84532/${PRODUCER.toLowerCase()}/987654`, vmCurrentAssertion: '1'.repeat(64) }
+  const stuck = stuckRender(g, 'vam', { stage: 'publish' }, { descriptor: published })
+  // The node says published but its _meta graph has no record of the UAL: not a refusal, a wait.
+  const r1 = await mandate(['record', '--pending', stuck.key, '--json'])
+  assert.equal(r1.code, 4, r1.stdout)
+  assert.equal(json(r1).stage, 'resume-unverified')
+  assert.notEqual(store().load(stuck.key).derivationAttempt.stage, 'resume-refused')
+  const text = await mandate(['record', '--pending', stuck.key])
+  assert.equal(text.code, 4, text.stdout)
+  assert.doesNotMatch(text.stdout, /will never publish this asset again/)
+  assert.match(text.stdout, /retry it once the node shows the asset published/)
+  // Once the chain record lands, the same attempt is verified, never published again.
+  // (The fixture asset has no content, so its anchor is taken out again for the later tests.)
+  const landed = producer.confirm(stuck.name)
+  let r2
+  try {
+    r2 = await mandate(['record', '--pending', stuck.key, '--json'])
+  } finally {
+    world[DERIVS_CG].kas.splice(world[DERIVS_CG].kas.indexOf(landed), 1)
+  }
+  assert.equal(r2.code, 0, r2.stdout)
+  assert.equal(json(r2).derivation.resumed, true)
+  assert.equal(publishes(producer), before)
+  assert.equal(assetCreates(producer, stuck.name), 0)
+})
+
 test('R3: a derivation publish refused with 4xx sent nothing, so the retry publishes the same asset', async () => {
   await newGrant('vah')
   producer.scenario.publish = 'refused'
@@ -1032,13 +1109,22 @@ test('D5: a grant whose publish reply is lost reports its grant id and asset, an
   assert.equal(out.mayHaveSent, true)
   assert.match(out.grantId, new RegExp(`^urn:mandate:grant:${ANA}:vv5:[0-9a-f]{16}$`))
   assert.match(out.assetName, /^grant-vv5-[0-9a-f]{16}$/)
-  assert.equal(out.check, `mandate revoke --id ${out.grantId}`)
+  // The check only reads, and never revokes a grant that has landed.
+  assert.equal(out.check, `mandate blast-radius --grant ${out.grantId}`)
+  const checkArgs = [...out.check.split(' ').slice(1), '--json']
+  const publishedBefore = publishes(grantor) + publishes(producer)
   // Not landed yet: the check says so and publishes nothing.
-  const early = await mandate(['revoke', '--id', out.grantId, '--yes', '--json'])
-  assert.equal(early.code, 2)
-  assert.equal(json(early).reason, 'grant not found')
-  // The chain confirms it later; the same id is then revoked, and renders refuse.
+  const early = await mandate(checkArgs)
+  assert.equal(early.code, 0, early.stdout)
+  assert.equal(json(early).grant, null)
+  // The chain confirms it later: the check shows it live, still publishing nothing.
   grantor.confirm(out.assetName)
+  const landed = await mandate(checkArgs)
+  assert.equal(landed.code, 0, landed.stdout)
+  assert.equal(json(landed).grant.id, out.grantId)
+  assert.equal(json(landed).revoked, false)
+  assert.equal(publishes(grantor) + publishes(producer), publishedBefore)
+  // The follow-up revokes the same id, and renders refuse.
   const rv = await mandate(['revoke', '--id', out.grantId, '--yes', '--json'])
   assert.equal(rv.code, 0, rv.stdout)
   assert.equal(json(rv).revoked, true)
@@ -1058,7 +1144,9 @@ test('D5: the human output of a lost grant names the id, the asset and how to ch
   assert.match(r.stdout, /GRANT OUTCOME UNKNOWN/)
   assert.match(r.stdout, new RegExp(`grantId\\s+urn:mandate:grant:${ANA}:vv7:[0-9a-f]{16}`))
   assert.match(r.stdout, /asset\s+grant-vv7-[0-9a-f]{16}/)
-  assert.match(r.stdout, /Check whether it landed: mandate revoke --id urn:mandate:grant:/)
+  assert.match(r.stdout, /Check whether it landed: mandate blast-radius --grant urn:mandate:grant:/)
+  assert.doesNotMatch(r.stdout, /Check whether it landed: mandate revoke/)
+  assert.match(r.stdout, /To end a grant that landed, run `mandate revoke --id urn:mandate:grant:/)
 })
 
 test('D5: a revocation whose publish reply is lost reports the grant id, state id and asset, and a check finds it once it lands', async () => {
@@ -1076,8 +1164,15 @@ test('D5: a revocation whose publish reply is lost reports the grant id, state i
   assert.equal(out.grantId, g.id)
   assert.match(out.stateId, /^urn:mandate:state:[0-9a-f]{16}$/)
   assert.match(out.assetName, /^revoke-vv8-[0-9a-f]{16}$/)
-  assert.equal(out.check, `mandate revoke --id ${g.id}`)
+  assert.equal(out.check, `mandate blast-radius --grant ${g.id}`)
+  const before = publishes(grantor)
+  const notYet = await mandate([...out.check.split(' ').slice(1), '--json'])
+  assert.equal(notYet.code, 0, notYet.stdout)
+  assert.equal(json(notYet).revoked, false)
   grantor.confirm(out.assetName)
+  const landed = await mandate([...out.check.split(' ').slice(1), '--json'])
+  assert.equal(json(landed).revoked, true)
+  assert.equal(publishes(grantor), before)
   const again = await mandate(['revoke', '--id', g.id, '--yes', '--json'])
   assert.equal(again.code, 0, again.stdout)
   assert.equal(json(again).alreadyRevoked, true)
@@ -1168,4 +1263,644 @@ test('D3: a render that dies mid-dispatch is marked sent, so a rerun replays it 
   const again = await mandate(execArgs('vaj'), { lp: renderLp('vaj') })
   assert.equal(again.code, 0, again.stdout)
   assert.deepEqual(again.calls.filter(x => x.name === 'run_capability:talking-head').map(x => x.args.idempotency_key), ['custom-hang-1'])
+})
+
+/* Round three: derivation retries after an outage or a crash, settled jobs, unknown serving capability, doctor */
+
+const deadPort = async () => {
+  const s = createServer()
+  await new Promise(r => s.listen(0, '127.0.0.1', r))
+  const { port } = s.address()
+  await new Promise(r => s.close(r))
+  return port
+}
+
+test('R3: a retry that fails before reaching the node never erases a permanent stage or a saved publish status', async () => {
+  const g = await newGrant('vxa')
+  const before = publishes(producer)
+  const unbound = stuckRender(g, 'vxa-unbound', { stage: 'unbound', ual: `did:dkg:base:84532/${PRODUCER}/998`, txHash: `0x${'ef'.repeat(32)}`, mayHaveSent: true }, { descriptor: { status: 'wm-sealed', wmCurrentAssertion: '1'.repeat(64) } })
+  const down = await mandate(['record', '--pending', unbound.key, '--json'], { env: { MANDATE_PRODUCER_PORT: String(await deadPort()) } })
+  assert.equal(down.code, 4, down.stdout)
+  const kept = store().load(unbound.key).derivationAttempt
+  assert.equal(kept.stage, 'unbound')
+  assert.equal(kept.lastErrorStage, 'error')
+  assert.equal(kept.mayHaveSent, true)
+  const downText = await mandate(['record', '--pending', unbound.key], { env: { MANDATE_PRODUCER_PORT: String(await deadPort()) } })
+  assert.match(downText.stdout, /will never publish this asset again/)
+  // The node is back and shows the asset sealed: still never published again.
+  const back = await mandate(['record', '--pending', unbound.key, '--json'])
+  assert.equal(back.code, 4, back.stdout)
+  assert.equal(json(back).stage, 'resume-refused')
+  assert.equal(publishes(producer), before)
+
+  // A publish refused with 4xx keeps that status through an outage, so the retry still continues it.
+  producer.scenario.publish = 'refused'
+  let first
+  try {
+    first = await mandate(execArgs('vxa'), { lp: renderLp('vxa') })
+  } finally {
+    delete producer.scenario.publish
+  }
+  assert.equal(first.code, 4, first.stdout)
+  const refused = { key: json(first).pending }
+  assert.equal(store().load(refused.key).derivationPublishStatus, 409)
+  const down2 = await mandate(['record', '--pending', refused.key, '--json'], { env: { MANDATE_PRODUCER_PORT: String(await deadPort()) } })
+  assert.equal(down2.code, 4, down2.stdout)
+  assert.equal(store().load(refused.key).derivationAttempt.stage, 'publish')
+  assert.equal(store().load(refused.key).derivationPublishStatus, 409)
+  const retry = await mandate(['record', '--pending', refused.key, '--json'])
+  assert.equal(retry.code, 0, retry.stdout)
+  assert.equal(json(retry).derivation.resumed, true)
+  // One refused publish on the first run, one on the retry: none during the outage.
+  assert.equal(publishes(producer), before + 2)
+})
+
+test('R3: a resumed derivation attempt is marked in flight before vm/publish, so a crash mid-publish is never published again', async () => {
+  const g = await newGrant('vxb')
+  const shared = { status: 'swm-shared', wmCurrentAssertion: '1'.repeat(64), swmCurrentAssertion: '1'.repeat(64) }
+  for (const [tag, attempt, extra] of [['vxb-share', { stage: 'share' }, {}], ['vxb-409', { stage: 'publish' }, { derivationPublishStatus: 409 }]]) {
+    const stuck = stuckRender(g, tag, attempt, { descriptor: shared, extra })
+    const file = join(pendingDir(), `${stuck.key}.json`)
+    // What is on disk when vm/publish arrives is what a crash at that moment leaves.
+    let atPublish = null
+    const push = producer.calls.push
+    producer.calls.push = function (x) {
+      if (x.method === 'POST' && x.path?.endsWith('/vm/publish') && atPublish === null) atPublish = readFileSync(file, 'utf8')
+      return push.call(this, x)
+    }
+    producer.scenario.publish = 'refused'
+    try {
+      await mandate(['record', '--pending', stuck.key, '--json'])
+    } finally {
+      producer.calls.push = push
+      delete producer.scenario.publish
+    }
+    assert.ok(atPublish, `${tag}: the resume called vm/publish`)
+    const onDisk = JSON.parse(atPublish)
+    assert.equal(onDisk.derivationAttempt.stage, 'started', tag)
+    assert.equal(onDisk.derivationPublishStatus, null, tag)
+    // The process died there; the node still shows the asset shared, its transaction unknown.
+    writeFileSync(file, atPublish)
+    const before = publishes(producer)
+    const retry = await mandate(['record', '--pending', stuck.key, '--json'])
+    assert.equal(retry.code, 4, `${tag}: ${retry.stdout}`)
+    assert.equal(json(retry).stage, 'resume-unverified', tag)
+    assert.equal(publishes(producer), before, tag)
+  }
+})
+
+test('D3: a job the platform reports failed is settled by record, stops counting, keeps its history, and can be rendered again', async () => {
+  const g = await newGrant('vxc', { 'max-spend': '1' })
+  const key = keyFor(g.id)
+  const attempts = [{ n: 1, pid: 999_999_010, startedAt: new Date().toISOString(), sentAt: new Date().toISOString(), idempotencyKey: key, endedAt: new Date().toISOString(), status: 'submitted', jobId: 'mjob_vxcfail01', mayHaveStarted: true }]
+  const base = { key, idempotencyKey: key, status: 'submitted', jobId: 'mjob_vxcfail01', mayHaveStarted: true, createdAt: new Date().toISOString(), subject: g.subject, capability: 'talking-head', grantId: g.id, estimateUsd: 0.84, estimateSource: 'static list price', priceUnit: 'second', inputs: { image_url: mediaUrl('in.jpg'), audio_url: mediaUrl('in.wav') }, attempts }
+  store().save(base)
+  // Counted while unresolved: a dry run of another request under the grant refuses on the ceiling.
+  const blocked = await mandate(renderArgs({ subject: `${ANA}:vxc`, seconds: '1' }))
+  assert.equal(blocked.code, 2, blocked.stdout)
+  // A status that is not a certain failure settles nothing.
+  const odd = await mandate(['record', '--pending', key, '--json'], { lp: { get_create_media: { structured: { status: 'mystery' } } } })
+  assert.equal(odd.code, 9, odd.stdout)
+  assert.equal(store().load(key).status, 'submitted')
+  // A reply about another job settles nothing either.
+  const otherJob = await mandate(['record', '--pending', key, '--json'], { lp: { get_create_media: { structured: { status: 'failed', job_id: 'mjob_someoneelse', error: 'x' } } } })
+  assert.notEqual(otherJob.code, 0)
+  assert.equal(store().load(key).status, 'submitted')
+  // Nor a reply marked as an error whose status is not a failure.
+  const flagged = await mandate(['record', '--pending', key, '--json'], { lp: { get_create_media: { structured: { status: 'done', url: mediaUrl('flagged.mp4') }, isError: true } } })
+  assert.notEqual(flagged.code, 0)
+  assert.equal(store().load(key).status, 'submitted')
+  const r = await mandate(['record', '--pending', key, '--json'], { lp: { get_create_media: { structured: { status: 'failed', error: 'model crashed' } } } })
+  assert.equal(r.code, 5, r.stdout)
+  assert.equal(json(r).status, 'failed-confirmed')
+  assert.equal(json(r).outcome, 'failed')
+  const rec = store().load(key)
+  assert.equal(rec.status, 'failed-confirmed')
+  assert.equal(rec.attempts.length, 1)
+  assert.equal(rec.jobId, 'mjob_vxcfail01')
+  // Settled: record again asks nothing of Livepeer.
+  const again = await mandate(['record', '--pending', key, '--json'], { lp: { get_create_media: { structured: { status: 'done', url: mediaUrl('never.mp4') } } } })
+  assert.equal(again.code, 5, again.stdout)
+  assert.deepEqual(again.calls, [])
+  // No longer counted, and the same request renders again as a new attempt.
+  const other = await mandate(renderArgs({ subject: `${ANA}:vxc`, seconds: '1' }))
+  assert.equal(other.code, 0, other.stdout)
+  assert.deepEqual(json(other).localPending, [])
+  const rerun = await mandate(execArgs('vxc'), { lp: renderLp('vxc') })
+  assert.equal(rerun.code, 0, rerun.stdout)
+  assert.equal(store().load(key).status, 'recorded')
+  assert.equal(store().load(key).attempts.length, 2)
+})
+
+test('a serving capability the platform names but that is not a capability is recorded as unknown, and no derivation is anchored', async () => {
+  const g = await newGrant('vxd')
+  const creates = () => producer.calls.filter(x => x.method === 'POST' && x.path === '/api/knowledge-assets').length
+  const before = creates()
+  const r = await mandate(execArgs('vxd'), { lp: renderLp('vxd', { 'run_capability:talking-head': { structured: { ok: true, status: 'done', url: mediaUrl('out-vxd.mp4'), capability_used: 'Flux Dev!', cost_usd_estimated: 0.84 } } }) })
+  assert.equal(r.code, 4, r.stdout)
+  assert.equal(json(r).stage, 'served-unknown')
+  assert.equal(json(r).derivation, null)
+  assert.doesNotMatch(r.stdout, /out-vxd\.mp4/)
+  const rec = store().load(json(r).pending)
+  assert.equal(rec.servedCapability, null)
+  assert.equal(rec.servedCapabilityUnknown, true)
+  assert.equal(rec.status, 'rendered')
+  assert.equal(creates(), before)
+  // A retry refuses the same way.
+  const retry = await mandate(['record', '--pending', rec.key, '--json'])
+  assert.equal(retry.code, 4, retry.stdout)
+  assert.equal(creates(), before)
+
+  // The same through record --pending for a background job.
+  const key = `mandate-${sha('vxd-job').slice(0, 32)}`
+  store().save({ key, idempotencyKey: key, status: 'submitted', jobId: 'mjob_vxdserved1', capability: 'talking-head', grantId: g.id, inputs: { image_url: mediaUrl('in.jpg') }, createdAt: new Date().toISOString() })
+  const polled = await mandate(['record', '--pending', key, '--json'], { lp: { get_create_media: { structured: { status: 'done', url: mediaUrl('out-vxd-job.mp4'), capability_used: 'Flux Dev!' } } } })
+  assert.equal(polled.code, 4, polled.stdout)
+  assert.equal(json(polled).stage, 'served-unknown')
+  assert.equal(store().load(key).servedCapability, null)
+  assert.equal(creates(), before)
+})
+
+test('nodes.mjs doctor: subscriptions answering 403 still get the freshness check, and a node behind exits 9', async () => {
+  let reconcile = { headOrdinal: 50, watermarkAfter: 1 }
+  const stub = createServer((req, res) => {
+    const send = (status, body) => { res.writeHead(status, { 'content-type': 'application/json' }); res.end(JSON.stringify(body)) }
+    req.resume()
+    req.on('end', () => {
+      if (req.url === '/api/agent/identity') return send(200, { agentAddress: ANA_CHECKSUM, agentDid: `did:dkg:agent:${ANA_CHECKSUM}` })
+      if (req.url === '/api/info') return send(200, { peers: 1, version: '10.0.16', chain: { chainId: 'base:84532' } })
+      if (req.url === '/api/context-graph/subscriptions') return send(403, { error: 'admin only' })
+      if (req.url === '/api/context-graph/reconcile') return send(200, reconcile)
+      send(404, { error: 'no route' })
+    })
+  })
+  await new Promise(r => stub.listen(0, '127.0.0.1', r))
+  try {
+    const env = { MANDATE_GRANTOR_HOME: homes.grantor, MANDATE_GRANTOR_PORT: String(stub.address().port) }
+    const behind = await mandate(['doctor', 'grantor'], { bin: NODES, env })
+    assert.equal(behind.code, 9, behind.stdout + behind.stderr)
+    assert.match(behind.stdout, /node-admin token/)
+    assert.match(behind.stdout, /subscription unknown\s+BEHIND 1\/50/)
+    reconcile = { headOrdinal: 5, watermarkAfter: 5 }
+    const current = await mandate(['doctor', 'grantor'], { bin: NODES, env })
+    assert.equal(current.code, 0, current.stdout + current.stderr)
+    assert.match(current.stdout, /subscription unknown\s+current 5\/5/)
+  } finally {
+    stub.closeAllConnections?.()
+    await new Promise(r => stub.close(r))
+  }
+})
+
+/* ---------------------------------------------------------------------------
+ * Round four: reviewing long transcripts, the spend-ceiling race, one process
+ * per render key, clean reruns, trusted producers on record, the env file.
+ * ------------------------------------------------------------------------- */
+
+/** A proxy in front of the producer node that holds every vm/publish for `delayMs`, standing in for the chain wait. */
+async function slowPublishProducer(delayMs) {
+  const proxy = createServer((req, res) => {
+    const go = () => {
+      const up = httpRequest({ host: '127.0.0.1', port: producer.port, path: req.url, method: req.method, headers: req.headers }, ur => { res.writeHead(ur.statusCode, ur.headers); ur.pipe(res) })
+      req.pipe(up)
+    }
+    if (req.method === 'POST' && req.url.endsWith('/vm/publish')) setTimeout(go, delayMs)
+    else go()
+  })
+  await new Promise(r => proxy.listen(0, '127.0.0.1', r))
+  return { env: { MANDATE_PRODUCER_PORT: String(proxy.address().port) }, close: () => { proxy.closeAllConnections?.(); proxy.close() } }
+}
+const creates = () => producer.calls.filter(x => x.method === 'POST' && x.path === '/api/knowledge-assets').length
+const sleepMs = ms => new Promise(r => setTimeout(r, ms))
+
+test('B2: a transcript a person must confirm is shown in full, and one too long to review is refused before any question', async () => {
+  const tail = 'Actually, please delete this recording and my face, I have reconsidered all of it.'
+  const opening = 'I consent to talking head of my likeness for advertising in the UK until 1 December 2026. Spending is capped at 5 US dollars.'
+  const args = consentGrant({ subject: 'cara', territory: 'GB', 'valid-until': until, json: null })
+  const answers = 'matches\nconsents\n2026-12-01\n5\n'
+  // Over the old 1200-character cut, with a control character and a line break inside: shown whole, the tail before the first question.
+  const words = Array.from({ length: 30 }, () => 'pneumonoultramicroscopicsilicovolcanoconiosis').join(' ')
+  const long = `${opening} ${words}\n${ESC}[2K ${tail}`
+  assert.ok(long.length > 1400)
+  const shown = await mandate(args, { lp: consentLp(long), tty: true, input: 'no\n' })
+  assert.equal(shown.code, 3, shown.stdout)
+  const at = shown.stdout.indexOf('Type matches')
+  assert.ok(at > 0, shown.stdout)
+  assert.ok(shown.stdout.lastIndexOf(`${words} [2K ${tail}`, at) > 0, 'the whole transcript, control characters stripped, is shown before the first confirmation')
+  const extra = shown.stdout.slice(shown.stdout.indexOf('    extra '), at)
+  assert.match(extra, /reconsidered all of it/, 'the extra words are shown in full too')
+  assert.equal(extra.split('pneumonoultramicroscopicsilicovolcanoconiosis').length - 1, 30)
+  assert.ok(!shown.stdout.includes(ESC))
+
+  // Too long to review: refused (exit 3, re-record), no question asked, nothing published, whatever is typed.
+  const before = publishes(grantor)
+  const chatter = Array.from({ length: 30 }, (_, i) => `My family and I live in a small town and we enjoy the weekends together, item ${i}.`).join(' ')
+  // Many words outside the script (more than can be listed whole), over 4000 characters in one word, and over 4000 characters of filler the extra list leaves out.
+  for (const transcript of [`${opening} ${chatter} ${tail}`, `${opening} ${'y'.repeat(4000)} ${tail}`, `${opening} ${'the '.repeat(1400)}${tail}`]) {
+    const refused = await mandate(args, { lp: consentLp(transcript), tty: true, input: answers })
+    assert.equal(refused.code, 3, refused.stdout)
+    assert.match(refused.stdout, /TOO LONG TO REVIEW/)
+    assert.match(refused.stdout, /Re-record/)
+    assert.doesNotMatch(refused.stdout, /Type matches/)
+  }
+  assert.equal(publishes(grantor), before)
+  // Right at the character limit, it is still shown and asked.
+  const edge = `${opening} ${'x'.repeat(4000 - opening.length - 1)}`
+  assert.equal(edge.length, 4000)
+  const atLimit = await mandate(args, { lp: consentLp(edge), tty: true, input: 'no\n' })
+  assert.match(atLimit.stdout, /Type matches/)
+  assert.ok(atLimit.stdout.includes(edge))
+})
+
+test('B3: parallel render --execute runs under a ceiling that fits one render dispatch exactly one', async () => {
+  const g = await newGrant('cap', { 'max-spend': '1' })
+  const lp = tag => renderLp(tag)
+  const args = tag => execArgs('cap', { 'image-url': mediaUrl(`in-${tag}.jpg`) })
+  // Held by this (live) process while the renders start: each resolves and decides with nothing pending,
+  // then waits on the grant's lock. Released, each decides again under it.
+  const lock = grantLockPath(pendingDir(), g.id)
+  mkdirSync(pendingDir(), { recursive: true })
+  writeFileSync(lock, JSON.stringify({ pid: process.pid, at: new Date().toISOString(), token: 'test' }))
+  const running = ['a', 'b', 'c'].map(t => mandate(args(t), { lp: lp(`cap-${t}`) }))
+  await sleepMs(2500)
+  // Nothing is saved, let alone dispatched, while another process holds the grant's lock.
+  assert.deepEqual(store().list().filter(r => r.grantId === g.id), [])
+  rmSync(lock)
+  const rs = await Promise.all(running)
+  const dispatched = rs.filter(r => r.calls.some(x => x.name === 'run_capability:talking-head'))
+  assert.equal(dispatched.length, 1, rs.map(r => r.stdout).join('\n'))
+  assert.deepEqual(rs.map(r => r.code).sort(), [0, 2, 2])
+  for (const r of rs.filter(x => x.code === 2)) assert.equal(json(r).decision.clause, 'spend-ceiling')
+  const br = await mandate(['blast-radius', '--grant', g.id, '--json'])
+  assert.equal(json(br).assets.length, 1)
+  assert.equal(json(br).totalBilledUsd, 0.84)
+})
+
+test('B3: when another render uses up a grant while this one waits, a decision that moves to another grant is not dispatched', async () => {
+  const a = await newGrant('duo', { 'max-spend': '1' })
+  const b = await newGrant('duo', { 'max-spend': '1' })
+  const first = [a, b].sort((x, y) => (x.id < y.id ? -1 : 1))[0]
+  const dry = await mandate(renderArgs({ subject: `${ANA}:duo` }))
+  assert.equal(json(dry).decision.grantId, first.id)
+  const lock = grantLockPath(pendingDir(), first.id)
+  mkdirSync(pendingDir(), { recursive: true })
+  writeFileSync(lock, JSON.stringify({ pid: process.pid, at: new Date().toISOString(), token: 'test' }))
+  const running = ['a', 'b'].map(t => mandate(execArgs('duo', { 'image-url': mediaUrl(`in-duo-${t}.jpg`) }), { lp: renderLp(`duo-${t}`) }))
+  await sleepMs(2500)
+  rmSync(lock)
+  const rs = await Promise.all(running)
+  assert.equal(rs.filter(r => r.calls.some(x => x.name === 'run_capability:talking-head')).length, 1, rs.map(r => r.stdout).join('\n'))
+  const moved = rs.find(r => r.code !== 0)
+  assert.equal(moved.code, 5, moved.stdout)
+  assert.equal(json(moved).decisionChanged, true)
+  assert.notEqual(json(moved).decision.grantId, first.id)
+})
+
+test('B3: a render this machine recorded counts against the ceiling until the knowledge read shows it', async () => {
+  const g = await newGrant('cau', { 'max-spend': '1' })
+  const dry = renderArgs({ subject: `${ANA}:cau` })
+  assert.equal((await mandate(dry)).code, 0)
+  const other = { key: `mandate-${'3'.repeat(32)}`, capability: 'talking-head', grantId: g.id, createdAt: new Date().toISOString(), status: 'recorded', costUsdEstimated: 0.84, mediaUrl: mediaUrl('out-cau.mp4') }
+  store().save({ ...other, derivation: { id: 'urn:mandate:derivation:00000000000000cc:00000000000000cc', ual: null } })
+  const unseen = await mandate(dry)
+  assert.equal(unseen.code, 2, unseen.stdout)
+  assert.equal(json(unseen).decision.clause, 'spend-ceiling')
+  assert.equal(json(unseen).localPending[0].status, 'recorded')
+  // With no derivation id there is nothing to match, as for a record from before this rule.
+  store().save({ ...other, derivation: null })
+  assert.equal((await mandate(dry)).code, 0)
+})
+
+test('B4: overlapping record --pending runs publish once; the second exits 5 at once and says why', async () => {
+  const slow = await slowPublishProducer(2500)
+  try {
+    // A resumable attempt whose asset the node shows sealed (MW4), and one with no attempt yet (MW1).
+    for (const [tag, attempt, descriptor] of [['mw4-share', { stage: 'share' }, { status: 'wm-sealed', wmCurrentAssertion: '1'.repeat(64) }], ['mw1-none', null, null]]) {
+      const g = await newGrant(tag)
+      const stuck = stuckRender(g, tag, attempt ?? {})
+      if (descriptor) {
+        const { id, name } = store().load(stuck.key).derivationAttempt
+        producer.assets.set(name, { quads: [{ subject: id, predicate: 'x', object: 'y', graph: '' }], cg: DERIVS_CG, descriptor: { agentAddress: PRODUCER, ...descriptor } })
+      }
+      if (!attempt) { const rec = store().load(stuck.key); delete rec.derivationAttempt; store().save(rec) }
+      const [p0, c0] = [publishes(producer), creates()]
+      const [a, b] = await Promise.all([
+        mandate(['record', '--pending', stuck.key, '--json'], slow),
+        sleepMs(attempt ? 300 : 0).then(() => mandate(['record', '--pending', stuck.key, '--json'], slow)),
+      ])
+      assert.equal(publishes(producer) - p0, 1, `${tag}: ${a.stdout}\n${b.stdout}`)
+      assert.ok(creates() - c0 <= 1, tag)
+      const [won, lost] = a.code === 0 ? [a, b] : [b, a]
+      assert.equal(won.code, 0, `${tag}: ${won.stdout}`)
+      assert.equal(lost.code, 5, `${tag}: ${lost.stdout}`)
+      assert.equal(json(lost).inFlight, true)
+      assert.match(json(lost).error, /in use by another mandate process/)
+      assert.equal(json(lost).mediaUrl, undefined)
+      assert.equal(store().load(stuck.key).status, 'recorded')
+      const br = await mandate(['blast-radius', '--grant', g.id, '--json'])
+      assert.equal(br.code, 0, `${tag}: ${br.stdout}`)
+      if (!attempt) assert.equal(json(br).assets.length, 1, tag)
+    }
+  } finally {
+    slow.close()
+  }
+})
+
+test('B4: a record while another record is still polling the same job exits 5, and the job gets one derivation', async () => {
+  const g = await newGrant('race')
+  const key = `mandate-${'7'.repeat(32)}`
+  const now = new Date().toISOString()
+  store().save({ key, idempotencyKey: key, status: 'submitted', jobId: 'mjob_race0001', mayHaveStarted: true, capability: 'talking-head', grantId: g.id, subject: g.subject, inputs: { image_url: mediaUrl('in.jpg') }, sourceUrl: null, estimateUsd: 0.84, estimateSource: 'static list price', priceUnit: 'second', createdAt: now, attempts: [{ n: 1, pid: 999_999_020, startedAt: now, sentAt: now, endedAt: now, status: 'submitted', jobId: 'mjob_race0001', mayHaveStarted: true }] })
+  const done = { structured: { status: 'done', url: mediaUrl('race-out.mp4'), cost_usd_estimated: 0.5 } }
+  const p0 = publishes(producer)
+  const polling = mandate(['record', '--pending', key, '--json'], { lp: { get_create_media: [{ ...done, delayMs: 2500 }] } })
+  await sleepMs(1000)
+  const second = await mandate(['record', '--pending', key, '--json'], { lp: { get_create_media: [done] } })
+  assert.equal(second.code, 5, second.stdout)
+  assert.equal(json(second).inFlight, true)
+  assert.deepEqual(second.calls, [])
+  const first = await polling
+  assert.equal(first.code, 0, first.stdout)
+  assert.equal(publishes(producer) - p0, 1)
+  assert.equal(store().load(key).status, 'recorded')
+  assert.equal(json(await mandate(['blast-radius', '--grant', g.id, '--json'])).assets.length, 1)
+})
+
+test('B4: a record while render --execute is still committing the same key exits 5 and publishes nothing', async () => {
+  // A subject no other test grants under, so the render decides under this grant and uses this key.
+  const g = await newGrant('rex-lease')
+  const key = keyFor(g.id)
+  const slow = await slowPublishProducer(4000)
+  try {
+    const p0 = publishes(producer)
+    const render = mandate(execArgs('rex-lease'), { lp: renderLp('rex-lease'), env: slow.env })
+    // The render holds the key while its derivation publish waits.
+    let ended = null
+    render.then(r => { ended = r })
+    for (let i = 0; i < 600 && !ended && store().load(key)?.derivationAttempt?.stage !== 'started'; i++) await sleepMs(50)
+    assert.equal(store().load(key)?.derivationAttempt?.stage, 'started', ended ? `the render ended first (exit ${ended.code}, key ${JSON.parse(ended.stdout || '{}').pending ?? 'none'}, expected ${key}): ${ended.stderr}` : `never reached the derivation publish: ${JSON.stringify(store().load(key))}`)
+    const record = await mandate(['record', '--pending', key, '--json'])
+    assert.equal(record.code, 5, record.stdout)
+    assert.equal(json(record).inFlight, true)
+    const r = await render
+    assert.equal(r.code, 0, r.stdout)
+    assert.equal(publishes(producer) - p0, 1)
+    // Once the render is done the key is free again.
+    const after = await mandate(['record', '--pending', key, '--json'])
+    assert.equal(after.code, 0, after.stdout)
+    assert.equal(publishes(producer) - p0, 1)
+  } finally {
+    slow.close()
+  }
+})
+
+test('B5: a rerun after a failed-confirmed record starts clean, so a possibly-billed rerun is never settled by the old job', async () => {
+  const g = await newGrant('mw6', { 'max-spend': '5' })
+  const key = keyFor(g.id)
+  const now = new Date().toISOString()
+  store().save({ key, idempotencyKey: key, status: 'submitted', jobId: 'mjob_mw6old001', mayHaveStarted: true, attempts: [{ n: 1, startedAt: now, pid: 999_999_021, idempotencyKey: key, sentAt: now, endedAt: now, status: 'submitted', jobId: 'mjob_mw6old001', mayHaveStarted: true }], createdAt: now, subject: g.subject, capability: 'talking-head', grantId: g.id, estimateUsd: 0.84, estimateSource: 'static list price', priceUnit: 'second', seconds: 5, inputs: { image_url: mediaUrl('in.jpg'), audio_url: mediaUrl('in.wav') } })
+  const failed = { get_create_media: { structured: { status: 'failed', error: 'model crashed' } } }
+  assert.equal((await mandate(['record', '--pending', key, '--json'], { lp: failed })).code, 5)
+  // The rerun's transport error: it may have started, and has no job id of its own.
+  const rerun = await mandate(execArgs('mw6'), { lp: renderLp('mw6', { 'run_capability:talking-head': { throw: 'fetch failed: other side closed' } }) })
+  assert.equal(rerun.code, 9, rerun.stdout)
+  assert.equal(json(rerun).jobId, null)
+  const rec = store().load(key)
+  assert.equal(rec.status, 'submitted')
+  assert.equal(rec.jobId ?? null, null)
+  assert.equal(rec.failedConfirmedAt, undefined)
+  assert.equal(rec.attempts.length, 2)
+  // The old outcome stays in the first attempt's history.
+  assert.equal(rec.attempts[0].settled.jobId, 'mjob_mw6old001')
+  assert.equal(rec.attempts[0].settled.jobStatus, 'failed')
+  // record never polls the old job: the outcome is unknown.
+  const again = await mandate(['record', '--pending', key, '--json'], { lp: failed })
+  assert.equal(again.code, 9, again.stdout)
+  assert.deepEqual(again.calls, [])
+  assert.equal(store().load(key).status, 'submitted')
+  // It keeps counting, and a different key is refused before anything is sent.
+  const other = await mandate(execArgs('mw6', { 'idempotency-key': 'brand-new-key-mw6' }), { lp: renderLp('mw6') })
+  assert.equal(other.code, 1, other.stdout)
+  assert.ok(!other.calls.some(x => x.name.startsWith('run_capability')))
+  const dry = await mandate(renderArgs({ subject: `${ANA}:mw6`, seconds: '1' }))
+  assert.equal(json(dry).localPending.length, 1)
+})
+
+test('B6: record --pending refuses before publishing when the producer node is not a trusted producer', async () => {
+  const g = await newGrant('mw5')
+  const stuck = stuckRender(g, 'mw5', {})
+  const rec = store().load(stuck.key); delete rec.derivationAttempt; store().save(rec)
+  const [p0, c0] = [publishes(producer), creates()]
+  const r = await mandate(['record', '--pending', stuck.key, '--json'], { env: { MANDATE_TRUSTED_PRODUCERS: STRANGER } })
+  assert.equal(r.code, 1, r.stdout)
+  assert.match(json(r).error, /not a trusted producer/)
+  assert.equal(json(r).mediaUrl, undefined)
+  assert.doesNotMatch(r.stdout, /out-mw5\.mp4/)
+  assert.equal(publishes(producer), p0)
+  assert.equal(creates(), c0)
+  const left = store().load(stuck.key)
+  assert.equal(left.status, 'rendered')
+  assert.equal(left.derivationAttempt, undefined)
+  // Under the configuration that trusts it, the same record goes through.
+  assert.equal((await mandate(['record', '--pending', stuck.key, '--json'])).code, 0)
+})
+
+test('MW7: a replay whose job id matches a recorded derivation but whose bytes differ is anchored for its own bytes', async () => {
+  const g = await newGrant('mw7', { 'max-spend': '50' })
+  const one = await mandate(execArgs('mw7'), { lp: renderLp('mw7', { 'run_capability:talking-head': { structured: { ok: true, status: 'done', job_id: 'mjob_mw7job0001', url: mediaUrl('out-mw7-a.mp4'), cost_usd_estimated: 0.84 } } }) })
+  assert.equal(one.code, 0, one.stdout)
+  const p0 = publishes(producer)
+  const two = await mandate(execArgs('mw7', { seconds: '6' }), { lp: renderLp('mw7', { 'run_capability:talking-head': { structured: { ok: true, status: 'done', job_id: 'mjob_mw7job0001', idempotency_replay: true, url: mediaUrl('out-mw7-b.mp4'), cost_usd_estimated: 0.84 } } }) })
+  assert.equal(two.code, 0, two.stdout)
+  assert.notEqual(json(two).derivation.existing, true)
+  assert.equal(json(two).derivation.outputSha256, sha('bytes of /out-mw7-b.mp4'))
+  assert.equal(publishes(producer), p0 + 1)
+  const v = await mandate(['verify', '--url', mediaUrl('out-mw7-b.mp4'), '--json'])
+  assert.equal(json(v).verdict, 'CLEAR', v.stdout)
+  // The recorded bytes under another job id: not taken as that job's record either.
+  const three = await mandate(execArgs('mw7', { seconds: '7' }), { lp: renderLp('mw7', { 'run_capability:talking-head': { structured: { ok: true, status: 'done', job_id: 'mjob_mw7job0002', idempotency_replay: true, url: mediaUrl('out-mw7-a.mp4'), cost_usd_estimated: 0.84 } } }) })
+  assert.equal(three.code, 0, three.stdout)
+  assert.notEqual(json(three).derivation.existing, true)
+  assert.equal(publishes(producer), p0 + 2)
+  // The same job and the same bytes: the existing record, nothing published.
+  const four = await mandate(execArgs('mw7', { seconds: '8' }), { lp: renderLp('mw7', { 'run_capability:talking-head': { structured: { ok: true, status: 'done', job_id: 'mjob_mw7job0001', idempotency_replay: true, url: mediaUrl('out-mw7-a.mp4') } } }) })
+  assert.equal(four.code, 0, four.stdout)
+  assert.equal(json(four).derivation.existing, true)
+  assert.equal(publishes(producer), p0 + 2)
+})
+
+test('revoke publishes an anchored revocation when the only one it sees is a row in its own merged view', async () => {
+  const g = json(await mandate(grantArgs({ subject: 'ctx' }))).grant
+  const stateId = 'urn:mandate:state:00000000000000cf'
+  world[GRANTS_CG].graphs = [...(world[GRANTS_CG].graphs ?? []), { graph: `${cgIri(GRANTS_CG)}/context/1`, rows: [{ s: stateId, p: V.stateOf, o: g.id }, { s: stateId, p: V.state, o: '"revoked"' }] }]
+  const before = publishes(grantor)
+  const r = await mandate(['revoke', '--id', g.id, '--yes'])
+  assert.equal(r.code, 0, r.stdout + r.stderr)
+  assert.match(r.stdout, /only in .*merged view/)
+  assert.match(r.stdout, /REVOKED/)
+  assert.equal(publishes(grantor), before + 1)
+  // Now anchored: a second revoke publishes nothing.
+  const again = await mandate(['revoke', '--id', g.id, '--yes', '--json'])
+  assert.equal(json(again).alreadyRevoked, true)
+  assert.equal(publishes(grantor), before + 1)
+})
+
+test('under a ceiling, a per-second estimate says it relies on --seconds', async () => {
+  await newGrant('sec', { 'max-spend': '5' })
+  const r = await mandate(renderArgs({ subject: `${ANA}:sec`, json: null }))
+  assert.equal(r.code, 0, r.stdout)
+  assert.match(r.stdout, /per second × --seconds 5, which is taken as given: it is not sent to Livepeer/)
+  assert.match(json(await mandate(renderArgs({ subject: `${ANA}:sec` }))).price.note, /--seconds/)
+  // No ceiling: no such note.
+  await newGrant('sen', { 'max-spend': null })
+  assert.equal(json(await mandate(renderArgs({ subject: `${ANA}:sen` }))).price.note, undefined)
+})
+
+test('B7: a .env in the working directory is never read; the env file comes from --env-path, MANDATE_ENV_FILE or $MANDATE_HOME', async () => {
+  const cwdEnv = join(work, '.env')
+  writeFileSync(cwdEnv, `MANDATE_TRUSTED_PRODUCERS=${STRANGER}\nMANDATE_CHECK_FRESHNESS=0\nMANDATE_VERIFIER_PORT=9\n`)
+  const homeEnv = join(work, '.mandate', '.env')
+  try {
+    // Ignored: verify still trusts the configured producer, checks freshness, and says no env file was loaded.
+    const v = await mandate(['verify', '--sha256', 'c'.repeat(64), '--json'])
+    assert.equal(json(v).config.envFile, null)
+    assert.equal(json(v).config.envFileSearched, homeEnv)
+    assert.deepEqual(json(v).config.trustedProducers, [PRODUCER])
+    assert.equal(json(v).config.checkFreshness, true)
+    assert.equal(json(v).nodeRole, 'grantor')
+    assert.doesNotMatch(v.stderr, /FRESHNESS CHECK OFF/)
+    const text = await mandate(['verify', '--sha256', 'c'.repeat(64)])
+    assert.match(text.stdout, /env file\s+none \(looked for .*\.mandate\/\.env; a \.env in the working directory is never read\)/)
+    assert.match(text.stdout, new RegExp(`trusted producers\\s+${PRODUCER}`))
+
+    // $MANDATE_HOME/.env is read, and status says so, with a visible freshness warning.
+    writeFileSync(homeEnv, `MANDATE_TRUSTED_PRODUCERS=${STRANGER}\nMANDATE_CHECK_FRESHNESS=0\n`, { mode: 0o600 })
+    const s = await mandate(['status'])
+    assert.match(s.stdout, new RegExp(`env file\\s+${homeEnv.replace(/[.]/g, '\\.')} \\(MANDATE_HOME; 2 key\\(s\\) set from it`))
+    assert.match(s.stdout, new RegExp(`trusted producers\\s+${STRANGER}`))
+    assert.match(s.stdout, /FRESHNESS CHECK OFF/)
+    const sj = await mandate(['status', '--json'])
+    assert.equal(json(sj).config.envFile, homeEnv)
+    assert.equal(json(sj).config.checkFreshness, false)
+    assert.match(sj.stderr, /FRESHNESS CHECK OFF/)
+    rmSync(homeEnv)
+
+    // --env-path and MANDATE_ENV_FILE name one explicitly; the flag wins; the real environment wins over both.
+    const named = join(work, 'named.env')
+    writeFileSync(named, `MANDATE_TRUSTED_PRODUCERS=${ANA}\n`, { mode: 0o600 })
+    const flagged = await mandate(['verify', '--sha256', 'c'.repeat(64), '--json', '--env-path', named], { env: { MANDATE_ENV_FILE: cwdEnv } })
+    assert.equal(json(flagged).config.envFile, named)
+    assert.deepEqual(json(flagged).config.trustedProducers, [ANA])
+    const byVar = await mandate(['verify', '--sha256', 'c'.repeat(64), '--json'], { env: { MANDATE_ENV_FILE: named } })
+    assert.equal(json(byVar).config.envFileSource, 'MANDATE_ENV_FILE')
+    const real = await mandate(['verify', '--sha256', 'c'.repeat(64), '--json', '--env-path', named], { env: { MANDATE_TRUSTED_PRODUCERS: PRODUCER } })
+    assert.deepEqual(json(real).config.trustedProducers, [PRODUCER])
+    // An explicitly named file that is missing is a configuration error.
+    const missing = await mandate(['status', '--json', '--env-path', join(work, 'nope.env')])
+    assert.equal(missing.code, 1)
+    assert.match(json(missing).error, /nope\.env .*cannot be read/)
+    // --env-file is Node's own flag (it applies a NODE_OPTIONS from the file even after the script name): refused, pointing at --env-path.
+    const nodeFlag = await mandate(['status', '--json', '--env-file', named])
+    assert.equal(nodeFlag.code, 1)
+    assert.match(nodeFlag.stderr, /--env-path/)
+    // A file others can write to is loaded with a warning.
+    writeFileSync(named, `MANDATE_TRUSTED_PRODUCERS=${ANA}\n`)
+    chmodSync(named, 0o666)
+    const loose = await mandate(['status', '--json', '--env-path', named])
+    assert.match(loose.stderr, /world-writable/)
+    chmodSync(named, 0o620)
+    assert.match((await mandate(['status', '--json', '--env-path', named])).stderr, /group-writable/)
+  } finally {
+    rmSync(cwdEnv, { force: true })
+    rmSync(homeEnv, { force: true })
+  }
+})
+
+test('B7: the scripts read the same env file, never a working-directory .env, and the demo passes the repository\'s explicitly', async () => {
+  const dir = mkdtempSync(join(work, 'scripts-env-'))
+  const repo = new URL('..', import.meta.url).pathname
+  writeFileSync(join(dir, '.env'), 'MANDATE_GRANTOR_HOME=/nonexistent/cwd\nNODE_TLS_REJECT_UNAUTHORIZED=0\n')
+  const run = (script, args, env = {}) => new Promise(resolve => {
+    const child = spawn(process.execPath, [join(repo, script), ...args], { cwd: dir, env: { PATH: process.env.PATH, HOME: dir, ...env } })
+    let stdout = ''
+    let stderr = ''
+    child.stdout.on('data', d => { stdout += d })
+    child.stderr.on('data', d => { stderr += d })
+    child.on('close', code => resolve({ code, stdout, stderr }))
+  })
+  // nodes.mjs init writes the grantor's config under the home it was configured with.
+  const home = join(dir, 'dkg-home')
+  const named = join(dir, 'named.env')
+  writeFileSync(named, `MANDATE_GRANTOR_HOME=${home}\n`, { mode: 0o600 })
+  const cwdOnly = await run('scripts/nodes.mjs', ['init', 'grantor'])
+  assert.equal(cwdOnly.code, 0, cwdOnly.stderr)
+  assert.equal(existsSync('/nonexistent/cwd/config.json'), false)
+  assert.ok(existsSync(join(dir, '.dkg-mandate-grantor', 'config.json')), 'the default home, not the cwd .env one')
+  const flagged = await run('scripts/nodes.mjs', ['init', 'grantor', '--env-path', named])
+  assert.equal(flagged.code, 0, flagged.stderr)
+  assert.ok(existsSync(join(home, 'config.json')))
+  assert.equal((await run('scripts/nodes.mjs', ['init', 'grantor', '--env-path', join(dir, 'missing.env')])).code, 1)
+  const nodeFlag = await run('scripts/nodes.mjs', ['init', 'grantor', '--env-file', named])
+  assert.equal(nodeFlag.code, 1)
+  assert.match(nodeFlag.stderr, /--env-path/)
+
+  // publish-skill: a dry run that never reads the cwd .env, and reads a named one.
+  mkdirSync(join(dir, 'skills'))
+  writeFileSync(join(dir, 'skills', 'likeness-consent.md'), readFileSync(join(repo, 'skills', 'likeness-consent.md')))
+  const dry = await run('scripts/publish-skill.mjs', [])
+  assert.equal(dry.code, 0, dry.stdout + dry.stderr)
+  assert.match(dry.stdout, /env file: none/)
+  assert.doesNotMatch(dry.stdout, /NODE_TLS_REJECT_UNAUTHORIZED/)
+  writeFileSync(named, 'NODE_TLS_REJECT_UNAUTHORIZED=0\nMANDATE_READ_MAX=10\n', { mode: 0o600 })
+  const withFile = await run('scripts/publish-skill.mjs', ['--env-path', named])
+  assert.equal(withFile.code, 0, withFile.stdout + withFile.stderr)
+  assert.match(withFile.stdout, /^\.env: ignored NODE_TLS_REJECT_UNAUTHORIZED \(only MANDATE_\* and LIVEPEER_AGENT_KEY are read\)$/m)
+
+  // The demo hands every command the repository's own env file.
+  assert.equal(DEMO_ENV_FILE, join(repo, '.env'))
+  const argvOf = cliArgv(['verify', '--url', 'https://x.test/a.mp4'])
+  assert.deepEqual(argvOf.slice(-3), ['--env-path', join(repo, '.env'), '--json'])
+  assert.equal(argvOf[0], join(repo, 'bin', 'mandate.mjs'))
+  assert.deepEqual(nodesArgv(['sync', 'verifier']).slice(-2), ['--env-path', join(repo, '.env')])
+  const demo = readFileSync(join(repo, 'demo', 'full.mjs'), 'utf8')
+  assert.match(demo, /spawn\(process\.execPath, cliArgv\(args, opt\['env-path'\]\)/)
+  assert.match(demo, /spawn\(process\.execPath, nodesArgv\(\['sync', role\], opt\['env-path'\]\)/)
+  // .env.example says where the file is read from.
+  const example = readFileSync(join(repo, '.env.example'), 'utf8')
+  assert.match(example, /--env-path/)
+  assert.match(example, /~\/\.mandate\/\.env/)
+  assert.match(example, /working directory is NEVER read/)
+})
+
+test('B7: publish-ontology and every spike that reads bin/config.mjs load the CLI\'s env file, never a working-directory .env', async () => {
+  const dir = mkdtempSync(join(work, 'ontology-env-'))
+  const repo = new URL('..', import.meta.url).pathname
+  mkdirSync(join(dir, 'vocab'))
+  writeFileSync(join(dir, 'vocab', 'mandate.ttl'), readFileSync(join(repo, 'vocab', 'mandate.ttl')))
+  writeFileSync(join(dir, '.env'), 'MANDATE_GRANTOR_PORT=1\n')
+  const named = join(dir, 'named.env')
+  writeFileSync(named, 'MANDATE_GRANTOR_PORT=2\nNODE_OPTIONS=--require=/nonexistent\n', { mode: 0o600 })
+  const run = args => new Promise(resolve => {
+    const child = spawn(process.execPath, [join(repo, 'scripts', 'publish-ontology.mjs'), ...args], { cwd: dir, env: { PATH: process.env.PATH, HOME: dir } })
+    let stdout = ''
+    let stderr = ''
+    child.stdout.on('data', d => { stdout += d })
+    child.stderr.on('data', d => { stderr += d })
+    child.on('close', code => resolve({ code, stdout, stderr }))
+  })
+  const plain = await run([])
+  assert.equal(plain.code, 0, plain.stderr)
+  assert.match(plain.stdout, /^env file: none \(looked for .*\.mandate\/\.env\)$/m)
+  const flagged = await run(['--env-path', named])
+  assert.equal(flagged.code, 0, flagged.stderr)
+  assert.match(flagged.stdout, new RegExp(`^env file: ${named.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'm'))
+  assert.match(flagged.stdout, /^vocab \d+\.\d+\.\d+: \d+ triples$/m)
+  const missing = await run(['--env-path', join(dir, 'missing.env')])
+  assert.equal(missing.code, 1)
+  assert.match(missing.stderr, /cannot be read/)
+  // Nothing imports bin/config.mjs's node settings without first loading the env file.
+  for (const f of ['scripts/publish-ontology.mjs', 'spikes/s6-author-attestation.mjs', 'spikes/s6b-forge-authorship.mjs', 'spikes/s6c-forgery.mjs']) {
+    const src = readFileSync(join(repo, f), 'utf8')
+    assert.match(src, /^(?:const envFile = )?loadScriptEnv\(\)$/m, f)
+  }
+  assert.match(readFileSync(join(repo, 'spikes/s6c-forgery.mjs'), 'utf8'), /\.\.\.\(envFile\.path \? \['--env-path', envFile\.path\] : \[\]\)/)
 })

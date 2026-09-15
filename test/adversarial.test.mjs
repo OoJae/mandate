@@ -65,11 +65,11 @@ function cliTable(rows) {
  * configuration. Both apply to the current implementation only: v0.1.0 read a
  * CLI table and had neither, so cases using them also carry an attack it gets wrong.
  */
-async function knowledge(kas, scope, { drop, rowOrder = rows => rows, fault = node => node, cfg = {} } = {}) {
+async function knowledge(kas, scope, { drop, rowOrder = rows => rows, fault = node => node, cfg = {}, mergedView } = {}) {
   if (CURRENT) {
     const world = {}
     for (const k of kas) (world[cgOf(k)] ??= { kas: [] }).kas.push(k)
-    const node = fault(new FakeNode({ world, drop: drop ? q => q.graph !== undefined && drop(q.graph) : undefined }))
+    const node = fault(new FakeNode({ world, drop: drop ? q => q.graph !== undefined && drop(q.graph) : undefined, mergedView }))
     return resolver.readKnowledge(node, { grantsCg: GRANTS_CG, derivationsCgs: [DERIVS_CG], sleep: async () => {}, attempts: 2, ...cfg }, scope)
   }
   const node = {
@@ -141,7 +141,9 @@ test('SEC-2: a grant for Ana published by the producer gets no permit and no CLE
 test('SEC-3: a stranger\'s far-future "revoked" naming Ana cannot block a live grant', async () => {
   const g = grant()
   const grief = ka({ cg: GRANTS_CG, publisher: STRANGER, quads: state('urn:mandate:state:00000000000000f3', g.id, 'revoked', ANA, '9999-12-31T00:00:00Z') })
-  assert.equal((await render([grantKa(g), grief])).permit, true)
+  // A live node materialises merged views only for data it published itself, so a
+  // stranger's state reaches the gate's node with no merged-view copy.
+  assert.equal((await render([grantKa(g), grief], req(), { mergedView: false })).permit, true)
 })
 
 /* -------------------------------------------------------------------------- */
@@ -303,6 +305,17 @@ test('R4: Ana\'s own revocation whose stateOf is a literal refuses as an unreada
   const g = grant()
   const kas = [grantKa(g), ownRevocation(g.id, setP(V.stateOf, `"${g.id}"`)), forgedActive(g.id), derivationKa(edgeFor(g.id))]
   assert.equal((await render(kas)).permit, false)
+  assert.notEqual((await verify(kas)).verdict, verifier.CLEAR)
+})
+
+test('R4: Ana\'s own untyped statement whose stateOf is a literal refuses as an unreadable read', async () => {
+  const g = grant()
+  const id = 'urn:mandate:state:00000000000009c2'
+  const untyped = ka({ cg: GRANTS_CG, publisher: ANA, quads: raw(id, [[V.stateOf, `"${g.id}"`], [V.state, '"revoked"'], [V.stateAuthor, did(ANA)]]) })
+  const kas = [grantKa(g), untyped, forgedActive(g.id), derivationKa(edgeFor(g.id))]
+  const d = await render(kas)
+  assert.equal(d.permit, false)
+  if (CURRENT) assert.equal(d.clause, 'read-inconsistent')
   assert.notEqual((await verify(kas)).verdict, verifier.CLEAR)
 })
 
@@ -518,4 +531,46 @@ test('R19: a mis-cased derivations graph id on a node that cannot list subscript
   const d = await render(kas, req({ estimatedUsd: 1 }), { fault, cfg: { derivationsCgs: [DERIVS_CG.toLowerCase()], trustedProducers: [PRODUCER], checkFreshness: true } })
   assert.equal(d.permit, false)
   if (CURRENT) assert.equal(d.clause, 'read-inconsistent')
+})
+
+/* -------------------------------------------------------------------------- */
+/* D6 — cancelling a merged-view-only revocation with a borrowed subject IRI  */
+/* -------------------------------------------------------------------------- */
+
+const ORPHAN = 'urn:mandate:state:00000000000009b9'
+/** This node's merged view holds a revocation of `grantId` under ORPHAN, with no Verifiable Memory copy anywhere. */
+const orphanView = grantId => node => Object.assign(node, { world: { ...node.world, [GRANTS_CG]: { ...node.world[GRANTS_CG],
+  graphs: [{ graph: `did:dkg:context-graph:${GRANTS_CG}/context/9`, rows: [{ s: ORPHAN, p: V.stateOf, o: grantId }, { s: ORPHAN, p: V.state, o: '"revoked"' }] }] } } })
+
+test('D6: a stranger\'s Verifiable Memory state reusing the subject IRI does not cancel a merged-view-only revocation', async () => {
+  const g = grant()
+  // v0.1.0 reads no merged view: it has only the producer's forged "active" to get wrong.
+  const base = [grantKa(g), forgedActive(g.id), derivationKa(edgeFor(g.id))]
+  if (CURRENT) assert.equal((await render(base, req(), { fault: orphanView(g.id) })).clause, 'not-revoked', 'precondition: the view alone refuses')
+  for (const value of ['active', 'revoked']) {
+    const borrowed = ka({ cg: GRANTS_CG, publisher: STRANGER, quads: state(ORPHAN, g.id, value, STRANGER, '2026-09-13T11:00:00Z') })
+    const d = await render([...base, borrowed], req(), { fault: orphanView(g.id) })
+    assert.equal(d.permit, false, value)
+    if (CURRENT) assert.equal(d.clause, 'not-revoked', value)
+    assert.notEqual((await verify([...base, borrowed], SHA, NOW, { fault: orphanView(g.id) })).verdict, verifier.CLEAR, value)
+  }
+})
+
+test('D6: a trusted producer\'s misplaced state reusing the subject IRI does not cancel a merged-view-only revocation', async () => {
+  const g = grant()
+  const borrowed = ka({ cg: DERIVS_CG, publisher: PRODUCER, quads: state(ORPHAN, g.id, 'active', ANA, '2026-09-13T11:00:00Z') })
+  const d = await render([grantKa(g), forgedActive(g.id), borrowed], req(), { fault: orphanView(g.id) })
+  assert.equal(d.permit, false)
+  if (CURRENT) assert.equal(d.clause, 'not-revoked')
+})
+
+test('D6: another grantor\'s own state reusing the subject IRI does not cancel a merged-view-only revocation', async () => {
+  const g = grant()
+  const sams = grant({ owner: STRANGER, local: 'sam' })
+  // Sam's own, genuine state about Sam's own grant, under the same IRI as the view row about Ana's grant.
+  const samState = ka({ cg: GRANTS_CG, publisher: STRANGER, quads: state(ORPHAN, sams.id, 'active', STRANGER, '2026-09-13T11:00:00Z') })
+  const kas = [grantKa(g), grantKa(sams, { publisher: STRANGER }), samState, forgedActive(g.id),
+    derivationKa(edgeFor(g.id)), derivationKa(edgeFor(sams.id))]
+  const v = await verify(kas, SHA, NOW, { fault: orphanView(g.id) })
+  assert.equal(v.verdict, verifier.TAINTED)
 })

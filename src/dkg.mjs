@@ -13,8 +13,8 @@
  */
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { asIri, asString } from './rdf-term.mjs'
-import { DKG, metaForUalsQuery, vmPrefix } from './queries.mjs'
+import { asIri, asString, asInteger, agentAddress } from './rdf-term.mjs'
+import { DKG, PROV_ATTRIBUTED, metaForUalsQuery, vmPrefix } from './queries.mjs'
 import { anchorsFromMeta } from './provenance.mjs'
 
 export class DkgHttpError extends Error {
@@ -34,6 +34,36 @@ export class ReadTruncatedError extends Error {}
 
 /** An anchor could not be read at all, as opposed to read and found wanting. */
 class AnchorUnreadableError extends Error {}
+
+/**
+ * The _meta answer holds nothing that contradicts the UAL, but not yet a
+ * confirmed anchor either: no rows for it, a missing field, or a lone
+ * "tentative" status. v10.0.16 leaves whole named graphs out of query answers,
+ * and a named asset reads tentative until it confirms, so a later read may
+ * show the anchor. A contradiction (two values, a foreign graph or
+ * attribution, another status) is a plain Error instead.
+ */
+class AnchorNotVisibleError extends Error {}
+
+/**
+ * Do these _meta rows about one UAL say something against it, rather than only
+ * leave something out? More than one value where there must be exactly one, a
+ * status other than confirmed or tentative, another assertion graph, a foreign
+ * attribution, an unreadable triple count, or a merkle root other than the one
+ * sealed.
+ */
+function contradicts(rows, { publisher, expectedGraph, merkleRoot }) {
+  const values = p => rows.filter(r => asIri(r.p) === p).map(r => r.o)
+  const statuses = values(`${DKG}status`).map(asString)
+  const graphs = values(`${DKG}assertionGraph`).map(asIri)
+  const counts = values(`${DKG}publicTripleCount`).map(asInteger)
+  const roots = values(`${DKG}merkleRoot`).map(v => bareHex(asString(v)))
+  return statuses.length > 1 || (statuses.length === 1 && statuses[0] !== 'confirmed' && statuses[0] !== 'tentative')
+    || graphs.length > 1 || (graphs.length === 1 && graphs[0] !== expectedGraph)
+    || values(PROV_ATTRIBUTED).map(asIri).some(a => agentAddress(a) !== publisher)
+    || counts.length > 1 || (counts.length === 1 && !Number.isFinite(counts[0]))
+    || roots.length > 1 || (Boolean(merkleRoot) && roots.length === 1 && roots[0] !== bareHex(merkleRoot))
+}
 
 /**
  * A response body was larger than the client allows. It extends
@@ -369,7 +399,9 @@ export class DkgNode {
       } catch (e) {
         // A read that failed says nothing about the asset; refusing for good
         // would strand a derivation that is really anchored.
-        if (e instanceof AnchorUnreadableError) unverified(e.message)
+        // Nor does an anchor the answer does not show yet: the vm-confirmed path
+        // never publishes, so waiting for a later read costs no safety.
+        if (e instanceof AnchorUnreadableError || e instanceof AnchorNotVisibleError) unverified(e.message)
         refuse(e.message)
       }
       return { name, ual: anchor.ual, txHash: null, resumed: true }
@@ -406,9 +438,16 @@ export class DkgNode {
     try {
       published = await this.request('POST', publishPath, { contextGraphId }, { okStatuses: [200, 207], timeoutMs: Math.max(this.timeoutMs, 480000) })
     } catch (e) {
-      // The node's vm/publish route answers 4xx only for caller preconditions
-      // it checks before any chain interaction (unshared or unsealed asset,
-      // author selection, pricing policy, no funded wallet). Everything else —
+      // The node's vm/publish route never answers 4xx after a successful mint:
+      // most 4xx are caller preconditions it checks before any chain interaction
+      // (unshared or unsealed asset, author selection, pricing policy). Two can
+      // follow a transaction that cost gas but minted nothing: 400
+      // NO_FUNDED_PUBLISHER_WALLET after a TRAC approve and a reverted publish,
+      // and a 400 after a context-graph auto-registration transaction. So a 4xx
+      // is reported as stage publish (republishing cannot mint twice), not as
+      // proof that no gas was spent. Only an HTTP answer that was read counts:
+      // an unread 4xx body (too large) is reconciled like any lost answer.
+      // Everything else —
       // a plain 500 for reverts and errors thrown after createKnowledgeAssets
       // returned, 502 for a publish that did not confirm, 503/504 for a lost
       // chain connection, status 0 or an unreadable body — can follow a
@@ -422,11 +461,25 @@ export class DkgNode {
       throw new DkgWriteError(`asset ${name} was minted on-chain but not bound to ${contextGraphId}: ${b.contextGraphError ?? b.error ?? 'unknown error'}`,
         { name, stage: 'unbound', status: 207, body: b, ual: b.ual ?? null, txHash: b.txHash ?? null, mayHaveSent: true })
     }
-    if (b.status !== 'confirmed' || !b.ual) {
+    if (b.status !== 'confirmed') {
       // The node sends 200 only for a confirmed publish, so a 200 saying
-      // anything else (or nothing parseable) is an answer nobody can read:
+      // anything else (or nothing parseable) is an answer nobody can read
+      // (a confirmed answer with no UAL is caught by the UAL check below):
       // treat it like a lost response rather than as proof nothing was sent.
       const e = new DkgHttpError(`${this.name} POST ${publishPath} -> ${published.status}: publish returned status ${b.status ?? 'unknown'}`,
+        { status: published.status, path: publishPath, body: published.body })
+      return this.#reconcileLost(name, contextGraphId, sealed, e)
+    }
+    // A confirmed answer is held to the same local checks as a reconciled one: a
+    // chain-confirmed UAL (never a tentative /t<opId> one) published by the
+    // sealing author, and, when it reports one, the merkle root that was sealed.
+    const m = typeof b.ual === 'string' ? b.ual.match(CONFIRMED_UAL) : null
+    const wrong = !m ? `publish returned UAL ${JSON.stringify(b.ual)}, which is not a chain-confirmed UAL`
+      : authorAddress && m[1].toLowerCase() !== authorAddress ? `publish returned UAL ${b.ual}, which was not published by ${authorAddress}`
+        : b.merkleRoot !== undefined && b.merkleRoot !== null && bareHex(b.merkleRoot) !== bareHex(merkleRoot)
+          ? `publish returned merkle root ${JSON.stringify(b.merkleRoot)}, not the one sealed (${merkleRoot})` : null
+    if (wrong) {
+      const e = new DkgHttpError(`${this.name} POST ${publishPath} -> ${published.status}: ${wrong}`,
         { status: published.status, path: publishPath, body: published.body })
       return this.#reconcileLost(name, contextGraphId, sealed, e)
     }
@@ -500,7 +553,8 @@ export class DkgNode {
     const anchor = anchors.get(expectedGraph)
     if (!anchor) {
       const problem = problems.find(p => p.ual === ual)
-      throw new Error(problem ? `the anchor for ${ual} is not acceptable: ${problem.reason}` : `no anchor for ${ual} in the graph's _meta`)
+      const message = problem ? `the anchor for ${ual} is not acceptable: ${problem.reason}` : `no anchor for ${ual} in the graph's _meta`
+      throw new (contradicts(own, { publisher, expectedGraph, merkleRoot }) ? Error : AnchorNotVisibleError)(message)
     }
     // _meta also records the root that was minted, and the query above asks for
     // it. A node that does not write it (none seen live) leaves the check out;
