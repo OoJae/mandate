@@ -535,7 +535,7 @@
     { "id": "fetch-bytes-deadline-per-attempt", "file": "src/fetch-bytes.mjs", "guard": "one deadline: a connection that drops late is retried only for what is left of it",
       "find": "      return await hashOnce(u, { maxBytes, budget, deadline, fetch, now })", "replace": "      return await hashOnce(u, { maxBytes, budget, deadline: now() + timeoutMs, fetch, now })" },
     { "id": "fetch-bytes-deadline-break", "file": "src/fetch-bytes.mjs", "guard": "one deadline: a connection that drops late is retried only for what is left of it",
-      "find": "if (now() >= deadline) break", "replace": "" },
+      "find": "if (e?.timedOut === true || now() >= deadline) break", "replace": "" },
     { "id": "fetch-bytes-declared-vs-budget", "file": "src/fetch-bytes.mjs", "guard": "a retry whose declared size is more than the budget left is refused before reading",
       "find": "declared > Math.min(maxBytes, budget.left)", "replace": "declared > maxBytes" },
     { "id": "pending-protected-overwrite", "file": "src/pending.mjs", "guard": "a rerun cannot overwrite a submitted, rendered or recorded record",

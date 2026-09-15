@@ -625,3 +625,23 @@ test('ci: the namespace documents check fails on a modified or untracked file, a
     rmSync(dir, { recursive: true, force: true })
   }
 })
+
+// A refactor that moves a guard must update its entry: a stale entry fails the CI
+// mutation shard that holds it, so catch it here, before a push.
+test('every mutation entry names a file that exists and a find string that occurs there exactly once, with unique ids', () => {
+  const root = new URL('..', import.meta.url)
+  const { mutants } = JSON.parse(readFileSync(new URL('scripts/mutations.json', root), 'utf8'))
+  const ids = new Set()
+  const problems = []
+  for (const m of mutants) {
+    if (ids.has(m.id)) problems.push(`${m.id}: duplicate id`)
+    ids.add(m.id)
+    const file = new URL(m.file, root)
+    if (!existsSync(file)) { problems.push(`${m.id}: ${m.file} does not exist`); continue }
+    const text = readFileSync(file, 'utf8')
+    const count = text.split(m.find).length - 1
+    if (count !== 1) problems.push(`${m.id}: find string occurs ${count} times in ${m.file}`)
+    if (m.find === m.replace) problems.push(`${m.id}: replace equals find`)
+  }
+  assert.deepEqual(problems, [])
+})
